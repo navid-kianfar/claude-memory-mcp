@@ -41,6 +41,10 @@ def load_project_from_folder(path: str) -> dict:
 
     project = attach["project"]
     project_slug = project["slug"]
+
+    # Bind the project to this folder so its memory git-syncs from here.
+    container.project_repo.update_project_path(project_slug, str(folder))
+    project["project_path"] = str(folder)
     result: dict = {
         "status": "ok",
         "project": project,

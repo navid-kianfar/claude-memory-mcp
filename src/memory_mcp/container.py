@@ -12,7 +12,7 @@ from memory_mcp.services import (
     MemoryService, SearchService, RulesService, RulesCache,
     SessionService, ProjectService, PortableService,
     ExportImportService, ModelService, UpdateService, ClaudeMdService,
-    TemplateService,
+    TemplateService, SyncService,
 )
 
 
@@ -50,6 +50,7 @@ class Container:
         self.update_service = UpdateService()
         self.claude_md_service = ClaudeMdService(self.memory_service)
         self.template_service = TemplateService(self.template_repo, self.memory_service)
+        self.sync_service = SyncService(self.memory_repo, self.project_repo)
 
 
 # Module-level singleton

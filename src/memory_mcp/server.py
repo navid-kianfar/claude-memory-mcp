@@ -121,10 +121,17 @@ def memory_init_project(
     display_name: str,
     description: str | None = None,
     set_active: bool = True,
+    project_path: str | None = None,
 ) -> dict:
-    """Initialize a new project namespace (creates DuckDB + registers it)."""
+    """Initialize a new project namespace (creates DuckDB + registers it).
+
+    Pass project_path (the project's source folder) to enable git-synced
+    memory: rules/decisions mirror to <project_path>/.claude-memory/.
+    """
     def _run():
-        project = container.project_service.init_project(slug, display_name, description)
+        project = container.project_service.init_project(
+            slug, display_name, description, project_path,
+        )
         result = {"status": "ok", "project": project.model_dump(mode="json")}
         if set_active:
             set_active_project(project.slug)
@@ -145,6 +152,21 @@ def memory_load_from_folder(path: str) -> dict:
     def _run():
         from memory_mcp.folder_import import load_project_from_folder
         return load_project_from_folder(path)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_link_folder(path: str, project: str | None = None) -> dict:
+    """Bind a project to a source folder for git-synced memory.
+
+    Once linked, the project's rules/decisions mirror to a committable
+    <path>/.claude-memory/ snapshot - so memory travels with the code across
+    devices and teammates via git push/pull.
+    """
+    def _run():
+        slug = _resolve(project)
+        info = container.project_service.link_folder(slug, path)
+        return {"status": "ok", "project": info.model_dump(mode="json")}
     return _safe(_run)
 
 

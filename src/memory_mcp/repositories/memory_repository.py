@@ -202,6 +202,19 @@ class MemoryRepository:
 
         return [_row_to_memory(r) for r in rows], total
 
+    def all_for_categories(self, project: str, categories: list[str]) -> list[Memory]:
+        """Every memory in the given categories, any status. Used for sync export."""
+        if not categories:
+            return []
+        placeholders = ",".join("?" * len(categories))
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"SELECT {MEMORY_COLUMNS} FROM memories "
+                f"WHERE category IN ({placeholders}) ORDER BY id",
+                categories,
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
     def vector_search(
         self, project: str, query_embedding: list[float], status: str, limit: int
     ) -> list[tuple[Memory, float]]:

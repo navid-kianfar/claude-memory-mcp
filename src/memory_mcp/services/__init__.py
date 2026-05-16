@@ -11,6 +11,7 @@ from memory_mcp.services.model_service import ModelService
 from memory_mcp.services.update_service import UpdateService
 from memory_mcp.services.claude_md_service import ClaudeMdService
 from memory_mcp.services.template_service import TemplateService
+from memory_mcp.services.sync_service import SyncService
 
 __all__ = [
     "MemoryService",
@@ -25,4 +26,5 @@ __all__ = [
     "UpdateService",
     "ClaudeMdService",
     "TemplateService",
+    "SyncService",
 ]

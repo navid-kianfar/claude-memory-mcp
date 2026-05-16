@@ -75,19 +75,29 @@ def get_active_project(cwd: str | None = None) -> str | None:
 
 
 def _slug_from_path(path: Path) -> str | None:
-    """Try to find a registered project matching this path."""
+    """Find a registered project matching this directory.
+
+    Priority: an explicit project_path (the folder a project is bound to,
+    exact or an ancestor of cwd) wins; then a portable DB inside the folder;
+    then a folder name that equals the slug.
+    """
     from memory_mcp.repositories import ProjectRepository
     from memory_mcp.utils.text import slugify
 
-    dir_name = path.name
-    dir_slug = slugify(dir_name)
+    dir_slug = slugify(path.name)
 
     try:
         projects = ProjectRepository().list_all()
         for p in projects:
-            if p.slug == dir_slug:
-                return p.slug
+            if p.project_path:
+                bound = Path(p.project_path).resolve()
+                if path == bound or bound in path.parents:
+                    return p.slug
+        for p in projects:
             if p.db_path and path.as_posix() in p.db_path:
+                return p.slug
+        for p in projects:
+            if p.slug == dir_slug:
                 return p.slug
     except Exception:
         pass

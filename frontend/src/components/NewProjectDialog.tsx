@@ -69,6 +69,7 @@ export function NewProjectDialog({
   const [slug, setSlug] = useState("");
   const [slugTouched, setSlugTouched] = useState(false);
   const [description, setDescription] = useState("");
+  const [projectPath, setProjectPath] = useState("");
 
   // folder-load form
   const [folderPath, setFolderPath] = useState("");
@@ -88,6 +89,7 @@ export function NewProjectDialog({
       setSlug("");
       setSlugTouched(false);
       setDescription("");
+      setProjectPath("");
       setFolderPath("");
       setLoadingFolder(false);
       setFolderError(null);
@@ -111,6 +113,7 @@ export function NewProjectDialog({
       slug: slug.trim(),
       display_name: displayName.trim(),
       description: description.trim() || undefined,
+      project_path: projectPath.trim() || undefined,
     });
     if (resultSlug) {
       setCreatedSlug(resultSlug);
@@ -235,6 +238,20 @@ export function NewProjectDialog({
                 placeholder="Optional description"
                 className="min-h-[80px]"
               />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="proj-path">Project folder</Label>
+              <Input
+                id="proj-path"
+                value={projectPath}
+                onChange={(e) => setProjectPath(e.target.value)}
+                placeholder="/absolute/path/to/folder"
+                className="font-mono"
+              />
+              <p className="text-xs text-muted-foreground">
+                Optional — bind this project to a folder so its rules sync
+                via git.
+              </p>
             </div>
           </>
         ) : (

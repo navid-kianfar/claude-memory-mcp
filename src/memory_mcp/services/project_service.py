@@ -19,18 +19,27 @@ class ProjectService:
         slug: str,
         display_name: str,
         description: str | None = None,
+        project_path: str | None = None,
     ) -> ProjectInfo:
         if not validate_slug(slug):
             slug = slugify(slug)
 
         settings.ensure_dirs()
-        project = self._repo.register(slug, display_name, description)
+        project = self._repo.register(
+            slug, display_name, description, project_path=project_path
+        )
 
         # Ensure DB schema exists by opening + closing a connection
         conn = get_connection(slug)
         conn.close()
 
         return project
+
+    def link_folder(self, slug: str, project_path: str) -> ProjectInfo:
+        """Bind an existing project to a source folder for git-synced memory."""
+        self.get(slug)  # raises if missing
+        self._repo.update_project_path(slug, project_path)
+        return self.get(slug)
 
     def list_all(self) -> list[ProjectInfo]:
         return self._repo.list_all()

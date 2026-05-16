@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS projects (
     description   TEXT,
     created_at    TEXT NOT NULL,
     last_accessed TEXT NOT NULL,
-    db_path       TEXT NOT NULL
+    db_path       TEXT NOT NULL,
+    project_path  TEXT
 );
 CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
@@ -64,11 +65,19 @@ def registry_conn():
     conn.execute("PRAGMA foreign_keys = ON")
     try:
         conn.executescript(_SCHEMA)
+        _ensure_columns(conn)
         _migrate_legacy_once(conn)
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add columns introduced after a registry.db already existed."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
+    if "project_path" not in cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN project_path TEXT")
 
 
 def _migrate_legacy_once(conn: sqlite3.Connection) -> None:

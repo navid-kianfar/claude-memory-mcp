@@ -33,3 +33,6 @@ Thumbs.db
 # Test
 .pytest_cache/
 .coverage
+
+# Local Claude Code runtime state
+.claude/scheduled_tasks.lock

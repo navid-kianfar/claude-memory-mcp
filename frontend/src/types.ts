@@ -31,6 +31,7 @@ export interface Project {
   created_at: string;
   last_accessed: string;
   db_path: string;
+  project_path: string | null;
   memory_count: number;
 }
 
@@ -123,6 +124,12 @@ export interface ProjectInput {
   slug: string;
   display_name: string;
   description?: string;
+  project_path?: string;
+}
+
+export interface LinkFolderResult {
+  status: string;
+  project: Project;
 }
 
 export interface TemplateItem {

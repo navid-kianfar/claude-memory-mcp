@@ -3,6 +3,8 @@ import {
   BookText,
   CheckCircle2,
   Download,
+  FolderGit2,
+  Link2,
   ListChecks,
   Moon,
   ShieldAlert,
@@ -32,6 +34,7 @@ import {
   type MemoryEditorValue,
 } from "./components/MemoryEditorDialog";
 import { NewProjectDialog } from "./components/NewProjectDialog";
+import { LinkFolderDialog } from "./components/LinkFolderDialog";
 import { ImportDialog } from "./components/ImportDialog";
 import { ImportRulesDialog } from "./components/ImportRulesDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -92,6 +95,7 @@ function AppInner() {
   const [importOpen, setImportOpen] = useState(false);
   const [importSaving, setImportSaving] = useState(false);
   const [importRulesOpen, setImportRulesOpen] = useState(false);
+  const [linkFolderOpen, setLinkFolderOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Memory | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -342,6 +346,7 @@ function AppInner() {
       slug: string;
       display_name: string;
       description?: string;
+      project_path?: string;
     }): Promise<string | null> => {
       setProjectSaving(true);
       try {
@@ -362,6 +367,21 @@ function AppInner() {
       }
     },
     [loadProjects, toast]
+  );
+
+  const linkFolder = useCallback(
+    async (path: string) => {
+      if (!selectedSlug) return;
+      const res = await api.linkFolder(selectedSlug, path);
+      await loadProjects();
+      setLinkFolderOpen(false);
+      toast({
+        title: "Folder linked",
+        description: res.project.project_path ?? path,
+        variant: "success",
+      });
+    },
+    [selectedSlug, loadProjects, toast]
   );
 
   const handleSeeded = useCallback(
@@ -514,6 +534,22 @@ function AppInner() {
                 <p className="truncate text-sm text-muted-foreground">
                   {selectedProject.description || selectedProject.slug}
                 </p>
+                {selectedProject.project_path ? (
+                  <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-muted-foreground">
+                    <FolderGit2 className="size-3.5 shrink-0" />
+                    <span className="truncate font-mono">
+                      {selectedProject.project_path}
+                    </span>
+                  </p>
+                ) : (
+                  <button
+                    onClick={() => setLinkFolderOpen(true)}
+                    className="mt-1 inline-flex items-center gap-1.5 rounded-md text-xs text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    <Link2 className="size-3.5" />
+                    Link folder
+                  </button>
+                )}
               </>
             ) : (
               <h1 className="text-lg font-semibold">No project selected</h1>
@@ -663,6 +699,15 @@ function AppInner() {
         saving={importSaving}
         onImport={runImport}
       />
+
+      {selectedProject && (
+        <LinkFolderDialog
+          open={linkFolderOpen}
+          onClose={() => setLinkFolderOpen(false)}
+          projectName={selectedProject.display_name}
+          onLink={linkFolder}
+        />
+      )}
 
       {selectedProject && (
         <ImportRulesDialog

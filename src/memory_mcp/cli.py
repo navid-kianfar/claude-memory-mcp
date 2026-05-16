@@ -4,12 +4,13 @@
   memory-mcp stdio      -> same, explicit
   memory-mcp serve      -> run the shared HTTP daemon (MCP + management UI)
   memory-mcp rules      -> print the current project's rules (used by hooks)
+  memory-mcp sync ...   -> export/import the project memory snapshot (hooks)
   memory-mcp setup      -> run interactive setup
 """
 
 import sys
 
-USAGE = "Usage: memory-mcp [stdio|serve|rules|setup]"
+USAGE = "Usage: memory-mcp [stdio|serve|rules|sync|setup]"
 
 
 def main() -> None:
@@ -25,6 +26,9 @@ def main() -> None:
     elif cmd == "rules":
         from memory_mcp.rules_cli import main as rules_main
         rules_main(args[1:])
+    elif cmd == "sync":
+        from memory_mcp.sync_cli import main as sync_main
+        sync_main(args[1:])
     elif cmd == "setup":
         from memory_mcp.setup import main as setup_main
         setup_main()

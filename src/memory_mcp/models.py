@@ -74,6 +74,7 @@ class ProjectInfo(BaseModel):
     created_at: datetime | None = None
     last_accessed: datetime | None = None
     db_path: str | None = None
+    project_path: str | None = None  # source folder this project syncs with
 
 
 class TemplateItem(BaseModel):

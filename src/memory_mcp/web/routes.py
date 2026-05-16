@@ -158,8 +158,17 @@ def _create_project(params, body, query):
         raise ValueError("slug is required")
     project = container.project_service.init_project(
         slug, display_name, body.get("description"),
+        project_path=(body.get("project_path") or "").strip() or None,
     )
     return {"status": "ok", "project": project.model_dump(mode="json")}, 201
+
+
+def _link_folder(params, body, query):
+    path = (body.get("path") or "").strip()
+    if not path:
+        raise ValueError("path is required")
+    info = container.project_service.link_folder(params["slug"], path)
+    return {"status": "ok", "project": info.model_dump(mode="json")}
 
 
 def _load_from_folder(params, body, query):
@@ -344,6 +353,25 @@ def _provenance(params, body, query):
     }
 
 
+def _sync_export(params, body, query):
+    """Return the project's memory as a category-keyed snapshot for the CLI."""
+    slug = params["slug"]
+    container.project_service.get(slug)
+    return {"categories": container.sync_service.build_snapshot(slug)}
+
+
+def _sync_import(params, body, query):
+    """Reconcile the project DB to a snapshot the CLI read from .claude-memory/."""
+    slug = params["slug"]
+    container.project_service.get(slug)
+    categories = body.get("categories") or {}
+    reconcile = body.get("reconcile")
+    if reconcile is None:
+        reconcile = list(categories.keys())
+    result = container.sync_service.apply_snapshot(slug, categories, reconcile)
+    return {"status": "ok", **result}
+
+
 def _tpl(template) -> dict:
     return template.model_dump(mode="json")
 
@@ -457,6 +485,9 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/rules/{rid}", _api(_delete_rule), methods=["DELETE"]),
         Route("/api/projects/{slug}/sessions", _api(_sessions), methods=["GET"]),
         Route("/api/projects/{slug}/import-claude-md", _api(_import_claude_md), methods=["POST"]),
+        Route("/api/projects/{slug}/sync-export", _api(_sync_export), methods=["GET"]),
+        Route("/api/projects/{slug}/sync-import", _api(_sync_import), methods=["POST"]),
+        Route("/api/projects/{slug}/link-folder", _api(_link_folder), methods=["POST"]),
         Route("/api/projects/{slug}/apply-template", _api(_apply_template), methods=["POST"]),
         Route("/api/projects/{slug}/import-rules", _api(_import_rules), methods=["POST"]),
         Route("/api/templates", _api(_list_templates), methods=["GET"]),

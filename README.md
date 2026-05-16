@@ -181,11 +181,11 @@ A React single-page app served by the daemon at `/`:
 
 ## MCP tools
 
-33 tools, including:
+35 tools, including:
 
 | Area | Tools |
 |------|-------|
-| Projects | `memory_init_project`, `memory_list_projects`, `memory_project_info`, `memory_use` |
+| Projects | `memory_init_project`, `memory_load_from_folder`, `memory_link_folder`, `memory_list_projects`, `memory_project_info`, `memory_use` |
 | Memories | `memory_store`, `memory_search`, `memory_recall`, `memory_update`, `memory_delete`, `memory_list` |
 | Rules | `memory_get_rules`, `memory_add_rule`, `memory_update_rule`, `memory_delete_rule` |
 | Templates | `memory_list_templates`, `memory_create_template`, `memory_add_template_rule`, `memory_apply_template`, `memory_import_rules` |
@@ -206,17 +206,27 @@ Environment variables (prefix `MEMORY_MCP_`):
 | `MEMORY_MCP_DAEMON_PORT` | `8765` | Daemon port |
 | `MEMORY_MCP_DAEMON_HOSTNAME` | `claude-memory-mcp` | Hostname used in the UI URL |
 
-## Team / portable memory
+## Team / multi-device memory (git sync)
 
-Move a project's database into the repo so it can be committed and shared:
+Bind a project to its source folder and its memory travels with the code
+through git — across your devices and teammates:
 
 ```text
-memory_make_portable("/path/to/project")   # DB -> <repo>/.memory-mcp.duckdb
+memory_link_folder("/path/to/project")   # bind an existing project to its folder
 ```
 
-Commit `.memory-mcp.duckdb`. Teammates run `memory_sync("/path/to/project")`
-after pulling and inherit the full project memory. Each project's database is
-separate — sharing one never exposes the others.
+You can also set the folder when creating a project — the New Project dialog
+has a **Project folder** field, and `memory_load_from_folder` binds it
+automatically.
+
+Once bound, the project's rules and decisions are mirrored to a committable
+**`.claude-memory/`** snapshot in the project folder — one JSON file per
+category, diff- and merge-friendly (no binary database, no embeddings). A
+`git push` carries the latest memory; a teammate's `git pull` plus their next
+session imports it back. The export runs at the end of each turn and the
+import at session start (both via hooks), and the central database stays the
+daemon's fast working copy. Each project's memory is separate — sharing one
+never exposes the others.
 
 ## Architecture
 

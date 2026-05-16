@@ -4,7 +4,9 @@ from memory_mcp.config import settings
 from memory_mcp.db.registry import now_iso, registry_conn
 from memory_mcp.models import ProjectInfo
 
-_COLUMNS = "slug, display_name, description, created_at, last_accessed, db_path"
+_COLUMNS = (
+    "slug, display_name, description, created_at, last_accessed, db_path, project_path"
+)
 
 
 def _to_info(row) -> ProjectInfo:
@@ -15,6 +17,7 @@ def _to_info(row) -> ProjectInfo:
         created_at=row["created_at"],
         last_accessed=row["last_accessed"],
         db_path=row["db_path"],
+        project_path=row["project_path"],
     )
 
 
@@ -27,6 +30,7 @@ class ProjectRepository:
         display_name: str,
         description: str | None = None,
         db_path: str | None = None,
+        project_path: str | None = None,
     ) -> ProjectInfo:
         if db_path is None:
             db_path = str(settings.projects_dir / f"{slug}.duckdb")
@@ -41,11 +45,17 @@ class ProjectRepository:
                     "last_accessed = ? WHERE slug = ?",
                     (display_name, description, now_iso(), slug),
                 )
+                if project_path is not None:
+                    conn.execute(
+                        "UPDATE projects SET project_path = ? WHERE slug = ?",
+                        (project_path, slug),
+                    )
             else:
                 ts = now_iso()
                 conn.execute(
-                    f"INSERT INTO projects ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",
-                    (slug, display_name, description, ts, ts, db_path),
+                    f"INSERT INTO projects ({_COLUMNS}) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (slug, display_name, description, ts, ts, db_path, project_path),
                 )
 
         result = self.get(slug)
@@ -78,6 +88,13 @@ class ProjectRepository:
         with registry_conn() as conn:
             conn.execute(
                 "UPDATE projects SET db_path = ? WHERE slug = ?", (db_path, slug)
+            )
+
+    def update_project_path(self, slug: str, project_path: str) -> None:
+        with registry_conn() as conn:
+            conn.execute(
+                "UPDATE projects SET project_path = ? WHERE slug = ?",
+                (project_path, slug),
             )
 
     def delete(self, slug: str) -> None:

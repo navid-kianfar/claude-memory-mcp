@@ -3,6 +3,7 @@ import type {
   Health,
   ImportResult,
   ImportRulesResult,
+  LinkFolderResult,
   LoadFromFolderResult,
   Memory,
   MemoryInput,
@@ -120,6 +121,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ path }),
     });
+  },
+
+  linkFolder(slug: string, path: string): Promise<LinkFolderResult> {
+    return request<LinkFolderResult>(
+      `/api/projects/${encodeURIComponent(slug)}/link-folder`,
+      {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      }
+    );
   },
 
   getProject(slug: string): Promise<ProjectDetail> {

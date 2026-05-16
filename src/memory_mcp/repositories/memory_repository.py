@@ -99,7 +99,12 @@ class MemoryRepository:
         return _row_to_memory(row) if row else None
 
     def get_rules(self, project: str) -> tuple[list[Memory], list[Memory]]:
-        """Return (mandatory_rules, forbidden_rules) as typed Memory lists."""
+        """Return (mandatory_rules, forbidden_rules) as typed Memory lists.
+
+        Deliberately has NO LIMIT: rules must always load completely. Every
+        active rule is returned so session start, the per-message hook, and
+        memory_get_rules apply the full rule set - never a top-N subset.
+        """
         with connect(project) as conn:
             rows = conn.execute(
                 f"""

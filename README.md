@@ -12,6 +12,8 @@ MCP gives each of your projects its own brain — decisions, rules, architecture
 notes, and sprint goals stored locally in a vector database, retrieved by
 meaning, and automatically loaded every time you start a session.
 
+![Claude Memory MCP management UI](screenshots/memory-browser.png)
+
 ---
 
 ## What you get
@@ -115,6 +117,22 @@ the daemon, and installs the rule-enforcement hooks. It prints a one-time
 `sudo` command to add a `claude-memory-mcp` entry to `/etc/hosts` so the UI URL
 resolves — after that the UI is at <http://claude-memory-mcp:8765/>.
 
+## Screenshots
+
+Once the daemon is running, the management UI is at
+<http://localhost:8765/> — browse, search, and edit every project's memories,
+rules, and sessions.
+
+**Templates** — define a baseline rule set once, then reuse it for every new
+project:
+
+![Templates view](screenshots/templates.png)
+
+**Seed a new project** — on creation, import exactly the rules you want (with
+checkboxes) from a template or from another existing project:
+
+![Importing rules into a new project](screenshots/new-project-seed.png)
+
 ## Using it
 
 Inside Claude Code:
@@ -163,13 +181,14 @@ A React single-page app served by the daemon at `/`:
 
 ## MCP tools
 
-24 tools, including:
+33 tools, including:
 
 | Area | Tools |
 |------|-------|
 | Projects | `memory_init_project`, `memory_list_projects`, `memory_project_info`, `memory_use` |
 | Memories | `memory_store`, `memory_search`, `memory_recall`, `memory_update`, `memory_delete`, `memory_list` |
-| Rules | `memory_get_rules` |
+| Rules | `memory_get_rules`, `memory_add_rule`, `memory_update_rule`, `memory_delete_rule` |
+| Templates | `memory_list_templates`, `memory_create_template`, `memory_add_template_rule`, `memory_apply_template`, `memory_import_rules` |
 | Sessions | `memory_session_start`, `memory_session_end` |
 | Portability | `memory_attach_project`, `memory_make_portable`, `memory_sync` |
 | Import/Export | `memory_export`, `memory_import`, `memory_import_claude_md` |

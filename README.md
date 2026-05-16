@@ -201,7 +201,7 @@ Environment variables (prefix `MEMORY_MCP_`):
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MEMORY_MCP_DATA_DIR` | `~/.memory-mcp` | Where databases are stored |
+| `MEMORY_MCP_DATA_DIR` | `~/.claude-memory-mcp` | Where databases are stored |
 | `MEMORY_MCP_DAEMON_HOST` | `127.0.0.1` | Daemon bind address (`0.0.0.0` in Docker) |
 | `MEMORY_MCP_DAEMON_PORT` | `8765` | Daemon port |
 | `MEMORY_MCP_DAEMON_HOSTNAME` | `claude-memory-mcp` | Hostname used in the UI URL |

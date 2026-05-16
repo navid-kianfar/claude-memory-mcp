@@ -39,7 +39,9 @@ EMBEDDING_MODELS = {
 class Settings(BaseSettings):
     model_config = {"env_prefix": "MEMORY_MCP_"}
 
-    data_dir: Path = Path.home() / ".memory-mcp"
+    # Default data home. Distinct from the legacy "~/.memory-mcp" so this
+    # rebuilt server never shares a directory with an older install.
+    data_dir: Path = Path.home() / ".claude-memory-mcp"
     embedding_model: str = "all-MiniLM-L6-v2"
     embedding_dim: int = 384
     max_connections: int = 5

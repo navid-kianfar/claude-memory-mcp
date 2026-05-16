@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 
 from memory_mcp import __version__
 
-GITHUB_OWNER = "achasoft"
+GITHUB_OWNER = "navid-kianfar"
 GITHUB_REPO = "claude-memory-mcp"
 GITHUB_API_BASE = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
 HTTP_TIMEOUT = 5

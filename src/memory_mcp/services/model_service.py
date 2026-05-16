@@ -1,15 +1,10 @@
 """Model service - manage embedding model presets, persist config, re-embed."""
 
-import json
-from pathlib import Path
-
 from memory_mcp.config import EMBEDDING_MODELS, settings
 from memory_mcp.embeddings import embed_texts
 from memory_mcp.exceptions import ModelNotFoundError
 from memory_mcp.repositories import MemoryRepository
 from memory_mcp.utils.text import prepare_embedding_text
-
-CONFIG_FILE = "model_config.json"
 
 
 class ModelService:
@@ -18,31 +13,25 @@ class ModelService:
     def __init__(self, memory_repo: MemoryRepository):
         self._memory_repo = memory_repo
 
-    def _config_path(self) -> Path:
-        return settings.data_dir / CONFIG_FILE
-
     def load_persisted(self) -> None:
-        """Load persisted model config on startup."""
-        path = self._config_path()
-        if not path.exists():
-            return
+        """Load the persisted embedding model from the registry on startup."""
         try:
-            data = json.loads(path.read_text())
-            model_name = data.get("embedding_model")
-            if model_name:
-                settings.embedding_model = model_name
-                for info in EMBEDDING_MODELS.values():
-                    if info["name"] == model_name:
-                        settings.embedding_dim = info["dim"]
-                        break
+            from memory_mcp.db.registry import get_setting
+
+            model_name = get_setting("embedding_model")
         except Exception:
-            pass
+            model_name = None
+        if model_name:
+            settings.embedding_model = model_name
+            for info in EMBEDDING_MODELS.values():
+                if info["name"] == model_name:
+                    settings.embedding_dim = info["dim"]
+                    break
 
     def _persist(self, model_name: str) -> None:
-        settings.ensure_dirs()
-        self._config_path().write_text(
-            json.dumps({"embedding_model": model_name}, indent=2)
-        )
+        from memory_mcp.db.registry import set_setting
+
+        set_setting("embedding_model", model_name)
 
     def info(self) -> dict:
         current = settings.embedding_model

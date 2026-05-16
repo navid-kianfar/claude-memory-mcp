@@ -21,15 +21,19 @@ export interface CommandContext {
   projects: Project[];
   activeSlug: string | null;
   selectedSlug: string | null;
+  selectedProjectName: string | null;
   categories: string[];
   selectProject: (slug: string) => void;
   setActiveProject: (slug: string) => void;
   newMemory: (category?: string) => void;
   newProject: () => void;
+  newTemplate: () => void;
   goToTab: (tab: "memories" | "rules" | "sessions") => void;
+  goToTemplates: () => void;
   focusSearch: () => void;
   filterByCategory: (category: string) => void;
   importClaudeMd: () => void;
+  importRules: () => void;
   refresh: () => void;
   toggleTheme: () => void;
 }
@@ -90,6 +94,13 @@ export function buildCommands(ctx: CommandContext): Command[] {
       label: "New project",
       keywords: "create add project",
       run: () => ctx.newProject(),
+    },
+    {
+      id: "new:template",
+      group: "Create",
+      label: "New template",
+      keywords: "create add template rule set baseline",
+      run: () => ctx.newTemplate(),
     }
   );
 
@@ -114,6 +125,13 @@ export function buildCommands(ctx: CommandContext): Command[] {
       label: "Go to Sessions",
       keywords: "tab sessions history",
       run: () => ctx.goToTab("sessions"),
+    },
+    {
+      id: "go:templates",
+      group: "Navigate",
+      label: "Go to Templates",
+      keywords: "templates rule set baseline reusable",
+      run: () => ctx.goToTemplates(),
     },
     {
       id: "search:focus",
@@ -142,7 +160,21 @@ export function buildCommands(ctx: CommandContext): Command[] {
       label: "Import CLAUDE.md",
       keywords: "import claude md markdown",
       run: () => ctx.importClaudeMd(),
-    },
+    }
+  );
+
+  if (ctx.selectedSlug) {
+    commands.push({
+      id: "action:import-rules",
+      group: "Actions",
+      label: `Import rules into ${ctx.selectedProjectName ?? ctx.selectedSlug}`,
+      hint: ctx.selectedSlug,
+      keywords: "import rules template project seed baseline",
+      run: () => ctx.importRules(),
+    });
+  }
+
+  commands.push(
     {
       id: "action:refresh",
       group: "Actions",

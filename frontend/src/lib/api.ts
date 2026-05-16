@@ -1,6 +1,8 @@
 import type {
+  ApplyTemplateResult,
   Health,
   ImportResult,
+  ImportRulesResult,
   Memory,
   MemoryInput,
   MemoryListResponse,
@@ -13,6 +15,12 @@ import type {
   ProvenanceEntry,
   RulesResponse,
   Session,
+  Template,
+  TemplateInput,
+  TemplateItem,
+  TemplateItemInput,
+  TemplateItemUpdate,
+  TemplateUpdate,
 } from "../types";
 
 class ApiError extends Error {
@@ -208,6 +216,93 @@ export const api = {
   ): Promise<ImportResult> {
     return request<ImportResult>(
       `/api/projects/${encodeURIComponent(slug)}/import-claude-md`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      }
+    );
+  },
+
+  listTemplates(): Promise<{ templates: Template[] }> {
+    return request<{ templates: Template[] }>("/api/templates");
+  },
+
+  getTemplate(id: number): Promise<{ template: Template }> {
+    return request<{ template: Template }>(`/api/templates/${id}`);
+  },
+
+  createTemplate(
+    input: TemplateInput
+  ): Promise<{ status: string; template: Template }> {
+    return request("/api/templates", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  updateTemplate(
+    id: number,
+    input: TemplateUpdate
+  ): Promise<{ status: string; template: Template }> {
+    return request(`/api/templates/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  deleteTemplate(id: number): Promise<{ status: string; deleted: unknown }> {
+    return request(`/api/templates/${id}`, { method: "DELETE" });
+  },
+
+  createTemplateItem(
+    templateId: number,
+    input: TemplateItemInput
+  ): Promise<{ status: string; item: TemplateItem }> {
+    return request(`/api/templates/${templateId}/items`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  updateTemplateItem(
+    templateId: number,
+    itemId: number,
+    input: TemplateItemUpdate
+  ): Promise<{ status: string; item: TemplateItem }> {
+    return request(`/api/templates/${templateId}/items/${itemId}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  deleteTemplateItem(
+    templateId: number,
+    itemId: number
+  ): Promise<{ status: string; deleted_item: unknown }> {
+    return request(`/api/templates/${templateId}/items/${itemId}`, {
+      method: "DELETE",
+    });
+  },
+
+  applyTemplate(
+    slug: string,
+    input: { template_id: number; item_ids?: number[] }
+  ): Promise<ApplyTemplateResult> {
+    return request<ApplyTemplateResult>(
+      `/api/projects/${encodeURIComponent(slug)}/apply-template`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      }
+    );
+  },
+
+  importRules(
+    slug: string,
+    input: { source_project: string; memory_ids: string[] }
+  ): Promise<ImportRulesResult> {
+    return request<ImportRulesResult>(
+      `/api/projects/${encodeURIComponent(slug)}/import-rules`,
       {
         method: "POST",
         body: JSON.stringify(input),

@@ -16,10 +16,10 @@ from memory_mcp.context import (
     load_active_project, resolve_project, set_active_project,
 )
 from memory_mcp.enforcement import rules_digest
-from memory_mcp.exceptions import MemoryMCPError
+from memory_mcp.exceptions import MemoryMCPError, MemoryNotFoundError
 from memory_mcp.models import (
     MemoryCategory, StoreMemoryRequest, UpdateMemoryRequest, SearchRequest,
-    MemoryFilter, Pagination,
+    MemoryFilter, Pagination, RULE_CATEGORIES, rule_category,
 )
 
 # Load persisted state at startup
@@ -39,10 +39,12 @@ ALWAYS, at the very start of a conversation that involves a project:
      silently violating it.
 
 DURING the conversation:
-  - When a decision, architecture choice, rule, or important context is
-    established, store it with memory_store (categories: decision, architecture,
-    devops, mandatory_rules, forbidden_rules, feedback, sprint, reference,
-    developer_docs, project_plan).
+  - When a decision, architecture choice, or important context is established,
+    store it with memory_store (categories: decision, architecture, devops,
+    feedback, sprint, reference, developer_docs, project_plan).
+  - When the user sets a rule ("always X", "never Y"), use memory_add_rule with
+    rule_type 'mandatory' or 'forbidden'. Edit rules with memory_update_rule and
+    remove them with memory_delete_rule.
   - Before significant work, if rules may have drifted out of context, call
     memory_get_rules to reload them. Many tool responses also include an
     "active_rules" reminder - keep honoring it.
@@ -320,6 +322,150 @@ def memory_get_rules(project: str | None = None) -> dict:
     def _run():
         response = container.rules_service.get_rules(_resolve(project))
         return response.model_dump(mode="json")
+    return _safe(_run)
+
+
+def _load_rule(slug: str, rule_id: str):
+    """Fetch a memory and confirm it is actually a rule."""
+    existing = container.memory_repo.get_by_id(slug, rule_id)
+    if existing is None or existing.category not in RULE_CATEGORIES:
+        raise MemoryNotFoundError(f"Rule not found: {rule_id}")
+    return existing
+
+
+@mcp.tool()
+def memory_add_rule(
+    rule_type: str,
+    title: str,
+    content: str,
+    project: str | None = None,
+    priority: int = 2,
+) -> dict:
+    """Add a project rule. rule_type is 'mandatory' (always do) or 'forbidden'
+    (never do). The rule is enforced in every future session."""
+    def _run():
+        req = StoreMemoryRequest(
+            project=_resolve(project),
+            category=rule_category(rule_type),
+            title=title,
+            content=content,
+            priority=priority,
+            source="assistant",
+        )
+        memory = container.memory_service.store(req)
+        return {"status": "ok", "rule": memory.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_update_rule(
+    rule_id: str,
+    project: str | None = None,
+    title: str | None = None,
+    content: str | None = None,
+) -> dict:
+    """Update an existing mandatory or forbidden rule by its id."""
+    def _run():
+        slug = _resolve(project)
+        _load_rule(slug, rule_id)
+        req = UpdateMemoryRequest(
+            project=slug, memory_id=rule_id, title=title, content=content,
+        )
+        memory = container.memory_service.update(req)
+        return {"status": "ok", "rule": memory.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_delete_rule(
+    rule_id: str,
+    project: str | None = None,
+    hard: bool = False,
+) -> dict:
+    """Delete a rule by its id. Soft-deletes (archives) unless hard=True."""
+    def _run():
+        slug = _resolve(project)
+        _load_rule(slug, rule_id)
+        return container.memory_service.delete(slug, rule_id, hard=hard)
+    return _safe(_run)
+
+
+# ---------- Templates ----------
+
+
+def _template_by_name(name: str):
+    template = container.template_repo.get_by_name(name)
+    if template is None:
+        raise ValueError(f"Template not found: {name}")
+    return template
+
+
+@mcp.tool()
+def memory_list_templates() -> dict:
+    """List reusable rule/memory templates that can be applied to new projects."""
+    def _run():
+        templates = container.template_service.list_templates()
+        return {"templates": [t.model_dump(mode="json") for t in templates]}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_create_template(name: str, description: str | None = None) -> dict:
+    """Create a reusable template - a named set of default rules/memories that
+    can be applied when creating new projects so they need not be re-typed."""
+    def _run():
+        template = container.template_service.create(name, description)
+        return {"status": "ok", "template": template.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_add_template_rule(
+    template: str,
+    rule_type: str,
+    title: str,
+    content: str,
+    priority: int = 2,
+) -> dict:
+    """Add a rule to a template (by template name). rule_type is 'mandatory' or
+    'forbidden'."""
+    def _run():
+        tpl = _template_by_name(template)
+        category = rule_category(rule_type)
+        item = container.template_service.add_item(
+            tpl.id, category.value, title, content, priority,
+        )
+        return {"status": "ok", "item": item.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_apply_template(template: str, project: str | None = None) -> dict:
+    """Apply a template's rules/memories into a project (by template name)."""
+    def _run():
+        slug = _resolve(project)
+        tpl = _template_by_name(template)
+        result = container.template_service.apply(slug, tpl.id)
+        return {"status": "ok", "template": result["template"], "applied": result["applied"]}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_import_rules(
+    source_project: str,
+    memory_ids: list[str],
+    project: str | None = None,
+) -> dict:
+    """Copy selected rules/memories from another project into this one. Use
+    memory_get_rules(source_project) first to get the ids to import."""
+    def _run():
+        slug = _resolve(project)
+        result = container.memory_service.copy_memories(slug, source_project, memory_ids)
+        return {
+            "status": "ok",
+            "imported": result["imported"],
+            "skipped": result["skipped"],
+        }
     return _safe(_run)
 
 

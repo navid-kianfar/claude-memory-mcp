@@ -15,7 +15,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/achasoft/claude-memory-mcp:latest
+    image: kianfar/claude-memory-mcp:latest
     container_name: memory-mcp
     ports:
       - "8765:8765"

@@ -23,9 +23,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/achasoft/claude-memory-mcp"
-Repository = "https://github.com/achasoft/claude-memory-mcp"
-Issues = "https://github.com/achasoft/claude-memory-mcp/issues"
+Homepage = "https://github.com/navid-kianfar/claude-memory-mcp"
+Repository = "https://github.com/navid-kianfar/claude-memory-mcp"
+Issues = "https://github.com/navid-kianfar/claude-memory-mcp/issues"
 
 [project.scripts]
 memory-mcp = "memory_mcp.cli:main"

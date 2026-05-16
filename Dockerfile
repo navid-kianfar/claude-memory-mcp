@@ -38,10 +38,14 @@ RUN pip install --no-cache-dir uv
 
 WORKDIR /app
 
-# Install Python dependencies first (cached unless dependency files change).
+# Install dependencies first, WITHOUT the project itself, so this expensive
+# layer (PyTorch et al.) stays cached across source-only changes.
 COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-install-project
+
+# Now add the source and install the project into the prepared environment.
 COPY src/ ./src/
-RUN uv sync --all-extras --frozen
+RUN uv sync --frozen
 
 # Bring in the pre-built frontend assets. The daemon resolves this path
 # relative to the repo root, i.e. <repo>/frontend/dist.

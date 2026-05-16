@@ -175,17 +175,3 @@ def create_hnsw_index(conn: duckdb.DuckDBPyConnection) -> None:
     except Exception:
         # HNSW index is optional - search works without it (brute force)
         pass
-
-
-def create_registry_schema(conn: duckdb.DuckDBPyConnection) -> None:
-    """Create the registry database schema."""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS projects (
-            slug            VARCHAR PRIMARY KEY,
-            display_name    VARCHAR NOT NULL,
-            description     VARCHAR,
-            created_at      TIMESTAMP DEFAULT current_timestamp,
-            last_accessed   TIMESTAMP DEFAULT current_timestamp,
-            db_path         VARCHAR NOT NULL
-        )
-    """)

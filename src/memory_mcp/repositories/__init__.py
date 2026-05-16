@@ -4,10 +4,15 @@ from memory_mcp.repositories.memory_repository import MemoryRepository
 from memory_mcp.repositories.project_repository import ProjectRepository
 from memory_mcp.repositories.session_repository import SessionRepository
 from memory_mcp.repositories.provenance_repository import ProvenanceRepository
+from memory_mcp.repositories.template_repository import (
+    TemplateRepository, TemplateNotFoundError,
+)
 
 __all__ = [
     "MemoryRepository",
     "ProjectRepository",
     "SessionRepository",
     "ProvenanceRepository",
+    "TemplateRepository",
+    "TemplateNotFoundError",
 ]

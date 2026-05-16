@@ -162,3 +162,35 @@ class MemoryService:
             self._rules_service.invalidate(project)
 
         return {"status": "ok", "action": result_action, "memory_id": memory_id}
+
+    # ---------- Copy across projects ----------
+
+    def copy_memories(
+        self, target_project: str, source_project: str, memory_ids: list[str],
+    ) -> dict:
+        """Copy selected memories from one project into another (fresh embeddings).
+
+        Used to seed a new project with rules picked from an existing one.
+        Returns the created Memory objects and any source ids that were missing.
+        """
+        copied: list[Memory] = []
+        skipped: list[str] = []
+        for memory_id in memory_ids:
+            src = self._memory_repo.get_by_id(source_project, memory_id)
+            if src is None:
+                skipped.append(memory_id)
+                continue
+            memory = self.store(
+                StoreMemoryRequest(
+                    project=target_project,
+                    category=src.category,
+                    title=src.title,
+                    content=src.content,
+                    tags=src.tags,
+                    priority=src.priority,
+                    source="imported",
+                )
+            )
+            copied.append(memory)
+        return {"status": "ok", "imported": len(copied), "skipped": skipped,
+                "memories": copied}

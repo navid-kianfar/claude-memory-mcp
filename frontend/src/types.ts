@@ -124,3 +124,58 @@ export interface ProjectInput {
   display_name: string;
   description?: string;
 }
+
+export interface TemplateItem {
+  id: number;
+  template_id: number;
+  category: string;
+  title: string;
+  content: string;
+  priority: number;
+}
+
+export interface Template {
+  id: number;
+  name: string;
+  description: string | null;
+  created_at: string;
+  items: TemplateItem[];
+}
+
+export interface TemplateInput {
+  name: string;
+  description?: string;
+}
+
+export interface TemplateUpdate {
+  name?: string;
+  description?: string;
+}
+
+export interface TemplateItemInput {
+  category: string;
+  title: string;
+  content: string;
+  priority?: number;
+}
+
+export interface TemplateItemUpdate {
+  category?: string;
+  title?: string;
+  content?: string;
+  priority?: number;
+}
+
+export interface ApplyTemplateResult {
+  status: string;
+  template: Template;
+  applied: number;
+  memories: number;
+}
+
+export interface ImportRulesResult {
+  status: string;
+  imported: number;
+  skipped: number;
+  memories: number;
+}

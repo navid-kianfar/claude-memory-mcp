@@ -1,44 +1,34 @@
-"""Active project context - auto-detect from CWD, persist to disk."""
+"""Active project context - auto-detect from CWD, persist to the SQLite registry."""
 
-import json
 import threading
 from pathlib import Path
 
-from memory_mcp.config import settings
 from memory_mcp.services.portable_service import PORTABLE_DB_NAME
 
 _active_project: str | None = None
 _lock = threading.Lock()
 
-CONFIG_FILE = "active_project.json"
-
-
-def _state_path() -> Path:
-    return settings.data_dir / CONFIG_FILE
-
 
 def set_active_project(slug: str) -> None:
-    """Set and persist the active project slug."""
+    """Set the active project slug and persist it to the registry."""
     global _active_project
     with _lock:
         _active_project = slug
-    # Persist to disk
     try:
-        settings.ensure_dirs()
-        _state_path().write_text(json.dumps({"active_project": slug}))
+        from memory_mcp.db.registry import set_setting
+
+        set_setting("active_project", slug)
     except Exception:
         pass
 
 
 def load_active_project() -> None:
-    """Load persisted active project on startup."""
+    """Load the persisted active project on startup."""
     global _active_project
-    path = _state_path()
-    if not path.exists():
-        return
     try:
-        data = json.loads(path.read_text())
-        slug = data.get("active_project")
+        from memory_mcp.db.registry import get_setting
+
+        slug = get_setting("active_project")
         if slug:
             _active_project = slug
     except Exception:

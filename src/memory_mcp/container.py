@@ -6,11 +6,13 @@ server layer can pull the composed graph without knowing construction details.
 
 from memory_mcp.repositories import (
     MemoryRepository, ProjectRepository, SessionRepository, ProvenanceRepository,
+    TemplateRepository,
 )
 from memory_mcp.services import (
     MemoryService, SearchService, RulesService, RulesCache,
     SessionService, ProjectService, PortableService,
     ExportImportService, ModelService, UpdateService, ClaudeMdService,
+    TemplateService,
 )
 
 
@@ -23,6 +25,7 @@ class Container:
         self.project_repo = ProjectRepository()
         self.session_repo = SessionRepository()
         self.provenance_repo = ProvenanceRepository()
+        self.template_repo = TemplateRepository()
 
         # Caches
         self.rules_cache = RulesCache()
@@ -46,6 +49,7 @@ class Container:
         self.model_service = ModelService(self.memory_repo)
         self.update_service = UpdateService()
         self.claude_md_service = ClaudeMdService(self.memory_service)
+        self.template_service = TemplateService(self.template_repo, self.memory_service)
 
 
 # Module-level singleton

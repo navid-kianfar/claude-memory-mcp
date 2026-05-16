@@ -14,17 +14,27 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from memory_mcp import __version__
+from memory_mcp.config import settings
 from memory_mcp.container import container
 from memory_mcp.context import get_active_project, set_active_project
 from memory_mcp.exceptions import (
     MemoryMCPError, MemoryNotFoundError, ProjectNotFoundError,
 )
+from memory_mcp.repositories import TemplateNotFoundError
 from memory_mcp.models import (
-    MemoryCategory, MemoryFilter, Pagination, SearchRequest,
-    StoreMemoryRequest, UpdateMemoryRequest,
+    MemoryCategory, MemoryFilter, Pagination, RULE_CATEGORIES, SearchRequest,
+    StoreMemoryRequest, UpdateMemoryRequest, rule_category,
 )
 
-_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+def _dist_dir() -> Path:
+    """Locate the built frontend: an explicit MEMORY_MCP_UI_DIR wins, otherwise
+    the repo-relative frontend/dist (works for source + Docker installs)."""
+    if settings.ui_dir:
+        return Path(settings.ui_dir)
+    return Path(__file__).resolve().parents[3] / "frontend" / "dist"
+
+
+_DIST = _dist_dir()
 
 _PLACEHOLDER = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Memory MCP</title></head>
@@ -58,7 +68,7 @@ def _api(fn):
         query = dict(request.query_params)
         try:
             result = await to_thread.run_sync(lambda: fn(params, body, query))
-        except (ProjectNotFoundError, MemoryNotFoundError) as e:
+        except (ProjectNotFoundError, MemoryNotFoundError, TemplateNotFoundError) as e:
             return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=404)
         except (MemoryMCPError, ValueError) as e:
             return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=400)
@@ -117,8 +127,6 @@ def _health(params, body, query):
 
 
 def _meta(params, body, query):
-    from memory_mcp.config import settings
-
     return {
         "version": __version__,
         "categories": [c.value for c in MemoryCategory],
@@ -274,6 +282,46 @@ def _rules(params, body, query):
     }
 
 
+def _load_rule(slug: str, rule_id: str):
+    existing = container.memory_repo.get_by_id(slug, rule_id)
+    if existing is None or existing.category not in RULE_CATEGORIES:
+        raise MemoryNotFoundError(f"Rule not found: {rule_id}")
+    return existing
+
+
+def _add_rule(params, body, query):
+    slug = params["slug"]
+    req = StoreMemoryRequest(
+        project=slug,
+        category=rule_category(body.get("rule_type")),
+        title=body.get("title") or "",
+        content=body.get("content") or "",
+        priority=body.get("priority", 2),
+        source="user",
+    )
+    memory = container.memory_service.store(req)
+    return {"status": "ok", "rule": _mem(memory)}, 201
+
+
+def _update_rule(params, body, query):
+    slug = params["slug"]
+    _load_rule(slug, params["rid"])
+    req = UpdateMemoryRequest(
+        project=slug, memory_id=params["rid"],
+        title=body.get("title"), content=body.get("content"),
+        status=body.get("status"),
+    )
+    memory = container.memory_service.update(req)
+    return {"status": "ok", "rule": _mem(memory)}
+
+
+def _delete_rule(params, body, query):
+    slug = params["slug"]
+    _load_rule(slug, params["rid"])
+    hard = (query.get("hard") or "").lower() in ("1", "true", "yes")
+    return container.memory_service.delete(slug, params["rid"], hard=hard)
+
+
 def _sessions(params, body, query):
     sessions = container.session_repo.list_all(params["slug"], limit=50)
     return {"sessions": [s.model_dump(mode="json") for s in sessions]}
@@ -284,6 +332,96 @@ def _provenance(params, body, query):
     return {
         "memory_id": params["mid"],
         "provenance": [e.model_dump(mode="json") for e in entries],
+    }
+
+
+def _tpl(template) -> dict:
+    return template.model_dump(mode="json")
+
+
+def _list_templates(params, body, query):
+    return {"templates": [_tpl(t) for t in container.template_service.list_templates()]}
+
+
+def _create_template(params, body, query):
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise ValueError("name is required")
+    template = container.template_service.create(name, body.get("description"))
+    return {"status": "ok", "template": _tpl(template)}, 201
+
+
+def _get_template(params, body, query):
+    return {"template": _tpl(container.template_service.get(int(params["tid"])))}
+
+
+def _update_template(params, body, query):
+    template = container.template_service.update(
+        int(params["tid"]), body.get("name"), body.get("description"),
+    )
+    return {"status": "ok", "template": _tpl(template)}
+
+
+def _delete_template(params, body, query):
+    return container.template_service.delete(int(params["tid"]))
+
+
+def _add_template_item(params, body, query):
+    item = container.template_service.add_item(
+        int(params["tid"]),
+        body.get("category", ""),
+        body.get("title") or "",
+        body.get("content") or "",
+        body.get("priority", 0),
+    )
+    return {"status": "ok", "item": item.model_dump(mode="json")}, 201
+
+
+def _update_template_item(params, body, query):
+    item = container.template_service.update_item(
+        int(params["iid"]),
+        category=body.get("category"),
+        title=body.get("title"),
+        content=body.get("content"),
+        priority=body.get("priority"),
+    )
+    return {"status": "ok", "item": item.model_dump(mode="json")}
+
+
+def _delete_template_item(params, body, query):
+    return container.template_service.delete_item(int(params["iid"]))
+
+
+def _apply_template(params, body, query):
+    slug = params["slug"]
+    container.project_service.get(slug)
+    template_id = body.get("template_id")
+    if template_id is None:
+        raise ValueError("template_id is required")
+    result = container.template_service.apply(
+        slug, int(template_id), body.get("item_ids"),
+    )
+    return {
+        "status": "ok",
+        "template": result["template"],
+        "applied": result["applied"],
+        "memories": [_mem(m) for m in result["memories"]],
+    }
+
+
+def _import_rules(params, body, query):
+    slug = params["slug"]
+    container.project_service.get(slug)
+    source = (body.get("source_project") or "").strip()
+    memory_ids = body.get("memory_ids") or []
+    if not source or not memory_ids:
+        raise ValueError("source_project and memory_ids are required")
+    result = container.memory_service.copy_memories(slug, source, memory_ids)
+    return {
+        "status": "ok",
+        "imported": result["imported"],
+        "skipped": result["skipped"],
+        "memories": [_mem(m) for m in result["memories"]],
     }
 
 
@@ -304,8 +442,21 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/memories/{mid}", _api(_delete_memory), methods=["DELETE"]),
         Route("/api/projects/{slug}/memories/{mid}/provenance", _api(_provenance), methods=["GET"]),
         Route("/api/projects/{slug}/rules", _api(_rules), methods=["GET"]),
+        Route("/api/projects/{slug}/rules", _api(_add_rule), methods=["POST"]),
+        Route("/api/projects/{slug}/rules/{rid}", _api(_update_rule), methods=["PUT"]),
+        Route("/api/projects/{slug}/rules/{rid}", _api(_delete_rule), methods=["DELETE"]),
         Route("/api/projects/{slug}/sessions", _api(_sessions), methods=["GET"]),
         Route("/api/projects/{slug}/import-claude-md", _api(_import_claude_md), methods=["POST"]),
+        Route("/api/projects/{slug}/apply-template", _api(_apply_template), methods=["POST"]),
+        Route("/api/projects/{slug}/import-rules", _api(_import_rules), methods=["POST"]),
+        Route("/api/templates", _api(_list_templates), methods=["GET"]),
+        Route("/api/templates", _api(_create_template), methods=["POST"]),
+        Route("/api/templates/{tid}", _api(_get_template), methods=["GET"]),
+        Route("/api/templates/{tid}", _api(_update_template), methods=["PUT"]),
+        Route("/api/templates/{tid}", _api(_delete_template), methods=["DELETE"]),
+        Route("/api/templates/{tid}/items", _api(_add_template_item), methods=["POST"]),
+        Route("/api/templates/{tid}/items/{iid}", _api(_update_template_item), methods=["PUT"]),
+        Route("/api/templates/{tid}/items/{iid}", _api(_delete_template_item), methods=["DELETE"]),
     ]
     assets = _DIST / "assets"
     if assets.is_dir():

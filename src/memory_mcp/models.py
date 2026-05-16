@@ -28,6 +28,21 @@ class MemoryCategory(str, Enum):
 
 RULE_CATEGORIES = {MemoryCategory.MANDATORY_RULES, MemoryCategory.FORBIDDEN_RULES}
 
+RULE_TYPE_TO_CATEGORY = {
+    "mandatory": MemoryCategory.MANDATORY_RULES,
+    "forbidden": MemoryCategory.FORBIDDEN_RULES,
+}
+
+
+def rule_category(rule_type: str) -> MemoryCategory:
+    """Map a 'mandatory'/'forbidden' rule_type to its MemoryCategory."""
+    category = RULE_TYPE_TO_CATEGORY.get((rule_type or "").strip().lower())
+    if category is None:
+        raise ValueError(
+            f"rule_type must be 'mandatory' or 'forbidden', got {rule_type!r}"
+        )
+    return category
+
 
 # --- Domain Models ---
 
@@ -59,6 +74,23 @@ class ProjectInfo(BaseModel):
     created_at: datetime | None = None
     last_accessed: datetime | None = None
     db_path: str | None = None
+
+
+class TemplateItem(BaseModel):
+    id: int
+    template_id: int
+    category: MemoryCategory
+    title: str
+    content: str
+    priority: int = 0
+
+
+class Template(BaseModel):
+    id: int
+    name: str
+    description: str | None = None
+    created_at: datetime | None = None
+    items: list[TemplateItem] = Field(default_factory=list)
 
 
 class SessionRecord(BaseModel):

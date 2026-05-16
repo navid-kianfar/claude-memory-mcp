@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookText,
   CheckCircle2,
+  Download,
   ListChecks,
   Moon,
   ShieldAlert,
@@ -19,7 +20,7 @@ import { buildCommands } from "./lib/commands";
 import { useTheme } from "./hooks/useTheme";
 import { useHotkey } from "./hooks/useHotkey";
 import { ToastProvider, useToast } from "./components/ui/Toast";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, type SidebarView } from "./components/Sidebar";
 import { Tabs } from "./components/ui/Tabs";
 import { Button } from "./components/ui/Button";
 import { CommandPalette } from "./components/ui/CommandPalette";
@@ -32,7 +33,9 @@ import {
 } from "./components/MemoryEditorDialog";
 import { NewProjectDialog } from "./components/NewProjectDialog";
 import { ImportDialog } from "./components/ImportDialog";
+import { ImportRulesDialog } from "./components/ImportRulesDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { TemplatesView } from "./components/TemplatesView";
 
 type TabValue = "memories" | "rules" | "sessions";
 
@@ -56,6 +59,8 @@ function AppInner() {
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
   const [tab, setTab] = useState<TabValue>("memories");
+  const [view, setView] = useState<SidebarView>("projects");
+  const [newTemplateNonce, setNewTemplateNonce] = useState(0);
 
   // memories tab
   const [memories, setMemories] = useState<Memory[]>([]);
@@ -86,6 +91,7 @@ function AppInner() {
   const [projectSaving, setProjectSaving] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importSaving, setImportSaving] = useState(false);
+  const [importRulesOpen, setImportRulesOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Memory | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -245,11 +251,13 @@ function AppInner() {
   }, []);
 
   const focusSearch = useCallback(() => {
+    setView("projects");
     setTab("memories");
     window.setTimeout(() => searchRef.current?.focus(), 60);
   }, []);
 
   const filterByCategory = useCallback((category: string) => {
+    setView("projects");
     setTab("memories");
     setCategoryFilter(category);
   }, []);
@@ -330,25 +338,44 @@ function AppInner() {
   }, [selectedSlug, deleteTarget, loadMemories, loadRules, loadProjects, toast]);
 
   const createProject = useCallback(
-    async (input: { slug: string; display_name: string; description?: string }) => {
+    async (input: {
+      slug: string;
+      display_name: string;
+      description?: string;
+    }): Promise<string | null> => {
       setProjectSaving(true);
       try {
         const res = await api.createProject(input);
         toast({ title: "Project created", variant: "success" });
-        setNewProjectOpen(false);
         await loadProjects();
         setSelectedSlug(res.project.slug);
+        return res.project.slug;
       } catch (err) {
         toast({
           title: "Failed to create project",
           description: err instanceof Error ? err.message : undefined,
           variant: "error",
         });
+        return null;
       } finally {
         setProjectSaving(false);
       }
     },
     [loadProjects, toast]
+  );
+
+  const handleSeeded = useCallback(
+    (summary: string) => {
+      toast({
+        title: "Rules imported",
+        description: summary,
+        variant: "success",
+      });
+      void loadProjects();
+      if (tab === "memories") void loadMemories();
+      if (tab === "rules") void loadRules();
+    },
+    [tab, loadProjects, loadMemories, loadRules, toast]
   );
 
   const runImport = useCallback(
@@ -386,15 +413,31 @@ function AppInner() {
         projects,
         activeSlug,
         selectedSlug,
+        selectedProjectName: selectedProject?.display_name ?? null,
         categories,
-        selectProject: (slug) => setSelectedSlug(slug),
+        selectProject: (slug) => {
+          setView("projects");
+          setSelectedSlug(slug);
+        },
         setActiveProject: (slug) => void setActiveProject(slug),
         newMemory: openNewMemory,
         newProject: () => setNewProjectOpen(true),
-        goToTab: (t) => setTab(t),
+        newTemplate: () => {
+          setView("templates");
+          setNewTemplateNonce((n) => n + 1);
+        },
+        goToTab: (t) => {
+          setView("projects");
+          setTab(t);
+        },
+        goToTemplates: () => setView("templates"),
         focusSearch,
         filterByCategory,
         importClaudeMd: () => setImportOpen(true),
+        importRules: () => {
+          setView("projects");
+          setImportRulesOpen(true);
+        },
         refresh: refreshAll,
         toggleTheme,
       }),
@@ -402,6 +445,7 @@ function AppInner() {
       projects,
       activeSlug,
       selectedSlug,
+      selectedProject,
       categories,
       setActiveProject,
       openNewMemory,
@@ -426,11 +470,20 @@ function AppInner() {
   return (
     <div className="flex h-full overflow-hidden">
       <Sidebar
+        view={view}
+        onViewChange={setView}
         projects={projects}
         selectedSlug={selectedSlug}
         activeSlug={activeSlug}
-        onSelect={setSelectedSlug}
+        onSelect={(slug) => {
+          setView("projects");
+          setSelectedSlug(slug);
+        }}
         onNewProject={() => setNewProjectOpen(true)}
+        onNewTemplate={() => {
+          setView("templates");
+          setNewTemplateNonce((n) => n + 1);
+        }}
         onOpenPalette={() => setPaletteOpen(true)}
         loading={bootLoading}
       />
@@ -438,7 +491,14 @@ function AppInner() {
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-start justify-between gap-4 border-b border-border px-6 py-4">
           <div className="min-w-0">
-            {selectedProject ? (
+            {view === "templates" ? (
+              <>
+                <h1 className="text-lg font-semibold">Templates</h1>
+                <p className="truncate text-sm text-muted-foreground">
+                  Reusable rule sets for seeding new projects.
+                </p>
+              </>
+            ) : selectedProject ? (
               <>
                 <div className="flex items-center gap-2">
                   <h1 className="truncate text-lg font-semibold">
@@ -460,15 +520,27 @@ function AppInner() {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {selectedProject && activeSlug !== selectedProject.slug && (
+            {view === "projects" && selectedProject && (
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => void setActiveProject(selectedProject.slug)}
+                onClick={() => setImportRulesOpen(true)}
               >
-                Set as active
+                <Download />
+                Import rules
               </Button>
             )}
+            {view === "projects" &&
+              selectedProject &&
+              activeSlug !== selectedProject.slug && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void setActiveProject(selectedProject.slug)}
+                >
+                  Set as active
+                </Button>
+              )}
             <Button
               variant="ghost"
               size="icon"
@@ -487,15 +559,25 @@ function AppInner() {
             </div>
           )}
 
-          {!bootError && !selectedProject && !bootLoading && (
-            <div className="rounded-lg border border-dashed border-border py-20 text-center">
-              <p className="text-sm text-muted-foreground">
-                Create or select a project from the sidebar.
-              </p>
-            </div>
+          {view === "templates" && (
+            <TemplatesView
+              categories={categories}
+              newTemplateNonce={newTemplateNonce}
+            />
           )}
 
-          {selectedProject && (
+          {view === "projects" &&
+            !bootError &&
+            !selectedProject &&
+            !bootLoading && (
+              <div className="rounded-lg border border-dashed border-border py-20 text-center">
+                <p className="text-sm text-muted-foreground">
+                  Create or select a project from the sidebar.
+                </p>
+              </div>
+            )}
+
+          {view === "projects" && selectedProject && (
             <div className="space-y-5">
               <Tabs
                 tabs={tabs}
@@ -570,7 +652,9 @@ function AppInner() {
         open={newProjectOpen}
         onClose={() => setNewProjectOpen(false)}
         saving={projectSaving}
+        projects={projects}
         onCreate={createProject}
+        onSeeded={handleSeeded}
       />
 
       <ImportDialog
@@ -579,6 +663,20 @@ function AppInner() {
         saving={importSaving}
         onImport={runImport}
       />
+
+      {selectedProject && (
+        <ImportRulesDialog
+          open={importRulesOpen}
+          onClose={() => setImportRulesOpen(false)}
+          targetSlug={selectedProject.slug}
+          targetName={selectedProject.display_name}
+          projects={projects}
+          onDone={(summary) => {
+            setImportRulesOpen(false);
+            handleSeeded(summary);
+          }}
+        />
+      )}
 
       <ConfirmDialog
         open={Boolean(deleteTarget)}

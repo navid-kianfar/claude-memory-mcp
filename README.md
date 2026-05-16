@@ -2,9 +2,9 @@
 
 **Persistent, searchable, per-project memory for Claude Code.**
 
-[![CI](https://github.com/achasoft/claude-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/achasoft/claude-memory-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/navid-kianfar/claude-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/navid-kianfar/claude-memory-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/ghcr.io-claude--memory--mcp-2496ED?logo=docker&logoColor=white)](https://github.com/achasoft/claude-memory-mcp/pkgs/container/claude-memory-mcp)
+[![Docker Hub](https://img.shields.io/docker/v/kianfar/claude-memory-mcp?logo=docker&logoColor=white&label=docker%20hub&sort=semver)](https://hub.docker.com/r/kianfar/claude-memory-mcp)
 
 Claude forgets everything between sessions. You re-explain the same decisions,
 rules get missed, and context is lost when the window fills up. Claude Memory
@@ -28,6 +28,10 @@ meaning, and automatically loaded every time you start a session.
 - **One shared daemon** — a single background process serves the MCP endpoint
   and the UI; the embedding model loads once, and there are no database lock
   conflicts between clients.
+- **Templates** — define a set of default rules once, then seed every new
+  project from it (pick exactly which rules with checkboxes) instead of
+  re-typing them. New projects can also import selected rules from any
+  existing project.
 - **CLAUDE.md import** — convert an existing `CLAUDE.md` into structured memory.
 - **Portable & team-shareable** — move a project's database into the repo,
   commit it, and teammates get the same memory after `git pull`.
@@ -66,7 +70,7 @@ the current project's rules and injects them into context on every turn.
 docker run -d --name memory-mcp \
   -p 8765:8765 \
   -v memory-mcp-data:/data \
-  ghcr.io/achasoft/claude-memory-mcp:latest
+  kianfar/claude-memory-mcp:latest
 ```
 
 Or with Compose:
@@ -84,12 +88,23 @@ Then:
   claude mcp add --transport http memory http://localhost:8765/mcp
   ```
 
+## Quick start — Homebrew
+
+```bash
+brew tap navid-kianfar/tap
+brew install claude-memory-mcp
+brew services start claude-memory-mcp        # runs the daemon in the background
+```
+
+Then `claude mcp add --transport http memory http://localhost:8765/mcp`. See
+[packaging/homebrew/](packaging/homebrew/) for tap setup details.
+
 ## Quick start — from source
 
 Requires [`uv`](https://docs.astral.sh/uv/) and (for the UI) Node 20+.
 
 ```bash
-git clone https://github.com/achasoft/claude-memory-mcp.git
+git clone https://github.com/navid-kianfar/claude-memory-mcp.git
 cd claude-memory-mcp
 ./install.sh
 ```
@@ -187,7 +202,8 @@ separate — sharing one never exposes the others.
 ## Architecture
 
 - **Python + FastMCP** — the MCP server and HTTP daemon (Starlette + uvicorn)
-- **DuckDB + VSS** — per-project storage with an HNSW cosine vector index
+- **DuckDB + VSS** — per-project memory storage with an HNSW cosine vector index
+- **SQLite** — the local registry (project list + app settings); stdlib, no extra dependency
 - **sentence-transformers** — local embeddings (`all-MiniLM-L6-v2`, 384-dim;
   a 50+ language multilingual preset is also available)
 - **Layered design** — repositories → services → container → tool/HTTP layer

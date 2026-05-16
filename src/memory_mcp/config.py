@@ -54,13 +54,19 @@ class Settings(BaseSettings):
     daemon_port: int = 8765
     daemon_hostname: str = "claude-memory-mcp"
 
+    # Explicit path to the built frontend (frontend/dist). Leave empty to use
+    # the repo-relative location; set MEMORY_MCP_UI_DIR for non-editable
+    # installs (e.g. Homebrew) where the package is not next to the repo.
+    ui_dir: str = ""
+
     @property
     def projects_dir(self) -> Path:
         return self.data_dir / "projects"
 
     @property
     def registry_path(self) -> Path:
-        return self.data_dir / "registry.duckdb"
+        """SQLite database for the project list and local app settings."""
+        return self.data_dir / "registry.db"
 
     @property
     def backups_dir(self) -> Path:

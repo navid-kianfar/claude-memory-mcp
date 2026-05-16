@@ -1,33 +1,25 @@
-"""Project repository - manages the registry.duckdb projects table."""
-
-from contextlib import contextmanager
-
-import duckdb
+"""Project repository - manages the SQLite registry's `projects` table."""
 
 from memory_mcp.config import settings
-from memory_mcp.db.schema import create_registry_schema
+from memory_mcp.db.registry import now_iso, registry_conn
 from memory_mcp.models import ProjectInfo
 
-_schema_initialized = False
+_COLUMNS = "slug, display_name, description, created_at, last_accessed, db_path"
 
 
-@contextmanager
-def _registry_conn():
-    """Open a registry connection, ensure schema, close on exit."""
-    global _schema_initialized
-    settings.ensure_dirs()
-    conn = duckdb.connect(str(settings.registry_path))
-    try:
-        if not _schema_initialized:
-            create_registry_schema(conn)
-            _schema_initialized = True
-        yield conn
-    finally:
-        conn.close()
+def _to_info(row) -> ProjectInfo:
+    return ProjectInfo(
+        slug=row["slug"],
+        display_name=row["display_name"],
+        description=row["description"],
+        created_at=row["created_at"],
+        last_accessed=row["last_accessed"],
+        db_path=row["db_path"],
+    )
 
 
 class ProjectRepository:
-    """Registry CRUD - per-operation connection, no locks held."""
+    """Registry CRUD - per-operation SQLite connection, no locks held."""
 
     def register(
         self,
@@ -39,19 +31,21 @@ class ProjectRepository:
         if db_path is None:
             db_path = str(settings.projects_dir / f"{slug}.duckdb")
 
-        with _registry_conn() as conn:
+        with registry_conn() as conn:
             existing = conn.execute(
-                "SELECT slug FROM projects WHERE slug = ?", [slug]
+                "SELECT slug FROM projects WHERE slug = ?", (slug,)
             ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE projects SET display_name = ?, description = ?, last_accessed = current_timestamp WHERE slug = ?",
-                    [display_name, description, slug],
+                    "UPDATE projects SET display_name = ?, description = ?, "
+                    "last_accessed = ? WHERE slug = ?",
+                    (display_name, description, now_iso(), slug),
                 )
             else:
+                ts = now_iso()
                 conn.execute(
-                    "INSERT INTO projects (slug, display_name, description, db_path) VALUES (?, ?, ?, ?)",
-                    [slug, display_name, description, db_path],
+                    f"INSERT INTO projects ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",
+                    (slug, display_name, description, ts, ts, db_path),
                 )
 
         result = self.get(slug)
@@ -60,45 +54,32 @@ class ProjectRepository:
         return result
 
     def get(self, slug: str) -> ProjectInfo | None:
-        with _registry_conn() as conn:
+        with registry_conn() as conn:
             row = conn.execute(
-                "SELECT slug, display_name, description, created_at, last_accessed, db_path FROM projects WHERE slug = ?",
-                [slug],
+                f"SELECT {_COLUMNS} FROM projects WHERE slug = ?", (slug,)
             ).fetchone()
-        if not row:
-            return None
-        return ProjectInfo(
-            slug=row[0], display_name=row[1], description=row[2],
-            created_at=row[3], last_accessed=row[4], db_path=row[5],
-        )
+        return _to_info(row) if row else None
 
     def list_all(self) -> list[ProjectInfo]:
-        with _registry_conn() as conn:
+        with registry_conn() as conn:
             rows = conn.execute(
-                "SELECT slug, display_name, description, created_at, last_accessed, db_path FROM projects ORDER BY last_accessed DESC"
+                f"SELECT {_COLUMNS} FROM projects ORDER BY last_accessed DESC"
             ).fetchall()
-        return [
-            ProjectInfo(
-                slug=r[0], display_name=r[1], description=r[2],
-                created_at=r[3], last_accessed=r[4], db_path=r[5],
-            )
-            for r in rows
-        ]
+        return [_to_info(r) for r in rows]
 
     def touch(self, slug: str) -> None:
-        with _registry_conn() as conn:
+        with registry_conn() as conn:
             conn.execute(
-                "UPDATE projects SET last_accessed = current_timestamp WHERE slug = ?",
-                [slug],
+                "UPDATE projects SET last_accessed = ? WHERE slug = ?",
+                (now_iso(), slug),
             )
 
     def update_db_path(self, slug: str, db_path: str) -> None:
-        with _registry_conn() as conn:
+        with registry_conn() as conn:
             conn.execute(
-                "UPDATE projects SET db_path = ? WHERE slug = ?",
-                [db_path, slug],
+                "UPDATE projects SET db_path = ? WHERE slug = ?", (db_path, slug)
             )
 
     def delete(self, slug: str) -> None:
-        with _registry_conn() as conn:
-            conn.execute("DELETE FROM projects WHERE slug = ?", [slug])
+        with registry_conn() as conn:
+            conn.execute("DELETE FROM projects WHERE slug = ?", (slug,))

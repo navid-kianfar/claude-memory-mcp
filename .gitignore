@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+.venv/
+
+# Build artifacts (Python wheels + frontend bundle are built by CI/Docker)
+/dist/
+src/*/dist/
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/node_modules/
+*.tsbuildinfo
+
+# DuckDB
+*.duckdb.wal
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+.pytest_cache/
+.coverage

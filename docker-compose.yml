@@ -1,0 +1,34 @@
+# Claude Memory MCP — local Docker stack.
+#
+# Start it:    docker compose up -d --build
+# Stop it:     docker compose down
+#
+# Once running, a host-side Claude Code instance connects to the MCP server at:
+#     MCP endpoint :  http://localhost:8765/mcp
+#     Web UI       :  http://localhost:8765/
+#     JSON API     :  http://localhost:8765/api/...
+#
+# The daemon serves the MCP protocol AND the web UI/JSON API on the same port.
+
+services:
+  memory-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/achasoft/claude-memory-mcp:latest
+    container_name: memory-mcp
+    ports:
+      - "8765:8765"
+    environment:
+      # DuckDB data directory (mapped to the named volume below).
+      MEMORY_MCP_DATA_DIR: /data
+      # Must be 0.0.0.0 so the port is reachable from the host.
+      MEMORY_MCP_DAEMON_HOST: 0.0.0.0
+      MEMORY_MCP_DAEMON_PORT: "8765"
+    volumes:
+      # Persist DuckDB memory files across container restarts.
+      - memory-data:/data
+    restart: unless-stopped
+
+volumes:
+  memory-data:

@@ -1,0 +1,44 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Python virtualenvs / caches
+.venv
+**/__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.coverage
+.mypy_cache
+.ruff_cache
+
+# Build artifacts (rebuilt inside the image)
+dist/
+build/
+src/*/dist/
+frontend/dist
+*.tsbuildinfo
+
+# Node modules (reinstalled inside the image)
+**/node_modules
+
+# DuckDB data files
+*.duckdb
+*.duckdb.wal
+data/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# IDE / OS junk
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Docs / local tooling that doesn't belong in the image
+.claude

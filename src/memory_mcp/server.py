@@ -134,6 +134,21 @@ def memory_init_project(
 
 
 @mcp.tool()
+def memory_load_from_folder(path: str) -> dict:
+    """Load a project from a local folder.
+
+    The project name is taken from the folder's package.json ("name") or the
+    folder name. If the folder already contains a portable .memory-mcp.duckdb
+    it is attached as-is; otherwise the project is created and a CLAUDE.md, if
+    present, is imported into memory. The project is auto-activated.
+    """
+    def _run():
+        from memory_mcp.folder_import import load_project_from_folder
+        return load_project_from_folder(path)
+    return _safe(_run)
+
+
+@mcp.tool()
 def memory_list_projects() -> dict:
     """List all registered projects."""
     projects = container.project_service.list_all()

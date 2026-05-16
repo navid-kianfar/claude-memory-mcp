@@ -1,5 +1,10 @@
 """Memory repository - all SQL for memory CRUD, search, and filtering."""
 
+# Deferred annotations: this class defines a method named `list`, which would
+# otherwise shadow the builtin in later type annotations (e.g. `list[float]`)
+# and break on Python < 3.14, where annotations are evaluated eagerly.
+from __future__ import annotations
+
 import json
 from datetime import datetime
 

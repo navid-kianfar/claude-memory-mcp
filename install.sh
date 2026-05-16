@@ -29,6 +29,16 @@ cd "$SCRIPT_DIR"
 uv sync
 
 echo ""
+if command -v npm &> /dev/null; then
+    echo "Building the management UI..."
+    ( cd "$SCRIPT_DIR/frontend" && npm install --silent && npm run build )
+    echo -e "${GREEN}UI built.${NC}"
+else
+    echo -e "${YELLOW}npm not found - skipping the UI build.${NC}"
+    echo -e "${YELLOW}The MCP server still works; install Node 20+ and re-run for the UI.${NC}"
+fi
+
+echo ""
 echo "Running auto-setup..."
 uv run memory-mcp-setup
 

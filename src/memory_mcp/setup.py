@@ -4,15 +4,21 @@ Sets up the shared HTTP daemon model:
   1. Directories (~/.memory-mcp/)
   2. DuckDB VSS extension
   3. Embedding model download
-  4. launchd agent so the daemon runs and restarts automatically
-  5. /etc/hosts entry for the claude-memory-mcp hostname (prints a sudo command)
-  6. Claude Code MCP config -> points at the HTTP daemon
-  7. Claude Code hooks -> rule injection / session lifecycle
+  4. Runtime install (a self-contained venv + UI under ~/.memory-mcp/)
+  5. launchd agent so the daemon runs and restarts automatically
+  6. /etc/hosts entry for the claude-memory-mcp hostname (prints a sudo command)
+  7. Claude Code MCP config -> points at the HTTP daemon
+  8. Claude Code hooks -> rule injection / session lifecycle
+
+The runtime is installed under ~/.memory-mcp/ (not in the repo) so the launchd
+background agent can run it even when the repo lives in a macOS TCC-protected
+folder like ~/Desktop, ~/Documents, or ~/Downloads.
 """
 
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,8 +27,17 @@ from memory_mcp.config import settings
 
 LAUNCHD_LABEL = "com.claude-memory-mcp.daemon"
 REPO_DIR = Path(__file__).resolve().parents[2]
-VENV_MEMORY_MCP = REPO_DIR / ".venv" / "bin" / "memory-mcp"
 HOOKS_DIR = REPO_DIR / ".claude" / "hooks"
+
+
+def runtime_dir() -> Path:
+    """Self-contained venv the launchd daemon runs from."""
+    return settings.data_dir / "runtime"
+
+
+def runtime_ui_dir() -> Path:
+    """Built frontend, copied here so the daemon serves it from a stable path."""
+    return settings.data_dir / "ui"
 
 HOOK_EVENTS = {
     "UserPromptSubmit": "inject-rules.sh",
@@ -63,7 +78,41 @@ def setup_embedding_model() -> None:
     assert len(test) == settings.embedding_dim
 
 
-# ---------- 4. launchd ----------
+# ---------- 4. runtime install ----------
+
+def setup_runtime() -> None:
+    """Install the daemon into a self-contained venv under the data dir.
+
+    Keeps the runnable code out of the repo so a launchd background agent can
+    start it regardless of where the repo lives (e.g. a TCC-protected folder).
+    """
+    rt = runtime_dir()
+    subprocess.run(
+        ["uv", "venv", "--allow-existing", str(rt)],
+        capture_output=True, text=True, check=True,
+    )
+    result = subprocess.run(
+        ["uv", "pip", "install", "--python", str(rt / "bin" / "python"),
+         "--quiet", str(REPO_DIR)],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip()[-400:] or "uv pip install failed")
+    print(f"    Runtime venv: {rt}")
+
+    dist = REPO_DIR / "frontend" / "dist"
+    ui = runtime_ui_dir()
+    if dist.is_dir():
+        if ui.exists():
+            shutil.rmtree(ui)
+        shutil.copytree(dist, ui)
+        print(f"    UI installed: {ui}")
+    else:
+        print("    Warning: frontend/dist not found - build it with "
+              "'cd frontend && npm run build', then re-run setup.")
+
+
+# ---------- 5. launchd ----------
 
 def launchd_plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
@@ -75,11 +124,14 @@ def setup_launchd() -> None:
         print("    Not macOS - skipping launchd. Run `memory-mcp serve` manually.")
         return
 
-    program = str(VENV_MEMORY_MCP) if VENV_MEMORY_MCP.exists() else "memory-mcp"
+    program = str(runtime_dir() / "bin" / "memory-mcp")
     plist = {
         "Label": LAUNCHD_LABEL,
         "ProgramArguments": [program, "serve"],
-        "EnvironmentVariables": {"MEMORY_MCP_DATA_DIR": str(settings.data_dir)},
+        "EnvironmentVariables": {
+            "MEMORY_MCP_DATA_DIR": str(settings.data_dir),
+            "MEMORY_MCP_UI_DIR": str(runtime_ui_dir()),
+        },
         "RunAtLoad": True,
         "KeepAlive": True,
         "StandardOutPath": str(settings.data_dir / "daemon.log"),
@@ -100,7 +152,7 @@ def setup_launchd() -> None:
         print(f"    Warning: launchctl load failed: {result.stderr.strip()}")
 
 
-# ---------- 5. /etc/hosts ----------
+# ---------- 6. /etc/hosts ----------
 
 def setup_hosts() -> None:
     hostname = settings.daemon_hostname
@@ -114,7 +166,7 @@ def setup_hosts() -> None:
     print(f'      echo "127.0.0.1 {hostname}" | sudo tee -a /etc/hosts')
 
 
-# ---------- 6. Claude MCP config ----------
+# ---------- 7. Claude MCP config ----------
 
 def claude_json_path() -> Path:
     return Path.home() / ".claude.json"
@@ -139,7 +191,7 @@ def setup_claude_mcp() -> None:
     print(f"    MCP server 'memory' -> http://127.0.0.1:{settings.daemon_port}/mcp")
 
 
-# ---------- 7. hooks ----------
+# ---------- 8. hooks ----------
 
 def claude_settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
@@ -157,7 +209,11 @@ def _add_hook(settings_obj: dict, event: str, command: str) -> bool:
 
 
 def setup_hooks() -> None:
-    """Install the rule-injection / session hooks into global Claude settings."""
+    """Install the rule-injection / session hooks into global Claude settings.
+
+    The hook scripts are copied to ~/.memory-mcp/hooks/ so the install does not
+    depend on the repo staying in place.
+    """
     path = claude_settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     settings_obj: dict = {}
@@ -168,17 +224,36 @@ def setup_hooks() -> None:
             print("    Warning: ~/.claude/settings.json invalid - skipping hooks.")
             return
 
+    hooks_dest = settings.data_dir / "hooks"
+    hooks_dest.mkdir(parents=True, exist_ok=True)
+
+    # Drop any prior memory-mcp hook entries (e.g. stale repo-path ones from an
+    # earlier install) so re-running setup stays idempotent.
+    scripts = set(HOOK_EVENTS.values())
+    for event, groups in list(settings_obj.get("hooks", {}).items()):
+        kept_groups = []
+        for group in groups:
+            group["hooks"] = [
+                h for h in group.get("hooks", [])
+                if not any(h.get("command", "").endswith(s) for s in scripts)
+            ]
+            if group["hooks"]:
+                kept_groups.append(group)
+        settings_obj["hooks"][event] = kept_groups
+
     added = 0
     for event, script in HOOK_EVENTS.items():
-        script_path = HOOKS_DIR / script
-        if not script_path.exists():
+        src = HOOKS_DIR / script
+        if not src.exists():
             continue
-        os.chmod(script_path, 0o755)
-        if _add_hook(settings_obj, event, str(script_path)):
+        dst = hooks_dest / script
+        shutil.copy2(src, dst)
+        os.chmod(dst, 0o755)
+        if _add_hook(settings_obj, event, str(dst)):
             added += 1
 
     path.write_text(json.dumps(settings_obj, indent=2))
-    print(f"    Hooks installed ({added} added, rest already present)")
+    print(f"    Hooks installed to {hooks_dest} ({added} added)")
 
 
 # ---------- main ----------
@@ -194,6 +269,7 @@ def main() -> None:
         ("Creating directories", setup_directories),
         ("Installing DuckDB VSS extension", setup_vss),
         ("Downloading embedding model (~80MB first run)", setup_embedding_model),
+        ("Installing the daemon runtime (this can take a minute)", setup_runtime),
         ("Installing launchd daemon agent", setup_launchd),
         ("Checking /etc/hosts entry", setup_hosts),
         ("Configuring Claude Code MCP (HTTP daemon)", setup_claude_mcp),

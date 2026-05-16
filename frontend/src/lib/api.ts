@@ -3,6 +3,7 @@ import type {
   Health,
   ImportResult,
   ImportRulesResult,
+  LoadFromFolderResult,
   Memory,
   MemoryInput,
   MemoryListResponse,
@@ -111,6 +112,13 @@ export const api = {
     return request("/api/projects", {
       method: "POST",
       body: JSON.stringify(input),
+    });
+  },
+
+  loadProjectFromFolder(path: string): Promise<LoadFromFolderResult> {
+    return request<LoadFromFolderResult>("/api/projects/load-from-folder", {
+      method: "POST",
+      body: JSON.stringify({ path }),
     });
   },
 

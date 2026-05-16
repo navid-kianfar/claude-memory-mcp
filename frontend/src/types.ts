@@ -179,3 +179,22 @@ export interface ImportRulesResult {
   skipped: number;
   memories: number;
 }
+
+export type LoadFromFolderSource =
+  | "existing_memory_db"
+  | "claude_md"
+  | "new_empty";
+
+export interface LoadFromFolderResult {
+  status: string;
+  project: {
+    slug: string;
+    display_name: string;
+    db_path: string;
+    project_path: string;
+  };
+  folder: string;
+  claude_md_imported: number;
+  source: LoadFromFolderSource;
+  active: boolean;
+}

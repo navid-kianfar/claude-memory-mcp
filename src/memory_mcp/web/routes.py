@@ -162,6 +162,15 @@ def _create_project(params, body, query):
     return {"status": "ok", "project": project.model_dump(mode="json")}, 201
 
 
+def _load_from_folder(params, body, query):
+    from memory_mcp.folder_import import load_project_from_folder
+
+    path = (body.get("path") or "").strip()
+    if not path:
+        raise ValueError("path is required")
+    return load_project_from_folder(path)
+
+
 def _project_info(params, body, query):
     slug = params["slug"]
     project = container.project_service.get(slug)
@@ -434,6 +443,7 @@ def build_routes() -> list:
         Route("/api/meta", _api(_meta), methods=["GET"]),
         Route("/api/projects", _api(_list_projects), methods=["GET"]),
         Route("/api/projects", _api(_create_project), methods=["POST"]),
+        Route("/api/projects/load-from-folder", _api(_load_from_folder), methods=["POST"]),
         Route("/api/active", _api(_set_active), methods=["POST"]),
         Route("/api/projects/{slug}", _api(_project_info), methods=["GET"]),
         Route("/api/projects/{slug}/memories", _api(_list_memories), methods=["GET"]),

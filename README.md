@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/navid-kianfar/claude-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/navid-kianfar/claude-memory-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Docker Hub](https://img.shields.io/docker/v/kianfar/claude-memory-mcp?logo=docker&logoColor=white&label=docker%20hub&sort=semver)](https://hub.docker.com/r/kianfar/claude-memory-mcp)
+[![Docker Hub](https://img.shields.io/badge/docker%20hub-kianfar%2Fclaude--memory--mcp-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/kianfar/claude-memory-mcp)
 
 Claude forgets everything between sessions. You re-explain the same decisions,
 rules get missed, and context is lost when the window fills up. Claude Memory
@@ -249,6 +249,21 @@ Run the daemon directly:
 ```bash
 uv run memory-mcp serve
 ```
+
+## Releasing
+
+The Docker image is published only for **tagged releases** — never on ordinary
+commits. Cut a release with the helper script:
+
+```bash
+./scripts/release.sh           # patch bump (0.6.0 -> 0.6.1)
+./scripts/release.sh minor     # 0.6.0 -> 0.7.0
+./scripts/release.sh 1.2.3     # explicit version
+```
+
+It runs the tests, bumps the version in `pyproject.toml` and the package,
+commits, creates a `vX.Y.Z` tag, and pushes. The tag push triggers the workflow
+that builds and publishes the multi-arch image to Docker Hub.
 
 ## License
 

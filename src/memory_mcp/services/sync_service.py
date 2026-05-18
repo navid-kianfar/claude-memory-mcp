@@ -67,12 +67,19 @@ class SyncService:
     def apply_snapshot(
         self, project: str, categories: dict, reconcile: list[str],
     ) -> dict:
-        """Reconcile the project DB to match the snapshot.
+        """Reconcile the project DB toward the snapshot - additively and safely.
 
-        Only categories listed in `reconcile` are touched - a category whose
-        snapshot file failed to parse is left out so its DB rows are preserved.
+        Sync NEVER deletes. A memory present locally but absent from the
+        snapshot is kept: a stale snapshot (e.g. an export missed because a
+        chat was deleted before its turn ended) must not be able to destroy
+        rules. An entry that differs is updated only when the snapshot's copy
+        is strictly newer, so a stale snapshot also cannot revert a local
+        edit. Removing a rule is always explicit (memory_delete_rule / the UI).
+
+        Only categories in `reconcile` are considered - a category whose
+        snapshot file failed to parse is skipped entirely.
         """
-        added = updated = deleted = 0
+        added = updated = kept_local = 0
         for category in reconcile:
             if category not in SYNC_CATEGORIES:
                 continue
@@ -87,18 +94,35 @@ class SyncService:
                 if mid not in current:
                     self._insert(project, md)
                     added += 1
-                elif self._differs(md, current[mid]):
+                elif self._differs(md, current[mid]) and self._snapshot_newer(
+                    md, current[mid]
+                ):
                     self._update(project, md, current[mid])
                     updated += 1
-            for mid in current:
-                if mid not in wanted:
-                    self._memory_repo.hard_delete(project, mid)
-                    deleted += 1
-        return {"added": added, "updated": updated, "deleted": deleted}
+            kept_local += sum(1 for mid in current if mid not in wanted)
+        return {"added": added, "updated": updated, "kept_local_only": kept_local}
 
     def _differs(self, md: dict, memory) -> bool:
         current = _mem_to_dict(memory)
         return any(md.get(f) != current.get(f) for f in _SYNC_FIELDS)
+
+    def _snapshot_newer(self, md: dict, memory) -> bool:
+        """True only when the snapshot's copy is strictly newer than the DB's.
+
+        Prevents a stale snapshot from overwriting a more recent local edit.
+        """
+        snap = _parse_dt(md.get("updated_at"))
+        if snap is None:
+            return False
+        current = memory.updated_at
+        if current is None:
+            return True
+        try:
+            snap = snap.replace(tzinfo=None)
+            current = current.replace(tzinfo=None)
+            return snap > current
+        except Exception:  # noqa: BLE001
+            return False
 
     def _insert(self, project: str, md: dict) -> None:
         embedding = embed_text(prepare_embedding_text(md["title"], md["content"]))

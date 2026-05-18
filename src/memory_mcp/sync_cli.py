@@ -89,12 +89,12 @@ def _import(cwd: str) -> None:
         f"/api/projects/{slug}/sync-import", "POST",
         {"categories": categories, "reconcile": reconcile},
     )
-    changed = result.get("added", 0) + result.get("updated", 0) + result.get("deleted", 0)
-    if changed:
+    added = result.get("added", 0)
+    updated = result.get("updated", 0)
+    if added or updated:
         print(
             f"[Memory MCP] Imported project memory from .claude-memory/ "
-            f"(+{result.get('added', 0)} ~{result.get('updated', 0)} "
-            f"-{result.get('deleted', 0)})."
+            f"({added} new, {updated} updated)."
         )
     if parse_failed:
         print(

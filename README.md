@@ -225,8 +225,12 @@ category, diff- and merge-friendly (no binary database, no embeddings). A
 `git push` carries the latest memory; a teammate's `git pull` plus their next
 session imports it back. The export runs at the end of each turn and the
 import at session start (both via hooks), and the central database stays the
-daemon's fast working copy. Each project's memory is separate — sharing one
-never exposes the others.
+daemon's fast working copy.
+
+Import is **safe by design**: it only adds new entries and applies edits that
+are strictly newer — it never deletes, and never reverts a more recent local
+change. Removing a rule is always explicit. Each project's memory is separate —
+sharing one never exposes the others.
 
 ## Architecture
 

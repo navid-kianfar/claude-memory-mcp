@@ -60,28 +60,36 @@ class TestApplySnapshot:
         assert result["added"] == 2
         assert container.rules_service.get_rules(dst).total == 1
 
-    def test_updates_changed_memory(self, container):
+    def test_applies_a_newer_edit(self, container):
         p = _project(container, "u1")
         memory = _store(container, p, "decision", "D1", "original")
         snap = container.sync_service.build_snapshot(p)
-        snap["decision"][0]["content"] = "changed content"
+        snap["decision"][0]["content"] = "edited on another device"
+        snap["decision"][0]["updated_at"] = "2099-01-01T00:00:00"  # newer
 
         result = container.sync_service.apply_snapshot(p, snap, ["decision"])
         assert result["updated"] == 1
-        assert container.memory_repo.get_by_id(p, memory.id).content == "changed content"
+        assert container.memory_repo.get_by_id(p, memory.id).content == (
+            "edited on another device"
+        )
 
-    def test_deletes_memory_absent_from_snapshot(self, container):
+    def test_ignores_a_stale_edit(self, container):
+        p = _project(container, "u2")
+        memory = _store(container, p, "decision", "D1", "current content")
+        snap = container.sync_service.build_snapshot(p)
+        snap["decision"][0]["content"] = "stale content from an old snapshot"
+        snap["decision"][0]["updated_at"] = "2000-01-01T00:00:00"  # older
+
+        container.sync_service.apply_snapshot(p, snap, ["decision"])
+        # The newer local edit must NOT be reverted by a stale snapshot.
+        assert container.memory_repo.get_by_id(p, memory.id).content == "current content"
+
+    def test_never_deletes_a_memory_absent_from_snapshot(self, container):
+        """A stale/empty snapshot must never destroy a rule (the reported bug)."""
         p = _project(container, "d1")
-        memory = _store(container, p, "decision", "D1", "to be removed")
+        memory = _store(container, p, "forbidden_rules", "R1", "do not delete me")
 
-        result = container.sync_service.apply_snapshot(p, {}, ["decision"])
-        assert result["deleted"] == 1
-        assert container.memory_repo.get_by_id(p, memory.id) is None
-
-    def test_unreconciled_category_is_left_untouched(self, container):
-        p = _project(container, "x1")
-        memory = _store(container, p, "decision", "D1", "keep me")
-
-        # Only mandatory_rules is reconciled; the decision must survive.
-        container.sync_service.apply_snapshot(p, {}, ["mandatory_rules"])
+        result = container.sync_service.apply_snapshot(p, {}, ["forbidden_rules"])
+        assert "deleted" not in result
         assert container.memory_repo.get_by_id(p, memory.id) is not None
+        assert container.rules_service.get_rules(p).total == 1

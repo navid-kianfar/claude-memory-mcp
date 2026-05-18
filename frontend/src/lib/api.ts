@@ -123,6 +123,15 @@ export const api = {
     });
   },
 
+  pickFolder(
+    prompt?: string
+  ): Promise<{ status: "ok" | "cancelled" | "unavailable"; path?: string }> {
+    return request("/api/pick-folder", {
+      method: "POST",
+      body: JSON.stringify(prompt ? { prompt } : {}),
+    });
+  },
+
   linkFolder(slug: string, path: string): Promise<LinkFolderResult> {
     return request<LinkFolderResult>(
       `/api/projects/${encodeURIComponent(slug)}/link-folder`,

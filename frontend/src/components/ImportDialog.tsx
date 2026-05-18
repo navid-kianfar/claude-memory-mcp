@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "./ui/Dialog";
 import { Button } from "./ui/Button";
-import { Input } from "./ui/Input";
+import { FolderInput } from "./ui/FolderInput";
 import { Label } from "./ui/Label";
 import { Switch } from "./ui/Switch";
 
@@ -40,12 +40,12 @@ export function ImportDialog({
       <DialogBody>
         <div className="space-y-1.5">
           <Label htmlFor="import-path">File path</Label>
-          <Input
+          <FolderInput
             id="import-path"
             value={path}
-            onChange={(e) => setPath(e.target.value)}
+            onChange={setPath}
             placeholder="/path/to/CLAUDE.md"
-            className="font-mono"
+            pickPrompt="Select the folder containing CLAUDE.md"
           />
         </div>
         <div className="flex items-start justify-between gap-4 rounded-md border border-border p-3">

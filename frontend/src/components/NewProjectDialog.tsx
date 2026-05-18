@@ -9,6 +9,7 @@ import { api } from "../lib/api";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "./ui/Dialog";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
+import { FolderInput } from "./ui/FolderInput";
 import { Textarea } from "./ui/Textarea";
 import { Label } from "./ui/Label";
 import { Tabs } from "./ui/Tabs";
@@ -241,12 +242,11 @@ export function NewProjectDialog({
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="proj-path">Project folder</Label>
-              <Input
+              <FolderInput
                 id="proj-path"
                 value={projectPath}
-                onChange={(e) => setProjectPath(e.target.value)}
+                onChange={setProjectPath}
                 placeholder="/absolute/path/to/folder"
-                className="font-mono"
               />
               <p className="text-xs text-muted-foreground">
                 Optional — bind this project to a folder so its rules sync
@@ -258,11 +258,11 @@ export function NewProjectDialog({
           <>
             <div className="space-y-1.5">
               <Label htmlFor="proj-folder">Folder path</Label>
-              <Input
+              <FolderInput
                 id="proj-folder"
                 value={folderPath}
-                onChange={(e) => {
-                  setFolderPath(e.target.value);
+                onChange={(v) => {
+                  setFolderPath(v);
                   if (folderError) setFolderError(null);
                 }}
                 onKeyDown={(e) => {
@@ -272,7 +272,6 @@ export function NewProjectDialog({
                   }
                 }}
                 placeholder="/absolute/path/to/project"
-                className="font-mono"
               />
               <p className="text-xs text-muted-foreground">
                 The project name is derived from the folder. An existing

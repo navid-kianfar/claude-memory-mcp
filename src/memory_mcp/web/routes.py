@@ -171,6 +171,44 @@ def _link_folder(params, body, query):
     return {"status": "ok", "project": info.model_dump(mode="json")}
 
 
+def _pick_folder(params, body, query):
+    """Open a native OS folder picker on the daemon host, return the chosen path.
+
+    Browsers cannot expose absolute filesystem paths, so the picker runs here
+    (the daemon is a local process). macOS uses `osascript`, Linux uses
+    `zenity`; anywhere else - or headless - it reports unavailable so the UI
+    falls back to a plain typed path.
+    """
+    import subprocess
+    import sys
+
+    prompt = (body.get("prompt") or "Select the project folder")
+    prompt = prompt.replace('"', "").replace("\\", "")[:120]
+    try:
+        if sys.platform == "darwin":
+            proc = subprocess.run(
+                ["osascript", "-e",
+                 f'POSIX path of (choose folder with prompt "{prompt}")'],
+                capture_output=True, text=True, timeout=600,
+            )
+        elif sys.platform.startswith("linux"):
+            proc = subprocess.run(
+                ["zenity", "--file-selection", "--directory", "--title", prompt],
+                capture_output=True, text=True, timeout=600,
+            )
+        else:
+            return {"status": "unavailable"}
+    except FileNotFoundError:
+        return {"status": "unavailable"}
+    except subprocess.TimeoutExpired:
+        return {"status": "cancelled"}
+
+    if proc.returncode != 0:
+        return {"status": "cancelled"}  # user dismissed the dialog
+    path = proc.stdout.strip().rstrip("/")
+    return {"status": "ok", "path": path} if path else {"status": "cancelled"}
+
+
 def _load_from_folder(params, body, query):
     from memory_mcp.folder_import import load_project_from_folder
 
@@ -472,6 +510,7 @@ def build_routes() -> list:
         Route("/api/projects", _api(_list_projects), methods=["GET"]),
         Route("/api/projects", _api(_create_project), methods=["POST"]),
         Route("/api/projects/load-from-folder", _api(_load_from_folder), methods=["POST"]),
+        Route("/api/pick-folder", _api(_pick_folder), methods=["POST"]),
         Route("/api/active", _api(_set_active), methods=["POST"]),
         Route("/api/projects/{slug}", _api(_project_info), methods=["GET"]),
         Route("/api/projects/{slug}/memories", _api(_list_memories), methods=["GET"]),

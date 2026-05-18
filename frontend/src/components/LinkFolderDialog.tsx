@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "./ui/Dialog";
 import { Button } from "./ui/Button";
-import { Input } from "./ui/Input";
+import { FolderInput } from "./ui/FolderInput";
 import { Label } from "./ui/Label";
 
 export interface LinkFolderDialogProps {
@@ -56,11 +56,11 @@ export function LinkFolderDialog({
       <DialogBody>
         <div className="space-y-1.5">
           <Label htmlFor="link-folder-path">Folder path</Label>
-          <Input
+          <FolderInput
             id="link-folder-path"
             value={path}
-            onChange={(e) => {
-              setPath(e.target.value);
+            onChange={(v) => {
+              setPath(v);
               if (error) setError(null);
             }}
             onKeyDown={(e) => {
@@ -70,7 +70,6 @@ export function LinkFolderDialog({
               }
             }}
             placeholder="/absolute/path/to/folder"
-            className="font-mono"
           />
           <p className="text-xs text-muted-foreground">
             A <code>.claude-memory/</code> snapshot is written into this

@@ -83,6 +83,46 @@ def _api(fn):
 # ---------- Handlers ----------
 
 
+async def _hook_auto_register(request):
+    """Auto-register the working directory as a project (used by the hook).
+
+    When Claude Code starts a session in a git repository that is not yet a
+    memory project, register it so it shows up in the UI - even before it has
+    any rules. Returns a short note, or empty when nothing was done.
+    """
+    cwd = request.query_params.get("cwd", "")
+
+    def _resolve() -> str:
+        from pathlib import Path
+
+        from memory_mcp.context import detect_project_from_cwd
+        from memory_mcp.utils.text import slugify
+
+        if not cwd:
+            return ""
+        folder = Path(cwd)
+        if not folder.is_dir():
+            return ""
+        if detect_project_from_cwd(cwd):
+            return ""  # already a registered project
+        if not (folder / ".git").is_dir():
+            return ""  # only auto-register actual repositories
+        slug = slugify(folder.name)
+        if not slug or container.project_repo.get(slug) is not None:
+            return ""  # no name, or the slug is already taken by another project
+        container.project_service.init_project(slug, folder.name, project_path=cwd)
+        return (
+            f"[Memory MCP] Registered this folder as project '{slug}' - "
+            f"it now appears in the management UI."
+        )
+
+    try:
+        text = await to_thread.run_sync(_resolve)
+    except Exception:  # noqa: BLE001
+        text = ""
+    return PlainTextResponse(text)
+
+
 def _index(_request):
     """Serve the built React SPA, or a placeholder when it has not been built."""
     index = _DIST / "index.html"
@@ -506,6 +546,7 @@ def build_routes() -> list:
         Route("/", _index, methods=["GET"]),
         Route("/api/health", _api(_health), methods=["GET"]),
         Route("/api/hook/rules", _hook_rules, methods=["GET"]),
+        Route("/api/hook/auto-register", _hook_auto_register, methods=["GET"]),
         Route("/api/meta", _api(_meta), methods=["GET"]),
         Route("/api/projects", _api(_list_projects), methods=["GET"]),
         Route("/api/projects", _api(_create_project), methods=["POST"]),

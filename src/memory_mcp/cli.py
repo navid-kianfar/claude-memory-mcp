@@ -6,11 +6,12 @@
   memory-mcp rules      -> print the current project's rules (used by hooks)
   memory-mcp sync ...   -> export/import the project memory snapshot (hooks)
   memory-mcp setup      -> run interactive setup
+  memory-mcp update     -> rebuild the runtime from source + reload the daemon
 """
 
 import sys
 
-USAGE = "Usage: memory-mcp [stdio|serve|rules|sync|setup]"
+USAGE = "Usage: memory-mcp [stdio|serve|rules|sync|setup|update]"
 
 
 def main() -> None:
@@ -32,6 +33,9 @@ def main() -> None:
     elif cmd == "setup":
         from memory_mcp.setup import main as setup_main
         setup_main()
+    elif cmd == "update":
+        from memory_mcp.setup import run_update
+        run_update()
     elif cmd in ("-h", "--help", "help"):
         print(USAGE)
     else:

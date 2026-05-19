@@ -256,6 +256,20 @@ def setup_hooks() -> None:
     print(f"    Hooks installed to {hooks_dest} ({added} added)")
 
 
+# ---------- lean update ----------
+
+def run_update() -> None:
+    """Rebuild the runtime from the current source and reload the daemon.
+
+    Lighter than full setup (skips the model/VSS/hosts/MCP-config/hooks
+    steps) - used by the auto-update hook when the repo source changes.
+    """
+    print("Updating the local installation...")
+    setup_runtime()
+    setup_launchd()
+    print("Local installation updated.")
+
+
 # ---------- main ----------
 
 def main() -> None:

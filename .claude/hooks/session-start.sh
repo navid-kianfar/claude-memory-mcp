@@ -9,6 +9,11 @@ CWD=$(printf '%s' "$INPUT" | python3 -c "import sys,json; print(json.load(sys.st
 PORT="${MEMORY_MCP_DAEMON_PORT:-8765}"
 MEMORY_MCP_BIN="${MEMORY_MCP_BIN:-$HOME/.claude-memory-mcp/runtime/bin/memory-mcp}"
 
+# Register this folder as a project (if it is a git repo and not registered),
+# so it appears in the management UI even before it has any rules.
+curl -s -G --max-time 3 "http://127.0.0.1:${PORT}/api/hook/auto-register" \
+  --data-urlencode "cwd=${CWD}" 2>/dev/null
+
 # Pull any git-synced project memory into the central store.
 [ -x "$MEMORY_MCP_BIN" ] && "$MEMORY_MCP_BIN" sync import --cwd "$CWD" 2>/dev/null
 

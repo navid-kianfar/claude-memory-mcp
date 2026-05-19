@@ -34,6 +34,7 @@ export interface CommandContext {
   filterByCategory: (category: string) => void;
   importClaudeMd: () => void;
   importRules: () => void;
+  bulkAddRule: () => void;
   refresh: () => void;
   toggleTheme: () => void;
 }
@@ -175,6 +176,13 @@ export function buildCommands(ctx: CommandContext): Command[] {
   }
 
   commands.push(
+    {
+      id: "action:bulk-rule",
+      group: "Actions",
+      label: "Add a rule to multiple projects",
+      keywords: "bulk rule all projects global mass apply many",
+      run: () => ctx.bulkAddRule(),
+    },
     {
       id: "action:refresh",
       group: "Actions",

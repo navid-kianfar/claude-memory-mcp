@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, LayoutTemplate, Plus, RefreshCw } from "lucide-react";
-import type { Template, TemplateItem, TemplateItemInput } from "../types";
+import { ArrowLeft, LayoutTemplate, Pencil, Plus, RefreshCw } from "lucide-react";
+import type {
+  Template,
+  TemplateItem,
+  TemplateItemInput,
+  TemplateUpdate,
+} from "../types";
 import { api } from "../lib/api";
 import { formatRelative, priorityLabel } from "../lib/utils";
 import { useToast } from "./ui/Toast";
@@ -8,6 +13,7 @@ import { Card } from "./ui/Card";
 import { Button } from "./ui/Button";
 import { Badge, CategoryBadge } from "./ui/Badge";
 import { NewTemplateDialog } from "./NewTemplateDialog";
+import { EditTemplateDialog } from "./EditTemplateDialog";
 import { TemplateItemDialog } from "./TemplateItemDialog";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -42,6 +48,9 @@ export function TemplatesView({
   const [deleteTemplate, setDeleteTemplate] = useState<Template | null>(null);
   const [deleteItem, setDeleteItem] = useState<TemplateItem | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [editTpl, setEditTpl] = useState<Template | null>(null);
+  const [editTplSaving, setEditTplSaving] = useState(false);
+  const [editTplError, setEditTplError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -87,6 +96,26 @@ export function TemplatesView({
         });
       } finally {
         setCreating(false);
+      }
+    },
+    [load, toast]
+  );
+
+  const updateTemplate = useCallback(
+    async (id: number, input: TemplateUpdate) => {
+      setEditTplSaving(true);
+      setEditTplError(null);
+      try {
+        await api.updateTemplate(id, input);
+        toast({ title: "Template updated", variant: "success" });
+        setEditTpl(null);
+        await load();
+      } catch (err) {
+        setEditTplError(
+          err instanceof Error ? err.message : "Failed to update template"
+        );
+      } finally {
+        setEditTplSaving(false);
       }
     },
     [load, toast]
@@ -186,10 +215,16 @@ export function TemplatesView({
             <RefreshCw />
           </Button>
           {selected ? (
-            <Button onClick={() => setItemEditor({ open: true })}>
-              <Plus />
-              Add item
-            </Button>
+            <>
+              <Button variant="outline" onClick={() => setEditTpl(selected)}>
+                <Pencil />
+                Rename
+              </Button>
+              <Button onClick={() => setItemEditor({ open: true })}>
+                <Plus />
+                Add item
+              </Button>
+            </>
           ) : (
             <Button onClick={() => setNewOpen(true)}>
               <Plus />
@@ -255,6 +290,13 @@ export function TemplatesView({
                         onClick={() => setSelectedId(t.id)}
                       >
                         Open
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setEditTpl(t)}
+                      >
+                        Rename
                       </Button>
                       <Button
                         size="sm"
@@ -338,6 +380,19 @@ export function TemplatesView({
         onClose={() => setNewOpen(false)}
         saving={creating}
         onCreate={createTemplate}
+      />
+
+      <EditTemplateDialog
+        open={Boolean(editTpl)}
+        onClose={() => {
+          setEditTpl(null);
+          setEditTplError(null);
+        }}
+        saving={editTplSaving}
+        template={editTpl}
+        error={editTplError}
+        onErrorClear={() => setEditTplError(null)}
+        onSave={updateTemplate}
       />
 
       <TemplateItemDialog

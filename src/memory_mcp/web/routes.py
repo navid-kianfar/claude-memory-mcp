@@ -270,6 +270,16 @@ def _project_info(params, body, query):
     return {"project": project.model_dump(mode="json"), "counts": counts}
 
 
+def _update_project(params, body, query):
+    """Rename a project / update its description."""
+    info = container.project_service.update_project(
+        params["slug"],
+        display_name=(body.get("display_name") or None),
+        description=body.get("description"),
+    )
+    return {"status": "ok", "project": info.model_dump(mode="json")}
+
+
 def _set_active(params, body, query):
     slug = (body.get("slug") or "").strip()
     if not slug:
@@ -418,6 +428,37 @@ def _delete_rule(params, body, query):
     return container.memory_service.delete(slug, params["rid"], hard=hard)
 
 
+def _bulk_add_rule(params, body, query):
+    """Add one rule to many projects at once (all registered, or a chosen list)."""
+    category = rule_category(body.get("rule_type"))
+    title = (body.get("title") or "").strip()
+    content = (body.get("content") or "").strip()
+    if not title or not content:
+        raise ValueError("title and content are required")
+    priority = body.get("priority", 2)
+
+    slugs = body.get("projects")
+    if not slugs:  # empty / omitted -> every registered project
+        slugs = [p.slug for p in container.project_service.list_all()]
+
+    results = []
+    for slug in slugs:
+        try:
+            container.project_service.get(slug)  # validate it exists
+            memory = container.memory_service.store(
+                StoreMemoryRequest(
+                    project=slug, category=category, title=title,
+                    content=content, priority=priority, source="user",
+                )
+            )
+            results.append({"project": slug, "status": "ok", "rule_id": memory.id})
+        except Exception as e:  # noqa: BLE001
+            results.append({"project": slug, "status": "error", "error": str(e)})
+
+    added = sum(1 for r in results if r["status"] == "ok")
+    return {"status": "ok", "added": added, "total": len(slugs), "results": results}
+
+
 def _sessions(params, body, query):
     sessions = container.session_repo.list_all(params["slug"], limit=50)
     return {"sessions": [s.model_dump(mode="json") for s in sessions]}
@@ -554,6 +595,8 @@ def build_routes() -> list:
         Route("/api/pick-folder", _api(_pick_folder), methods=["POST"]),
         Route("/api/active", _api(_set_active), methods=["POST"]),
         Route("/api/projects/{slug}", _api(_project_info), methods=["GET"]),
+        Route("/api/projects/{slug}", _api(_update_project), methods=["PUT"]),
+        Route("/api/rules/bulk", _api(_bulk_add_rule), methods=["POST"]),
         Route("/api/projects/{slug}/memories", _api(_list_memories), methods=["GET"]),
         Route("/api/projects/{slug}/memories", _api(_create_memory), methods=["POST"]),
         Route("/api/projects/{slug}/memories/{mid}", _api(_update_memory), methods=["PUT"]),

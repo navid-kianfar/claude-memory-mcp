@@ -7,14 +7,17 @@ import {
   Link2,
   ListChecks,
   Moon,
+  Pencil,
   ShieldAlert,
   Sun,
 } from "lucide-react";
 import type {
+  BulkAddRuleResult,
   Memory,
   MemoryStatus,
   Meta,
   Project,
+  ProjectUpdate,
   Session,
 } from "./types";
 import { api } from "./lib/api";
@@ -39,6 +42,8 @@ import { ImportDialog } from "./components/ImportDialog";
 import { ImportRulesDialog } from "./components/ImportRulesDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { TemplatesView } from "./components/TemplatesView";
+import { EditProjectDialog } from "./components/EditProjectDialog";
+import { BulkAddRuleDialog } from "./components/BulkAddRuleDialog";
 
 type TabValue = "memories" | "rules" | "sessions";
 
@@ -99,6 +104,9 @@ function AppInner() {
   const [deleteTarget, setDeleteTarget] = useState<Memory | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [editProjectOpen, setEditProjectOpen] = useState(false);
+  const [editProjectSaving, setEditProjectSaving] = useState(false);
+  const [bulkRuleOpen, setBulkRuleOpen] = useState(false);
 
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -384,6 +392,27 @@ function AppInner() {
     [selectedSlug, loadProjects, toast]
   );
 
+  const updateProject = useCallback(
+    async (slug: string, input: ProjectUpdate) => {
+      setEditProjectSaving(true);
+      try {
+        await api.updateProject(slug, input);
+        toast({ title: "Project updated", variant: "success" });
+        setEditProjectOpen(false);
+        await loadProjects();
+      } catch (err) {
+        toast({
+          title: "Failed to update project",
+          description: err instanceof Error ? err.message : undefined,
+          variant: "error",
+        });
+      } finally {
+        setEditProjectSaving(false);
+      }
+    },
+    [loadProjects, toast]
+  );
+
   const handleSeeded = useCallback(
     (summary: string) => {
       toast({
@@ -457,6 +486,10 @@ function AppInner() {
         importRules: () => {
           setView("projects");
           setImportRulesOpen(true);
+        },
+        bulkAddRule: () => {
+          setView("projects");
+          setBulkRuleOpen(true);
         },
         refresh: refreshAll,
         toggleTheme,
@@ -560,6 +593,16 @@ function AppInner() {
               <Button
                 variant="outline"
                 size="sm"
+                onClick={() => setEditProjectOpen(true)}
+              >
+                <Pencil />
+                Edit
+              </Button>
+            )}
+            {view === "projects" && selectedProject && (
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => setImportRulesOpen(true)}
               >
                 <Download />
@@ -658,6 +701,7 @@ function AppInner() {
                     setEditor({ open: true, memory: m, lockCategory: true })
                   }
                   onDelete={(m) => setDeleteTarget(m)}
+                  onBulkAdd={() => setBulkRuleOpen(true)}
                 />
               )}
 
@@ -736,6 +780,37 @@ function AppInner() {
         busy={deleteBusy}
         onConfirm={confirmDelete}
         onClose={() => setDeleteTarget(null)}
+      />
+
+      {selectedProject && (
+        <EditProjectDialog
+          open={editProjectOpen}
+          onClose={() => setEditProjectOpen(false)}
+          saving={editProjectSaving}
+          project={selectedProject}
+          onSave={updateProject}
+        />
+      )}
+
+      <BulkAddRuleDialog
+        open={bulkRuleOpen}
+        onClose={() => setBulkRuleOpen(false)}
+        projects={projects}
+        onDone={(result: BulkAddRuleResult) => {
+          setBulkRuleOpen(false);
+          toast({
+            title: `Rule added to ${result.added} project${
+              result.added === 1 ? "" : "s"
+            }`,
+            description:
+              result.added < result.total
+                ? `${result.total - result.added} project(s) failed`
+                : undefined,
+            variant: "success",
+          });
+          void loadProjects();
+          if (tab === "rules") void loadRules();
+        }}
       />
 
       <CommandPalette

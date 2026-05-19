@@ -84,6 +84,29 @@ class ProjectRepository:
                 (now_iso(), slug),
             )
 
+    def update_meta(
+        self,
+        slug: str,
+        display_name: str | None = None,
+        description: str | None = None,
+    ) -> None:
+        """Update a project's display name and/or description (rename)."""
+        sets: list[str] = []
+        values: list = []
+        if display_name is not None:
+            sets.append("display_name = ?")
+            values.append(display_name)
+        if description is not None:
+            sets.append("description = ?")
+            values.append(description)
+        if not sets:
+            return
+        values.append(slug)
+        with registry_conn() as conn:
+            conn.execute(
+                f"UPDATE projects SET {', '.join(sets)} WHERE slug = ?", values
+            )
+
     def update_db_path(self, slug: str, db_path: str) -> None:
         with registry_conn() as conn:
             conn.execute(

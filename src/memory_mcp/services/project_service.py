@@ -41,6 +41,17 @@ class ProjectService:
         self._repo.update_project_path(slug, project_path)
         return self.get(slug)
 
+    def update_project(
+        self,
+        slug: str,
+        display_name: str | None = None,
+        description: str | None = None,
+    ) -> ProjectInfo:
+        """Rename a project / change its description."""
+        self.get(slug)  # raises if missing
+        self._repo.update_meta(slug, display_name, description)
+        return self.get(slug)
+
     def list_all(self) -> list[ProjectInfo]:
         return self._repo.list_all()
 

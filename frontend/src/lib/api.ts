@@ -1,5 +1,7 @@
 import type {
   ApplyTemplateResult,
+  BulkAddRuleInput,
+  BulkAddRuleResult,
   Health,
   ImportResult,
   ImportRulesResult,
@@ -14,6 +16,7 @@ import type {
   Project,
   ProjectDetail,
   ProjectInput,
+  ProjectUpdate,
   ProvenanceEntry,
   RulesResponse,
   Session,
@@ -112,6 +115,16 @@ export const api = {
   ): Promise<{ status: string; project: Project }> {
     return request("/api/projects", {
       method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  updateProject(
+    slug: string,
+    input: ProjectUpdate
+  ): Promise<{ status: string; project: Project }> {
+    return request(`/api/projects/${encodeURIComponent(slug)}`, {
+      method: "PUT",
       body: JSON.stringify(input),
     });
   },
@@ -336,6 +349,13 @@ export const api = {
         body: JSON.stringify(input),
       }
     );
+  },
+
+  bulkAddRule(input: BulkAddRuleInput): Promise<BulkAddRuleResult> {
+    return request<BulkAddRuleResult>("/api/rules/bulk", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
   },
 };
 

@@ -127,6 +127,30 @@ export interface ProjectInput {
   project_path?: string;
 }
 
+export interface ProjectUpdate {
+  display_name?: string;
+  description?: string;
+}
+
+export interface BulkAddRuleInput {
+  rule_type: "mandatory" | "forbidden";
+  title: string;
+  content: string;
+  priority?: number;
+  projects?: string[];
+}
+
+export interface BulkAddRuleResult {
+  status: string;
+  added: number;
+  total: number;
+  results: Array<{
+    slug: string;
+    status: string;
+    error?: string;
+  }>;
+}
+
 export interface LinkFolderResult {
   status: string;
   project: Project;

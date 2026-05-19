@@ -171,6 +171,22 @@ def memory_link_folder(path: str, project: str | None = None) -> dict:
 
 
 @mcp.tool()
+def memory_rename_project(
+    display_name: str,
+    project: str | None = None,
+    description: str | None = None,
+) -> dict:
+    """Rename a project (its display name) and optionally update its description."""
+    def _run():
+        slug = _resolve(project)
+        info = container.project_service.update_project(
+            slug, display_name=display_name, description=description,
+        )
+        return {"status": "ok", "project": info.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
 def memory_list_projects() -> dict:
     """List all registered projects."""
     projects = container.project_service.list_all()
@@ -424,6 +440,41 @@ def memory_delete_rule(
         slug = _resolve(project)
         _load_rule(slug, rule_id)
         return container.memory_service.delete(slug, rule_id, hard=hard)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_add_rule_bulk(
+    rule_type: str,
+    title: str,
+    content: str,
+    projects: list[str] | None = None,
+    priority: int = 2,
+) -> dict:
+    """Add one rule to many projects at once.
+
+    rule_type is 'mandatory' or 'forbidden'. projects=None adds it to every
+    registered project; otherwise pass a list of project slugs. Lets you push
+    a rule to all your projects without doing it one by one.
+    """
+    def _run():
+        category = rule_category(rule_type)
+        slugs = projects or [p.slug for p in container.project_service.list_all()]
+        results = []
+        for slug in slugs:
+            try:
+                container.project_service.get(slug)
+                container.memory_service.store(
+                    StoreMemoryRequest(
+                        project=slug, category=category, title=title,
+                        content=content, priority=priority, source="assistant",
+                    )
+                )
+                results.append({"project": slug, "status": "ok"})
+            except Exception as e:  # noqa: BLE001
+                results.append({"project": slug, "status": "error", "error": str(e)})
+        added = sum(1 for r in results if r["status"] == "ok")
+        return {"status": "ok", "added": added, "total": len(slugs), "results": results}
     return _safe(_run)
 
 

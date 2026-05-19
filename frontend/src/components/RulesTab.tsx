@@ -1,4 +1,4 @@
-import { Plus, ShieldCheck, ShieldX } from "lucide-react";
+import { Layers, Plus, ShieldCheck, ShieldX } from "lucide-react";
 import type { Memory } from "../types";
 import { formatRelative } from "../lib/utils";
 import { Card } from "./ui/Card";
@@ -12,6 +12,7 @@ export interface RulesTabProps {
   onAdd: (category: "mandatory_rules" | "forbidden_rules") => void;
   onEdit: (memory: Memory) => void;
   onDelete: (memory: Memory) => void;
+  onBulkAdd: () => void;
 }
 
 function RuleColumn({
@@ -114,6 +115,7 @@ export function RulesTab({
   onAdd,
   onEdit,
   onDelete,
+  onBulkAdd,
 }: RulesTabProps) {
   if (error) {
     return (
@@ -124,27 +126,35 @@ export function RulesTab({
   }
 
   return (
-    <div className="grid gap-6 lg:grid-cols-2">
-      <RuleColumn
-        title="Mandatory Rules"
-        tone="mandatory"
-        icon={<ShieldCheck className="size-4" />}
-        rules={mandatory}
-        loading={loading}
-        onAdd={() => onAdd("mandatory_rules")}
-        onEdit={onEdit}
-        onDelete={onDelete}
-      />
-      <RuleColumn
-        title="Forbidden Rules"
-        tone="forbidden"
-        icon={<ShieldX className="size-4" />}
-        rules={forbidden}
-        loading={loading}
-        onAdd={() => onAdd("forbidden_rules")}
-        onEdit={onEdit}
-        onDelete={onDelete}
-      />
+    <div className="space-y-4">
+      <div className="flex justify-end">
+        <Button size="sm" variant="outline" onClick={onBulkAdd}>
+          <Layers />
+          Add to multiple projects…
+        </Button>
+      </div>
+      <div className="grid gap-6 lg:grid-cols-2">
+        <RuleColumn
+          title="Mandatory Rules"
+          tone="mandatory"
+          icon={<ShieldCheck className="size-4" />}
+          rules={mandatory}
+          loading={loading}
+          onAdd={() => onAdd("mandatory_rules")}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
+        <RuleColumn
+          title="Forbidden Rules"
+          tone="forbidden"
+          icon={<ShieldX className="size-4" />}
+          rules={forbidden}
+          loading={loading}
+          onAdd={() => onAdd("forbidden_rules")}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
+      </div>
     </div>
   );
 }

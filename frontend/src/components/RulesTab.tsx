@@ -1,8 +1,9 @@
-import { Layers, Plus, ShieldCheck, ShieldX } from "lucide-react";
+import { Check, Layers, Plus, ShieldCheck, ShieldX, Undo2 } from "lucide-react";
 import type { Memory } from "../types";
 import { formatRelative } from "../lib/utils";
 import { Card } from "./ui/Card";
 import { Button } from "./ui/Button";
+import { Badge } from "./ui/Badge";
 
 export interface RulesTabProps {
   mandatory: Memory[];
@@ -13,6 +14,26 @@ export interface RulesTabProps {
   onEdit: (memory: Memory) => void;
   onDelete: (memory: Memory) => void;
   onBulkAdd: () => void;
+  // Governance (server mode). All optional; when serverMode is falsy the
+  // component renders exactly as before - no badges, no approve/revoke.
+  serverMode?: boolean;
+  isAdmin?: boolean;
+  onApprove?: (memory: Memory) => void;
+  onRevoke?: (memory: Memory) => void;
+}
+
+function ApprovalBadge({ status }: { status?: string }) {
+  if (status === "proposed") {
+    return (
+      <Badge className="border-amber-500/30 bg-amber-500/15 text-amber-500">
+        Pending
+      </Badge>
+    );
+  }
+  if (status === "revoked") {
+    return <Badge variant="destructive">Revoked</Badge>;
+  }
+  return <Badge variant="success">Approved</Badge>;
 }
 
 function RuleColumn({
@@ -24,6 +45,10 @@ function RuleColumn({
   onAdd,
   onEdit,
   onDelete,
+  serverMode,
+  isAdmin,
+  onApprove,
+  onRevoke,
 }: {
   title: string;
   tone: "mandatory" | "forbidden";
@@ -33,6 +58,10 @@ function RuleColumn({
   onAdd: () => void;
   onEdit: (memory: Memory) => void;
   onDelete: (memory: Memory) => void;
+  serverMode?: boolean;
+  isAdmin?: boolean;
+  onApprove?: (memory: Memory) => void;
+  onRevoke?: (memory: Memory) => void;
 }) {
   const accent =
     tone === "mandatory"
@@ -72,37 +101,73 @@ function RuleColumn({
       )}
 
       {!loading &&
-        rules.map((rule) => (
-          <Card key={rule.id} className={`border ${accent}`}>
-            <div className="p-4">
-              <p className="text-sm font-semibold">{rule.title}</p>
-              <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">
-                {rule.content}
-              </p>
-              <div className="mt-2 flex items-center justify-between">
-                <span className="text-xs text-muted-foreground">
-                  {formatRelative(rule.updated_at || rule.created_at)}
-                </span>
-                <div className="flex gap-1.5">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onEdit(rule)}
-                  >
-                    Edit
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onDelete(rule)}
-                  >
-                    Delete
-                  </Button>
+        rules.map((rule) => {
+          const status = rule.approval_status;
+          return (
+            <Card key={rule.id} className={`border ${accent}`}>
+              <div className="p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-sm font-semibold">{rule.title}</p>
+                  {serverMode && <ApprovalBadge status={status} />}
+                </div>
+                <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">
+                  {rule.content}
+                </p>
+                {serverMode && (rule.created_by || rule.approved_by) && (
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    {rule.created_by && <>Proposed by {rule.created_by}</>}
+                    {rule.approved_by && (
+                      <> · Approved by {rule.approved_by}</>
+                    )}
+                  </p>
+                )}
+                <div className="mt-2 flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground">
+                    {formatRelative(rule.updated_at || rule.created_at)}
+                  </span>
+                  <div className="flex gap-1.5">
+                    {serverMode && isAdmin && status !== "approved" && onApprove && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-emerald-500"
+                        onClick={() => onApprove(rule)}
+                      >
+                        <Check className="size-3.5" />
+                        Approve
+                      </Button>
+                    )}
+                    {serverMode && isAdmin && status !== "revoked" && onRevoke && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-amber-500"
+                        onClick={() => onRevoke(rule)}
+                      >
+                        <Undo2 className="size-3.5" />
+                        Revoke
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onEdit(rule)}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onDelete(rule)}
+                    >
+                      Delete
+                    </Button>
+                  </div>
                 </div>
               </div>
-            </div>
-          </Card>
-        ))}
+            </Card>
+          );
+        })}
     </div>
   );
 }
@@ -116,6 +181,10 @@ export function RulesTab({
   onEdit,
   onDelete,
   onBulkAdd,
+  serverMode,
+  isAdmin,
+  onApprove,
+  onRevoke,
 }: RulesTabProps) {
   if (error) {
     return (
@@ -143,6 +212,10 @@ export function RulesTab({
           onAdd={() => onAdd("mandatory_rules")}
           onEdit={onEdit}
           onDelete={onDelete}
+          serverMode={serverMode}
+          isAdmin={isAdmin}
+          onApprove={onApprove}
+          onRevoke={onRevoke}
         />
         <RuleColumn
           title="Forbidden Rules"
@@ -153,6 +226,10 @@ export function RulesTab({
           onAdd={() => onAdd("forbidden_rules")}
           onEdit={onEdit}
           onDelete={onDelete}
+          serverMode={serverMode}
+          isAdmin={isAdmin}
+          onApprove={onApprove}
+          onRevoke={onRevoke}
         />
       </div>
     </div>

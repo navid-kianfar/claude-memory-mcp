@@ -31,9 +31,20 @@ def serve() -> None:
     name = settings.daemon_hostname
     print("=" * 56)
     print("  Claude Memory MCP - daemon")
+    print(f"  Mode         : {settings.mode}")
     print(f"  MCP endpoint : http://{name}:{port}/mcp/")
     print(f"  Management UI: http://{name}:{port}/")
     print(f"  (bound to {host}:{port})")
+    # Safety guardrail: a non-loopback bind with no auth (local mode) exposes
+    # every project unauthenticated to the network. Warn loudly.
+    loopback = host in ("127.0.0.1", "::1", "localhost")
+    if not loopback and not settings.server_mode:
+        print("  " + "!" * 52)
+        print("  WARNING: bound to a non-loopback address in LOCAL mode.")
+        print("  There is NO authentication - anyone who can reach this")
+        print("  port has full access. Set MEMORY_MCP_MODE=server (with")
+        print("  users/tokens) before exposing the daemon to a network.")
+        print("  " + "!" * 52)
     print("=" * 56)
     uvicorn.run(build_app(), host=host, port=port, log_level="info")
 

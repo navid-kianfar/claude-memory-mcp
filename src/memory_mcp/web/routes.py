@@ -16,14 +16,19 @@ from starlette.staticfiles import StaticFiles
 from memory_mcp import __version__
 from memory_mcp.config import settings
 from memory_mcp.container import container
-from memory_mcp.context import get_active_project, set_active_project
+from memory_mcp.context import (
+    LOCAL_USER, RequestUser, current_user, get_active_project, get_request_user,
+    reset_request_user, set_active_project, set_request_user,
+)
 from memory_mcp.exceptions import (
-    MemoryMCPError, MemoryNotFoundError, ProjectNotFoundError,
+    AuthError, ForbiddenError, MemoryMCPError, MemoryNotFoundError,
+    ProjectNotFoundError,
 )
 from memory_mcp.repositories import TemplateNotFoundError
 from memory_mcp.models import (
-    MemoryCategory, MemoryFilter, Pagination, RULE_CATEGORIES, SearchRequest,
-    StoreMemoryRequest, UpdateMemoryRequest, rule_category,
+    GLOBAL_PROJECT_SLUG, MemoryCategory, MemoryFilter, Pagination,
+    RULE_CATEGORIES, SearchRequest, StoreMemoryRequest, UpdateMemoryRequest,
+    rule_category,
 )
 
 def _dist_dir() -> Path:
@@ -54,8 +59,61 @@ def _mem(memory) -> dict:
     return data
 
 
-def _api(fn):
-    """Wrap a sync handler `fn(params, body, query) -> data | (data, status)`."""
+# ---------- auth (server mode) ----------
+
+SESSION_COOKIE = "mmcp_session"
+# CSRF defense for cookie-authenticated writes: the SPA sends this custom header,
+# which a cross-site attacker cannot set without a CORS preflight the daemon never
+# grants. Bearer-token callers (MCP/CLI) carry no ambient cookie, so are exempt.
+CSRF_HEADER = "x-requested-with"
+CSRF_VALUE = "memory-mcp"
+_WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+
+
+def _authenticate(request) -> tuple[RequestUser | None, str | None]:
+    """Resolve the caller and how they authenticated: ('bearer'|'cookie'|None).
+
+    Only meaningful in server mode; the lookups are fast indexed SQLite reads.
+    """
+    from memory_mcp.db.registry import authenticate_session, authenticate_token
+
+    auth = request.headers.get("authorization")
+    if auth and auth.lower().startswith("bearer "):
+        u = authenticate_token(auth[7:].strip())
+        if u:
+            return RequestUser(id=u["id"], username=u["username"], role=u["role"]), "bearer"
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if cookie:
+        u = authenticate_session(cookie)
+        if u:
+            return RequestUser(id=u["id"], username=u["username"], role=u["role"]), "cookie"
+    return None, None
+
+
+def _request_user_obj(request) -> RequestUser | None:
+    return _authenticate(request)[0]
+
+
+def _hook_authorized(request) -> bool:
+    """Hook endpoints (_hook_rules, _hook_auto_register) are raw handlers, not
+    _api-wrapped. In server mode they must carry a valid bearer token so rules
+    are never served to an unauthenticated caller; in local mode always allowed.
+    """
+    if not settings.server_mode:
+        return True
+    return _request_user_obj(request) is not None
+
+
+def _api(fn, *, public: bool = False, admin: bool = False):
+    """Wrap a sync handler `fn(params, body, query) -> data | (data, status)`.
+
+    In server mode the caller is authenticated (Bearer token or session cookie)
+    and bound to the request context so the handler thread and everything it
+    calls (current_user, per-user active project, rule attribution) see the right
+    identity. `public=True` skips the auth requirement (login/meta/health);
+    `admin=True` additionally requires the admin role. In local mode auth is a
+    no-op: a synthetic local admin is bound and nothing is ever rejected.
+    """
 
     async def handler(request):
         body: dict = {}
@@ -66,14 +124,48 @@ def _api(fn):
                 body = {}
         params = dict(request.path_params)
         query = dict(request.query_params)
+
+        if settings.server_mode:
+            user, method = _authenticate(request)
+            if user is None and not public:
+                return JSONResponse(
+                    {"error": "Authentication required", "type": "AuthError"},
+                    status_code=401,
+                )
+            if admin and (user is None or not user.is_admin):
+                return JSONResponse(
+                    {"error": "Admin role required", "type": "ForbiddenError"},
+                    status_code=403,
+                )
+            # CSRF: a cookie-authenticated write must carry the SPA's custom header.
+            if (
+                method == "cookie"
+                and request.method in _WRITE_METHODS
+                and request.headers.get(CSRF_HEADER) != CSRF_VALUE
+            ):
+                return JSONResponse(
+                    {"error": "Missing CSRF header", "type": "ForbiddenError"},
+                    status_code=403,
+                )
+            bound = user  # may be None for an unauthenticated public endpoint
+        else:
+            bound = LOCAL_USER
+
+        token = set_request_user(bound)
         try:
             result = await to_thread.run_sync(lambda: fn(params, body, query))
         except (ProjectNotFoundError, MemoryNotFoundError, TemplateNotFoundError) as e:
             return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=404)
+        except AuthError as e:
+            return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=401)
+        except ForbiddenError as e:
+            return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=403)
         except (MemoryMCPError, ValueError) as e:
             return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=400)
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=500)
+        finally:
+            reset_request_user(token)
         data, status = result if isinstance(result, tuple) else (result, 200)
         return JSONResponse(data, status_code=status)
 
@@ -90,6 +182,8 @@ async def _hook_auto_register(request):
     memory project, register it so it shows up in the UI - even before it has
     any rules. Returns a short note, or empty when nothing was done.
     """
+    if not _hook_authorized(request):
+        return PlainTextResponse("")
     cwd = request.query_params.get("cwd", "")
 
     def _resolve() -> str:
@@ -137,6 +231,8 @@ async def _hook_rules(request):
     Returns an empty body when the directory is not a memory project, so the
     hook stays silent in unrelated repos.
     """
+    if not _hook_authorized(request):
+        return PlainTextResponse("")
     cwd = request.query_params.get("cwd", "")
     mode = request.query_params.get("mode", "rules")
 
@@ -162,17 +258,88 @@ async def _hook_rules(request):
     return PlainTextResponse(text)
 
 
+async def _login(request):
+    """Exchange a username + API token for an HttpOnly session cookie."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not settings.server_mode:
+        # No accounts in local mode; login is a no-op so the UI can call it safely.
+        return JSONResponse({"status": "ok", "user": None})
+
+    from memory_mcp.db.registry import authenticate_token, create_session
+
+    username = (body.get("username") or "").strip()
+    token = (body.get("token") or "").strip()
+    user = authenticate_token(token)
+    if not user or (username and user["username"] != username):
+        return JSONResponse(
+            {"error": "Invalid username or token", "type": "AuthError"}, status_code=401
+        )
+    session = create_session(user["id"])
+    if not session:
+        return JSONResponse(
+            {"error": "Account is inactive", "type": "ForbiddenError"}, status_code=403
+        )
+    resp = JSONResponse({"status": "ok", "user": user})
+    resp.set_cookie(
+        SESSION_COOKIE, session,
+        httponly=True, secure=settings.cookie_secure, samesite="strict", path="/",
+    )
+    return resp
+
+
+async def _logout(request):
+    """Invalidate the current session and clear the cookie."""
+    resp = JSONResponse({"status": "ok"})
+    if settings.server_mode:
+        from memory_mcp.db.registry import clear_session
+
+        cookie = request.cookies.get(SESSION_COOKIE)
+        if cookie:
+            clear_session(cookie)
+    resp.delete_cookie(SESSION_COOKIE, path="/")
+    return resp
+
+
+async def _whoami(request):
+    """Report the current mode and authenticated identity (null if none)."""
+    if not settings.server_mode:
+        return JSONResponse({"mode": "local", "user": None})
+    user, _ = _authenticate(request)
+    return JSONResponse(
+        {
+            "mode": "server",
+            "user": None if user is None
+            else {"id": user.id, "username": user.username, "role": user.role},
+        }
+    )
+
+
 def _health(params, body, query):
     return {"status": "ok", "version": __version__}
 
 
 def _meta(params, body, query):
+    server = settings.server_mode
+    # The actually-authenticated user (None when unauthenticated); in local mode
+    # there are no accounts, so current_user/role are reported as null and the UI
+    # renders exactly as today.
+    user = get_request_user() if server else None
+    user_public = (
+        None if user is None or user.id == LOCAL_USER.id
+        else {"id": user.id, "username": user.username, "role": user.role}
+    )
     return {
         "version": __version__,
         "categories": [c.value for c in MemoryCategory],
         "rule_categories": ["mandatory_rules", "forbidden_rules"],
         "active_project": get_active_project(),
         "model": settings.embedding_model,
+        "mode": "server" if server else "local",
+        "current_user": user_public,
+        "role": None if user_public is None else user_public["role"],
     }
 
 
@@ -208,6 +375,15 @@ def _link_folder(params, body, query):
     if not path:
         raise ValueError("path is required")
     info = container.project_service.link_folder(params["slug"], path)
+    return {"status": "ok", "project": info.model_dump(mode="json")}
+
+
+def _bind_backend(params, body, query):
+    backend = (body.get("backend") or "").strip()
+    info = container.project_service.bind_backend(
+        params["slug"], backend,
+        remote_url=body.get("remote_url"), token=body.get("token"),
+    )
     return {"status": "ok", "project": info.model_dump(mode="json")}
 
 
@@ -380,11 +556,17 @@ def _import_claude_md(params, body, query):
 
 
 def _rules(params, body, query):
-    response = container.rules_service.get_rules(params["slug"])
+    # Management view: the project's OWN rules in every approval state (so the UI
+    # can badge proposed/approved/revoked and offer approve/revoke), WITHOUT the
+    # injected org-wide rules or the approval filter that enforcement applies. In
+    # local mode every rule is 'approved', so this is identical to before.
+    mandatory, forbidden = container.memory_repo.get_rules(
+        params["slug"], enforce_approval=False
+    )
     return {
-        "mandatory_rules": [_mem(m) for m in response.mandatory_rules],
-        "forbidden_rules": [_mem(m) for m in response.forbidden_rules],
-        "total": response.total,
+        "mandatory_rules": [_mem(m) for m in mandatory],
+        "forbidden_rules": [_mem(m) for m in forbidden],
+        "total": len(mandatory) + len(forbidden),
     }
 
 
@@ -581,14 +763,130 @@ def _import_rules(params, body, query):
     }
 
 
+# ---------- governance: users, approvals, org-wide rules (server mode) ----------
+
+
+def _list_users(params, body, query):
+    from memory_mcp.db.registry import list_users
+
+    return {"users": list_users()}
+
+
+def _create_user(params, body, query):
+    from memory_mcp.db.registry import create_user
+
+    username = (body.get("username") or "").strip()
+    if not username:
+        raise ValueError("username is required")
+    role = body.get("role") or "member"
+    user, token = create_user(username, body.get("display_name"), role)
+    return {"status": "ok", "user": user, "token": token}, 201
+
+
+def _deactivate_user(params, body, query):
+    from memory_mcp.db.registry import get_user, set_user_active
+
+    uid = params["uid"]
+    if get_user(uid) is None:
+        raise MemoryNotFoundError(f"User not found: {uid}")
+    set_user_active(uid, False)
+    return {"status": "ok", "user": get_user(uid)}
+
+
+def _rotate_user_token(params, body, query):
+    from memory_mcp.db.registry import get_user, rotate_token
+
+    uid = params["uid"]
+    token = rotate_token(uid)
+    if token is None:
+        raise MemoryNotFoundError(f"User not found: {uid}")
+    return {"status": "ok", "user": get_user(uid), "token": token}
+
+
+def _approve_rule(params, body, query):
+    slug = params["slug"]
+    _load_rule(slug, params["rid"])
+    memory = container.memory_service.approve_rule(slug, params["rid"])
+    return {"status": "ok", "rule": _mem(memory)}
+
+
+def _revoke_rule(params, body, query):
+    slug = params["slug"]
+    _load_rule(slug, params["rid"])
+    memory = container.memory_service.revoke_rule(slug, params["rid"])
+    return {"status": "ok", "rule": _mem(memory)}
+
+
+def _pending_rules(params, body, query):
+    """Global moderation queue: proposed rules across all projects (incl. org)."""
+    pending = []
+    for p in container.project_service.list_all(include_global=True):
+        for m in container.rules_service.pending_rules(p.slug):
+            pending.append(
+                {
+                    "project": {"slug": p.slug, "display_name": p.display_name},
+                    "rule": _mem(m),
+                }
+            )
+    return {"pending": pending, "total": len(pending)}
+
+
+def _list_org_rules(params, body, query):
+    # All org-wide rules in every approval state, for the admin editor.
+    container.project_service.ensure_global_project()
+    mandatory, forbidden = container.memory_repo.get_rules(
+        GLOBAL_PROJECT_SLUG, enforce_approval=False
+    )
+    return {
+        "mandatory_rules": [_mem(m) for m in mandatory],
+        "forbidden_rules": [_mem(m) for m in forbidden],
+        "total": len(mandatory) + len(forbidden),
+    }
+
+
+def _create_org_rule(params, body, query):
+    container.project_service.ensure_global_project()
+    req = StoreMemoryRequest(
+        project=GLOBAL_PROJECT_SLUG,
+        category=rule_category(body.get("rule_type")),
+        title=body.get("title") or "",
+        content=body.get("content") or "",
+        priority=body.get("priority", 2),
+        source="user",
+    )
+    memory = container.memory_service.store(req)
+    return {"status": "ok", "rule": _mem(memory)}, 201
+
+
+def _update_org_rule(params, body, query):
+    _load_rule(GLOBAL_PROJECT_SLUG, params["rid"])
+    req = UpdateMemoryRequest(
+        project=GLOBAL_PROJECT_SLUG, memory_id=params["rid"],
+        title=body.get("title"), content=body.get("content"),
+        status=body.get("status"),
+    )
+    memory = container.memory_service.update(req)
+    return {"status": "ok", "rule": _mem(memory)}
+
+
+def _delete_org_rule(params, body, query):
+    _load_rule(GLOBAL_PROJECT_SLUG, params["rid"])
+    hard = (query.get("hard") or "").lower() in ("1", "true", "yes")
+    return container.memory_service.delete(GLOBAL_PROJECT_SLUG, params["rid"], hard=hard)
+
+
 def build_routes() -> list:
     """Return the UI + JSON API routes for mounting on the daemon."""
     routes: list = [
         Route("/", _index, methods=["GET"]),
-        Route("/api/health", _api(_health), methods=["GET"]),
+        Route("/api/health", _api(_health, public=True), methods=["GET"]),
         Route("/api/hook/rules", _hook_rules, methods=["GET"]),
         Route("/api/hook/auto-register", _hook_auto_register, methods=["GET"]),
-        Route("/api/meta", _api(_meta), methods=["GET"]),
+        Route("/api/meta", _api(_meta, public=True), methods=["GET"]),
+        # Auth (server mode): login/whoami are auth-optional; logout clears state.
+        Route("/api/auth/login", _login, methods=["POST"]),
+        Route("/api/auth/logout", _logout, methods=["POST"]),
+        Route("/api/auth/whoami", _whoami, methods=["GET"]),
         Route("/api/projects", _api(_list_projects), methods=["GET"]),
         Route("/api/projects", _api(_create_project), methods=["POST"]),
         Route("/api/projects/load-from-folder", _api(_load_from_folder), methods=["POST"]),
@@ -606,11 +904,25 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/rules", _api(_add_rule), methods=["POST"]),
         Route("/api/projects/{slug}/rules/{rid}", _api(_update_rule), methods=["PUT"]),
         Route("/api/projects/{slug}/rules/{rid}", _api(_delete_rule), methods=["DELETE"]),
+        # Rule governance (server mode, admin only)
+        Route("/api/projects/{slug}/rules/{rid}/approve", _api(_approve_rule, admin=True), methods=["POST"]),
+        Route("/api/projects/{slug}/rules/{rid}/revoke", _api(_revoke_rule, admin=True), methods=["POST"]),
+        Route("/api/rules/pending", _api(_pending_rules, admin=True), methods=["GET"]),
+        Route("/api/org/rules", _api(_list_org_rules, admin=True), methods=["GET"]),
+        Route("/api/org/rules", _api(_create_org_rule, admin=True), methods=["POST"]),
+        Route("/api/org/rules/{rid}", _api(_update_org_rule, admin=True), methods=["PUT"]),
+        Route("/api/org/rules/{rid}", _api(_delete_org_rule, admin=True), methods=["DELETE"]),
+        # User management (server mode, admin only)
+        Route("/api/users", _api(_list_users, admin=True), methods=["GET"]),
+        Route("/api/users", _api(_create_user, admin=True), methods=["POST"]),
+        Route("/api/users/{uid}/deactivate", _api(_deactivate_user, admin=True), methods=["POST"]),
+        Route("/api/users/{uid}/rotate-token", _api(_rotate_user_token, admin=True), methods=["POST"]),
         Route("/api/projects/{slug}/sessions", _api(_sessions), methods=["GET"]),
         Route("/api/projects/{slug}/import-claude-md", _api(_import_claude_md), methods=["POST"]),
         Route("/api/projects/{slug}/sync-export", _api(_sync_export), methods=["GET"]),
         Route("/api/projects/{slug}/sync-import", _api(_sync_import), methods=["POST"]),
         Route("/api/projects/{slug}/link-folder", _api(_link_folder), methods=["POST"]),
+        Route("/api/projects/{slug}/bind", _api(_bind_backend), methods=["POST"]),
         Route("/api/projects/{slug}/apply-template", _api(_apply_template), methods=["POST"]),
         Route("/api/projects/{slug}/import-rules", _api(_import_rules), methods=["POST"]),
         Route("/api/templates", _api(_list_templates), methods=["GET"]),

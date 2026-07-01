@@ -5,11 +5,13 @@ from memory_mcp.db.registry import now_iso, registry_conn
 from memory_mcp.models import ProjectInfo
 
 _COLUMNS = (
-    "slug, display_name, description, created_at, last_accessed, db_path, project_path"
+    "slug, display_name, description, created_at, last_accessed, db_path, "
+    "project_path, owner, backend, remote_url"
 )
 
 
 def _to_info(row) -> ProjectInfo:
+    keys = row.keys()
     return ProjectInfo(
         slug=row["slug"],
         display_name=row["display_name"],
@@ -18,6 +20,9 @@ def _to_info(row) -> ProjectInfo:
         last_accessed=row["last_accessed"],
         db_path=row["db_path"],
         project_path=row["project_path"],
+        owner=row["owner"] if "owner" in keys else None,
+        backend=(row["backend"] if "backend" in keys and row["backend"] else "local"),
+        remote_url=row["remote_url"] if "remote_url" in keys else None,
     )
 
 
@@ -31,6 +36,7 @@ class ProjectRepository:
         description: str | None = None,
         db_path: str | None = None,
         project_path: str | None = None,
+        owner: str | None = None,
     ) -> ProjectInfo:
         if db_path is None:
             db_path = str(settings.projects_dir / f"{slug}.duckdb")
@@ -50,12 +56,19 @@ class ProjectRepository:
                         "UPDATE projects SET project_path = ? WHERE slug = ?",
                         (project_path, slug),
                     )
+                # Owner is set once (at creation / first claim); never cleared by
+                # a re-register that omits it.
+                if owner is not None:
+                    conn.execute(
+                        "UPDATE projects SET owner = ? WHERE slug = ?",
+                        (owner, slug),
+                    )
             else:
                 ts = now_iso()
                 conn.execute(
                     f"INSERT INTO projects ({_COLUMNS}) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (slug, display_name, description, ts, ts, db_path, project_path),
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'local', NULL)",
+                    (slug, display_name, description, ts, ts, db_path, project_path, owner),
                 )
 
         result = self.get(slug)
@@ -118,6 +131,23 @@ class ProjectRepository:
             conn.execute(
                 "UPDATE projects SET project_path = ? WHERE slug = ?",
                 (project_path, slug),
+            )
+
+    def set_owner(self, slug: str, owner: str) -> None:
+        with registry_conn() as conn:
+            conn.execute(
+                "UPDATE projects SET owner = ? WHERE slug = ?", (owner, slug)
+            )
+
+    def set_backend(
+        self, slug: str, backend: str, remote_url: str | None = None
+    ) -> None:
+        """Route a project to 'local' (private, this machine) or 'remote' (org
+        server). remote_url is required for 'remote'."""
+        with registry_conn() as conn:
+            conn.execute(
+                "UPDATE projects SET backend = ?, remote_url = ? WHERE slug = ?",
+                (backend, remote_url, slug),
             )
 
     def delete(self, slug: str) -> None:

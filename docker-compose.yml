@@ -25,6 +25,12 @@ services:
       # Must be 0.0.0.0 so the port is reachable from the host.
       MEMORY_MCP_DAEMON_HOST: 0.0.0.0
       MEMORY_MCP_DAEMON_PORT: "8765"
+      # Deployment mode. Defaults to "local" (single-user, NO auth) - fine for a
+      # private machine, but on a shared/exposed host set it to "server" to
+      # require per-user tokens and enable the rule-approval workflow, then
+      # create the first admin:
+      #   docker compose exec memory-mcp memory-mcp user create <name> --admin
+      # MEMORY_MCP_MODE: server
     volumes:
       # Persist DuckDB memory files across container restarts.
       - memory-data:/data

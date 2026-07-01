@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -34,7 +34,11 @@ def create_schema(conn: duckdb.DuckDBPyConnection) -> None:
             access_count    INTEGER DEFAULT 0,
             expires_at      TIMESTAMP,
             created_at      TIMESTAMP DEFAULT current_timestamp,
-            updated_at      TIMESTAMP DEFAULT current_timestamp
+            updated_at      TIMESTAMP DEFAULT current_timestamp,
+            created_by      VARCHAR,
+            approval_status VARCHAR DEFAULT 'approved',
+            approved_by     VARCHAR,
+            approved_at     TIMESTAMP
         )
     """)
 
@@ -47,6 +51,7 @@ def create_schema(conn: duckdb.DuckDBPyConnection) -> None:
             memory_id       VARCHAR NOT NULL,
             operation       VARCHAR NOT NULL,
             details         JSON,
+            actor           VARCHAR,
             created_at      TIMESTAMP DEFAULT current_timestamp
         )
     """)
@@ -73,6 +78,7 @@ def create_schema(conn: duckdb.DuckDBPyConnection) -> None:
     # Indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_category ON memories (category)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories (status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_approval ON memories (approval_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_created ON memories (created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories (expires_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_provenance_memory ON provenance (memory_id)")
@@ -115,10 +121,40 @@ def migrate_v1_to_v2(conn: duckdb.DuckDBPyConnection) -> None:
     except Exception:
         pass
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories (expires_at)")
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
-        [CURRENT_SCHEMA_VERSION],
-    )
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (2)")
+
+
+def migrate_v2_to_v3(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v2 -> v3: rule approval lifecycle + provenance actor.
+
+    Adds the columns the admin approval workflow needs. Existing rows must keep
+    behaving exactly as before, so every rule is backfilled to 'approved' - in
+    local mode (and for any pre-existing rule) 'approved' means "enforced as
+    today". DuckDB's ADD COLUMN cannot be guarded with IF NOT EXISTS, so each
+    ALTER is wrapped in try/except for idempotency, and we never rely on the
+    column DEFAULT to backfill existing rows (that behavior is version-sensitive)
+    - an explicit UPDATE guarantees it.
+    """
+    for ddl in (
+        "ALTER TABLE memories ADD COLUMN created_by VARCHAR",
+        "ALTER TABLE memories ADD COLUMN approval_status VARCHAR DEFAULT 'approved'",
+        "ALTER TABLE memories ADD COLUMN approved_by VARCHAR",
+        "ALTER TABLE memories ADD COLUMN approved_at TIMESTAMP",
+        "ALTER TABLE provenance ADD COLUMN actor VARCHAR",
+    ):
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass
+    try:
+        conn.execute(
+            "UPDATE memories SET approval_status = 'approved' "
+            "WHERE approval_status IS NULL"
+        )
+    except Exception:
+        pass
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_approval ON memories (approval_status)")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (3)")
 
 
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
@@ -149,6 +185,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 2:
         migrate_v1_to_v2(conn)
         version = 2
+    if version < 3:
+        migrate_v2_to_v3(conn)
+        version = 3
     return version
 
 

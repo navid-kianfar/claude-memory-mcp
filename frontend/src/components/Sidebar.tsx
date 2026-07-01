@@ -1,7 +1,10 @@
 import {
   Brain,
+  Globe,
   LayoutTemplate,
   Plus,
+  ShieldCheck,
+  Users,
   Command as CommandIcon,
 } from "lucide-react";
 import type { Project } from "../types";
@@ -9,7 +12,18 @@ import { cn } from "../lib/utils";
 import { Button } from "./ui/Button";
 import { Badge } from "./ui/Badge";
 
-export type SidebarView = "projects" | "templates";
+export type SidebarView =
+  | "projects"
+  | "templates"
+  | "moderation"
+  | "users"
+  | "org-rules";
+
+const ADMIN_NAV: { view: SidebarView; label: string; icon: React.ReactNode }[] = [
+  { view: "moderation", label: "Moderation", icon: <ShieldCheck className="size-3.5" /> },
+  { view: "org-rules", label: "Org-wide rules", icon: <Globe className="size-3.5" /> },
+  { view: "users", label: "Users", icon: <Users className="size-3.5" /> },
+];
 
 export interface SidebarProps {
   view: SidebarView;
@@ -22,6 +36,9 @@ export interface SidebarProps {
   onNewTemplate: () => void;
   onOpenPalette: () => void;
   loading: boolean;
+  /** Server mode + admin unlocks the admin nav (moderation/users/org-rules). */
+  serverMode?: boolean;
+  isAdmin?: boolean;
 }
 
 export function Sidebar({
@@ -35,7 +52,10 @@ export function Sidebar({
   onNewTemplate,
   onOpenPalette,
   loading,
+  serverMode,
+  isAdmin,
 }: SidebarProps) {
+  const showAdmin = Boolean(serverMode && isAdmin);
   return (
     <aside className="flex h-full w-72 shrink-0 flex-col border-r border-border bg-card">
       <div className="flex items-center gap-2.5 px-4 py-4">
@@ -90,6 +110,31 @@ export function Sidebar({
           </button>
         </div>
       </div>
+
+      {showAdmin && (
+        <div className="px-3 pt-2">
+          <div className="px-1 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Admin
+          </div>
+          <div className="space-y-1">
+            {ADMIN_NAV.map((item) => (
+              <button
+                key={item.view}
+                onClick={() => onViewChange(item.view)}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors",
+                  view === item.view
+                    ? "bg-primary/10 text-foreground"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                )}
+              >
+                {item.icon}
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {view === "projects" ? (
         <>
@@ -157,7 +202,7 @@ export function Sidebar({
             </Button>
           </div>
         </>
-      ) : (
+      ) : view === "templates" ? (
         <>
           <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
             <div className="flex size-12 items-center justify-center rounded-xl bg-primary/15 text-primary">
@@ -176,6 +221,8 @@ export function Sidebar({
             </Button>
           </div>
         </>
+      ) : (
+        <div className="flex-1" />
       )}
     </aside>
   );

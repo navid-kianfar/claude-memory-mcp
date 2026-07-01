@@ -15,18 +15,20 @@ class ProvenanceRepository:
         memory_id: str,
         operation: str,
         details: dict | None = None,
+        actor: str | None = None,
     ) -> None:
         with connect(project) as conn:
             conn.execute(
-                "INSERT INTO provenance (memory_id, operation, details) VALUES (?, ?, ?)",
-                [memory_id, operation, json.dumps(details) if details else None],
+                "INSERT INTO provenance (memory_id, operation, details, actor) "
+                "VALUES (?, ?, ?, ?)",
+                [memory_id, operation, json.dumps(details) if details else None, actor],
             )
 
     def for_memory(self, project: str, memory_id: str) -> list[ProvenanceEntry]:
         with connect(project) as conn:
             rows = conn.execute(
                 """
-                SELECT id, memory_id, operation, details, created_at
+                SELECT id, memory_id, operation, details, actor, created_at
                 FROM provenance WHERE memory_id = ?
                 ORDER BY created_at ASC
                 """,
@@ -44,7 +46,7 @@ class ProvenanceRepository:
             entries.append(
                 ProvenanceEntry(
                     id=r[0], memory_id=r[1], operation=r[2],
-                    details=details, created_at=r[4],
+                    details=details, actor=r[4], created_at=r[5],
                 )
             )
         return entries

@@ -11,12 +11,71 @@ export type Category =
   | "feedback"
   | "reference";
 
+export type Role = "admin" | "member";
+
+export interface User {
+  id: string;
+  username: string;
+  display_name: string | null;
+  role: Role;
+  active: boolean;
+  created_at: string;
+  last_login: string | null;
+}
+
 export interface Meta {
   version: string;
   categories: string[];
   rule_categories: string[];
   active_project: string | null;
   model: string;
+  // Present since server mode. Older/local backends omit these; the UI treats a
+  // missing mode as "local" so nothing governance-related renders.
+  mode?: "local" | "server";
+  current_user?: { id: string; username: string; role: Role } | null;
+  role?: Role | null;
+}
+
+export interface AuthSession {
+  status: string;
+  user: { id: string; username: string; role: Role } | null;
+}
+
+export interface LoginInput {
+  username: string;
+  token: string;
+}
+
+export interface CreateUserInput {
+  username: string;
+  role: Role;
+  display_name?: string;
+}
+
+export interface UsersResponse {
+  users: User[];
+}
+
+export interface CreateUserResult {
+  status: string;
+  user: User;
+  token: string;
+}
+
+export interface RotateTokenResult {
+  status: string;
+  user: User;
+  token: string;
+}
+
+export interface PendingRuleEntry {
+  project: { slug: string; display_name: string };
+  rule: Memory;
+}
+
+export interface PendingRulesResponse {
+  pending: PendingRuleEntry[];
+  total: number;
 }
 
 export interface Health {
@@ -52,6 +111,12 @@ export interface Memory {
   expires_at: string | null;
   created_at: string;
   updated_at: string;
+  // Rule approval lifecycle (server mode). Optional so local-mode data - which
+  // never sets these - is unaffected. approval_status defaults to "approved".
+  created_by?: string | null;
+  approval_status?: "approved" | "proposed" | "revoked";
+  approved_by?: string | null;
+  approved_at?: string | null;
   _similarity?: number;
   _relevance?: number;
 }

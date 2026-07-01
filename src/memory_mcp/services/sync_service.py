@@ -20,10 +20,14 @@ from memory_mcp.utils.text import prepare_embedding_text
 SNAPSHOT_DIRNAME = ".claude-memory"
 SYNC_CATEGORIES = [c.value for c in MemoryCategory if c.value != "session"]
 
-# Fields compared to decide whether a memory needs updating on import.
+# Fields compared to decide whether a memory needs updating on import. Approval
+# fields are included so an approve/revoke propagates through git sync; a rule
+# arriving as 'proposed' is stored (and shows in the moderation queue) but is not
+# enforced in server mode until approved - preserving "never delete / only newer".
 _SYNC_FIELDS = (
     "title", "content", "summary", "status", "priority",
     "tags", "metadata", "related_ids", "entities",
+    "approval_status", "created_by", "approved_by", "approved_at",
 )
 
 
@@ -142,6 +146,8 @@ class SyncService:
             entities=md.get("entities") or [],
             expires_at=_parse_dt(md.get("expires_at")),
             status=md.get("status") or "active",
+            created_by=md.get("created_by"),
+            approval_status=md.get("approval_status") or "approved",
         )
 
     def _update(self, project: str, md: dict, current) -> None:
@@ -155,6 +161,10 @@ class SyncService:
             "metadata": json.dumps(md["metadata"]) if md.get("metadata") else None,
             "related_ids": md.get("related_ids") or [],
             "entities": md.get("entities") or [],
+            "approval_status": md.get("approval_status") or "approved",
+            "created_by": md.get("created_by"),
+            "approved_by": md.get("approved_by"),
+            "approved_at": _parse_dt(md.get("approved_at")),
         }
         if md["title"] != current.title or md["content"] != current.content:
             fields["embedding"] = embed_text(

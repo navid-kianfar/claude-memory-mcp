@@ -1,16 +1,114 @@
-"""Active project context - auto-detect from CWD, persist to the SQLite registry."""
+"""Active project context - auto-detect from CWD, persist to the SQLite registry.
 
+Two isolation models live here, selected by settings.mode:
+
+- local (default): a single process-global active project (`_active_project`),
+  exactly as before - one user, one machine.
+- server: a per-request identity (`_request_user`, a contextvar) and a per-user
+  active project, so concurrent users never clobber each other. The old global
+  is never consulted in server mode.
+"""
+
+import contextlib
+import contextvars
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
+from memory_mcp.config import settings
 from memory_mcp.services.portable_service import PORTABLE_DB_NAME
 
 _active_project: str | None = None
 _lock = threading.Lock()
 
 
+@dataclass(frozen=True)
+class RequestUser:
+    """The authenticated caller for the current request (server mode)."""
+
+    id: str
+    username: str
+    role: str = "member"
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin"
+
+
+# The implicit single user in local mode: full rights, enforces nothing.
+LOCAL_USER = RequestUser(id="local", username="local", role="admin")
+
+# Per-request caller. Default None; bound by the MCP tool layer and the JSON API
+# wrapper in server mode, and reset when the request finishes. contextvars are
+# isolated per async task / per thread, so concurrent requests never collide.
+_request_user: contextvars.ContextVar[RequestUser | None] = contextvars.ContextVar(
+    "request_user", default=None
+)
+
+
+def set_request_user(user: RequestUser | None):
+    """Bind the caller for the current request. Returns a token for reset()."""
+    return _request_user.set(user)
+
+
+def reset_request_user(token) -> None:
+    with contextlib.suppress(Exception):
+        _request_user.reset(token)
+
+
+def get_request_user() -> RequestUser | None:
+    return _request_user.get()
+
+
+def _user_from_mcp_token() -> "RequestUser | None":
+    """Derive the caller from the current MCP access token, if inside an MCP
+    request. Covers tools that don't go through the JSON API's explicit binding
+    (and tools that never call _resolve, e.g. memory_use)."""
+    try:
+        from fastmcp.server.dependencies import get_access_token
+
+        tok = get_access_token()
+    except Exception:
+        tok = None
+    if tok is None:
+        return None
+    c = getattr(tok, "claims", None) or {}
+    uid = c.get("user_id")
+    if not uid:
+        return None
+    return RequestUser(
+        id=uid, username=c.get("username", uid), role=c.get("role", "member")
+    )
+
+
+def current_user() -> RequestUser:
+    """The effective caller.
+
+    - local mode: always LOCAL_USER.
+    - server mode: the request user bound by the JSON API wrapper, else the MCP
+      access token's identity, else LOCAL_USER as a last-resort fallback for
+      internal paths that run outside any authenticated request.
+    """
+    if not settings.server_mode:
+        return LOCAL_USER
+    return _request_user.get() or _user_from_mcp_token() or LOCAL_USER
+
+
 def set_active_project(slug: str) -> None:
-    """Set the active project slug and persist it to the registry."""
+    """Set the active project slug and persist it to the registry.
+
+    Server mode persists per-user so one caller cannot change another's active
+    project; local mode uses the single process-global as before.
+    """
+    if settings.server_mode:
+        try:
+            from memory_mcp.db.registry import set_user_active_project
+
+            set_user_active_project(current_user().id, slug)
+        except Exception:
+            pass
+        return
+
     global _active_project
     with _lock:
         _active_project = slug
@@ -65,10 +163,21 @@ def get_active_project(cwd: str | None = None) -> str | None:
     """Get the active project, with CWD auto-detection fallback.
 
     Resolution order:
-    1. Explicitly set active project (persisted to disk)
+    1. The caller's active project (per-user in server mode, global in local)
     2. CWD-based detection (see `detect_project_from_cwd`)
     3. None
     """
+    if settings.server_mode:
+        try:
+            from memory_mcp.db.registry import get_user_active_project
+
+            slug = get_user_active_project(current_user().id)
+        except Exception:
+            slug = None
+        if slug:
+            return slug
+        return detect_project_from_cwd(cwd)
+
     if _active_project:
         return _active_project
     return detect_project_from_cwd(cwd)
@@ -81,13 +190,19 @@ def _slug_from_path(path: Path) -> str | None:
     exact or an ancestor of cwd) wins; then a portable DB inside the folder;
     then a folder name that equals the slug.
     """
+    from memory_mcp.models import is_global_project
     from memory_mcp.repositories import ProjectRepository
     from memory_mcp.utils.text import slugify
 
     dir_slug = slugify(path.name)
+    if is_global_project(dir_slug):
+        return None  # the reserved org-wide project is never a real folder
 
     try:
-        projects = ProjectRepository().list_all()
+        projects = [
+            p for p in ProjectRepository().list_all()
+            if not is_global_project(p.slug)
+        ]
         for p in projects:
             if p.project_path:
                 bound = Path(p.project_path).resolve()

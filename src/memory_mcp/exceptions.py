@@ -43,3 +43,11 @@ class ModelNotFoundError(MemoryMCPError):
 
 class ExportImportError(MemoryMCPError):
     """Raised on export/import failures (file system, parsing, etc.)."""
+
+
+class AuthError(MemoryMCPError):
+    """Raised when a server-mode request is unauthenticated (-> HTTP 401)."""
+
+
+class ForbiddenError(MemoryMCPError):
+    """Raised when an authenticated caller lacks the required role (-> HTTP 403)."""

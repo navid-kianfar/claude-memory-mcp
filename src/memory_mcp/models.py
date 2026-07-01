@@ -28,6 +28,15 @@ class MemoryCategory(str, Enum):
 
 RULE_CATEGORIES = {MemoryCategory.MANDATORY_RULES, MemoryCategory.FORBIDDEN_RULES}
 
+# Reserved project holding org-wide rules (server mode). Its approved rules are
+# injected into every project's rule block. The "__" prefix guarantees it can
+# never collide with a real folder-derived slug.
+GLOBAL_PROJECT_SLUG = "__global__"
+
+
+def is_global_project(slug: str | None) -> bool:
+    return slug == GLOBAL_PROJECT_SLUG
+
 RULE_TYPE_TO_CATEGORY = {
     "mandatory": MemoryCategory.MANDATORY_RULES,
     "forbidden": MemoryCategory.FORBIDDEN_RULES,
@@ -65,6 +74,13 @@ class Memory(BaseModel):
     expires_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # Rule approval lifecycle (server mode). Defaults keep local mode unchanged:
+    # every memory is "approved" (enforced) and unattributed unless the server
+    # governance flow sets these. approval_status is only consulted for rules.
+    created_by: str | None = None
+    approval_status: str = "approved"  # "approved" | "proposed" | "revoked"
+    approved_by: str | None = None
+    approved_at: datetime | None = None
 
 
 class ProjectInfo(BaseModel):
@@ -75,6 +91,9 @@ class ProjectInfo(BaseModel):
     last_accessed: datetime | None = None
     db_path: str | None = None
     project_path: str | None = None  # source folder this project syncs with
+    owner: str | None = None  # user id that owns this project (server mode)
+    backend: str = "local"  # "local" (private, on this machine) | "remote" (org)
+    remote_url: str | None = None  # org server base URL when backend == "remote"
 
 
 class TemplateItem(BaseModel):
@@ -108,6 +127,7 @@ class ProvenanceEntry(BaseModel):
     memory_id: str
     operation: str
     details: dict | None = None
+    actor: str | None = None  # user id that performed the operation (server mode)
     created_at: datetime | None = None
 
 
@@ -124,6 +144,7 @@ class StoreMemoryRequest(BaseModel):
     priority: int = Field(default=0, ge=0, le=3)
     source: str = "assistant"
     related_ids: list[str] = Field(default_factory=list)
+    created_by: str | None = None  # user id of the proposer (server mode)
 
 
 class UpdateMemoryRequest(BaseModel):

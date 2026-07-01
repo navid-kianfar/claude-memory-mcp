@@ -76,6 +76,41 @@ class TestInsertAndGet:
     def test_get_by_title_missing(self, repo, project):
         assert repo.get_by_title(project, "Nope") is None
 
+    def test_new_memory_defaults_to_approved(self, repo, project):
+        """Every insert is 'approved' (enforced) and unattributed by default, so
+        local mode behaves exactly as before the approval columns existed."""
+        mem = _insert(repo, project, title="Default")
+        assert mem.approval_status == "approved"
+        assert mem.created_by is None
+        assert mem.approved_by is None
+        assert mem.approved_at is None
+
+    def test_approval_fields_round_trip(self, repo, project):
+        mem = repo.insert(
+            project=project,
+            memory_id=str(uuid.uuid4()),
+            category="mandatory_rules",
+            title="Proposed rule",
+            content="do X",
+            summary="s",
+            tags=[],
+            metadata=None,
+            embedding=_make_embedding(),
+            priority=2,
+            source="test",
+            related_ids=[],
+            entities=[],
+            expires_at=None,
+            created_by="user-42",
+            approval_status="proposed",
+        )
+        assert mem.created_by == "user-42"
+        assert mem.approval_status == "proposed"
+        # Survives a re-read from disk (positional column mapping intact).
+        again = repo.get_by_id(project, mem.id)
+        assert again.created_by == "user-42"
+        assert again.approval_status == "proposed"
+
 
 class TestRules:
     def test_get_rules_partitions_correctly(self, repo, project):
@@ -145,7 +180,11 @@ class TestVectorSearch:
 
         assert len(results) == 2
         for mem, dist in results:
+            # Regression guard: adding columns shifted the distance's row index;
+            # dist must still be the numeric cosine distance, not a memory field.
+            assert isinstance(dist, float)
             assert 0 <= dist <= 2  # cosine distance range
+            assert mem.approval_status == "approved"
 
 
 class TestUpdateAndDelete:

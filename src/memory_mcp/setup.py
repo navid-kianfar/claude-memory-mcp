@@ -172,8 +172,13 @@ def claude_json_path() -> Path:
     return Path.home() / ".claude.json"
 
 
-def setup_claude_mcp() -> None:
-    """Point Claude Code at the HTTP daemon instead of spawning a stdio server."""
+def setup_claude_mcp(remote_url: str | None = None, token: str | None = None) -> None:
+    """Point Claude Code at the HTTP daemon (or a remote server) over HTTP.
+
+    With remote_url set (client mode), the entry points at the remote server and
+    carries a Bearer token header; otherwise it points at the local daemon,
+    exactly as before.
+    """
     path = claude_json_path()
     config: dict = {}
     if path.exists():
@@ -183,12 +188,17 @@ def setup_claude_mcp() -> None:
             print("    Warning: ~/.claude.json is not valid JSON - skipping MCP config.")
             return
     config.setdefault("mcpServers", {})
-    config["mcpServers"]["memory"] = {
-        "type": "http",
-        "url": f"http://127.0.0.1:{settings.daemon_port}/mcp",
-    }
+    if remote_url:
+        url = f"{remote_url.rstrip('/')}/mcp"
+        entry: dict = {"type": "http", "url": url}
+        if token:
+            entry["headers"] = {"Authorization": f"Bearer {token}"}
+    else:
+        url = f"http://127.0.0.1:{settings.daemon_port}/mcp"
+        entry = {"type": "http", "url": url}
+    config["mcpServers"]["memory"] = entry
     path.write_text(json.dumps(config, indent=2))
-    print(f"    MCP server 'memory' -> http://127.0.0.1:{settings.daemon_port}/mcp")
+    print(f"    MCP server 'memory' -> {url}")
 
 
 # ---------- 8. hooks ----------
@@ -208,12 +218,22 @@ def _add_hook(settings_obj: dict, event: str, command: str) -> bool:
     return True
 
 
-def setup_hooks() -> None:
+def setup_hooks(remote_url: str | None = None, token: str | None = None) -> None:
     """Install the rule-injection / session hooks into global Claude settings.
 
     The hook scripts are copied to ~/.memory-mcp/hooks/ so the install does not
-    depend on the repo staying in place.
+    depend on the repo staying in place. In client mode (remote_url set) each
+    hook command is prefixed with `env MEMORY_MCP_URL=… MEMORY_MCP_TOKEN=…` so the
+    generic scripts talk to the remote server with auth.
     """
+    import shlex
+
+    env_prefix = ""
+    if remote_url:
+        parts = ["env", f"MEMORY_MCP_URL={shlex.quote(remote_url.rstrip('/'))}"]
+        if token:
+            parts.append(f"MEMORY_MCP_TOKEN={shlex.quote(token)}")
+        env_prefix = " ".join(parts) + " "
     path = claude_settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     settings_obj: dict = {}
@@ -249,7 +269,7 @@ def setup_hooks() -> None:
         dst = hooks_dest / script
         shutil.copy2(src, dst)
         os.chmod(dst, 0o755)
-        if _add_hook(settings_obj, event, str(dst)):
+        if _add_hook(settings_obj, event, f"{env_prefix}{shlex.quote(str(dst))}" if env_prefix else str(dst)):
             added += 1
 
     path.write_text(json.dumps(settings_obj, indent=2))
@@ -307,6 +327,44 @@ def main() -> None:
     print(f"  Management UI : http://{host}:{port}/   (after the /etc/hosts step)")
     print(f"  MCP endpoint  : http://127.0.0.1:{port}/mcp")
     print()
+    print("  Restart Claude Code to pick up the new MCP + hook configuration.")
+    print("=" * 60)
+    print()
+
+
+def main_client(remote_url: str, token: str | None = None) -> None:
+    """Configure this machine as a pure CLIENT of a remote memory server.
+
+    No local daemon, launchd, /etc/hosts, DB, model, or runtime - just point
+    Claude Code's MCP config + hooks at the remote server (with an auth token).
+    """
+    print()
+    print("=" * 60)
+    print("  Claude Memory MCP - Client Setup")
+    print("=" * 60)
+    print(f"  Server: {remote_url}")
+    print()
+
+    steps = [
+        ("Creating hooks directory", setup_directories),
+        ("Configuring Claude Code MCP (remote server)",
+         lambda: setup_claude_mcp(remote_url, token)),
+        ("Installing Claude Code hooks (pointed at the server)",
+         lambda: setup_hooks(remote_url, token)),
+    ]
+    total = len(steps)
+    for i, (msg, fn) in enumerate(steps, 1):
+        print_step(i, total, msg + "...")
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            print(f"    Warning: {e}")
+        print()
+
+    print("=" * 60)
+    print("  Client setup complete.")
+    print()
+    print(f"  MCP endpoint : {remote_url.rstrip('/')}/mcp")
     print("  Restart Claude Code to pick up the new MCP + hook configuration.")
     print("=" * 60)
     print()

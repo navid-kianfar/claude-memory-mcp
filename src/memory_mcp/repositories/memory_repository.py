@@ -11,7 +11,15 @@ from datetime import datetime
 from memory_mcp.db.connection import connect
 from memory_mcp.models import Memory, MemoryFilter, Pagination
 
-MEMORY_COLUMNS = "id, category, title, content, summary, tags, metadata, embedding, status, priority, source, related_ids, entities, access_count, expires_at, created_at, updated_at"
+# Column order is load-bearing: every read uses this list and _row_to_memory maps
+# by position. The four approval columns are appended AT THE END (indices 17-20)
+# so the existing indices 0-16 are untouched. When adding columns here, also bump
+# the slice in vector_search (which appends a computed `distance` after them).
+MEMORY_COLUMNS = "id, category, title, content, summary, tags, metadata, embedding, status, priority, source, related_ids, entities, access_count, expires_at, created_at, updated_at, created_by, approval_status, approved_by, approved_at"
+
+# Number of columns MEMORY_COLUMNS selects (index of the first appended,
+# non-memory column such as vector_search's `distance`).
+MEMORY_COLUMN_COUNT = 21
 
 
 def _row_to_memory(row, include_embedding: bool = False) -> Memory:
@@ -40,6 +48,14 @@ def _row_to_memory(row, include_embedding: bool = False) -> Memory:
         "expires_at": row[14],
         "created_at": row[15],
         "updated_at": row[16],
+        # Approval lifecycle (v3). Defensive length checks keep this working if a
+        # caller ever passes a legacy-shaped row; approval_status never goes None
+        # (the model requires a str), so a missing value reads as "approved" -
+        # i.e. enforced, matching pre-v3 behavior.
+        "created_by": row[17] if len(row) > 17 else None,
+        "approval_status": row[18] if len(row) > 18 and row[18] is not None else "approved",
+        "approved_by": row[19] if len(row) > 19 else None,
+        "approved_at": row[20] if len(row) > 20 else None,
     }
     if include_embedding:
         data["embedding"] = row[7]
@@ -68,17 +84,20 @@ class MemoryRepository:
         entities: list[str],
         expires_at: datetime | None,
         status: str = "active",
+        created_by: str | None = None,
+        approval_status: str = "approved",
     ) -> Memory:
         with connect(project) as conn:
             conn.execute(
                 """
-                INSERT INTO memories (id, category, title, content, summary, tags, metadata, embedding, status, priority, source, related_ids, entities, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memories (id, category, title, content, summary, tags, metadata, embedding, status, priority, source, related_ids, entities, expires_at, created_by, approval_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     memory_id, category, title, content, summary, tags,
                     json.dumps(metadata) if metadata else None,
                     embedding, status, priority, source, related_ids, entities, expires_at,
+                    created_by, approval_status,
                 ],
             )
             row = conn.execute(
@@ -103,18 +122,26 @@ class MemoryRepository:
             ).fetchone()
         return _row_to_memory(row) if row else None
 
-    def get_rules(self, project: str) -> tuple[list[Memory], list[Memory]]:
+    def get_rules(
+        self, project: str, enforce_approval: bool = False
+    ) -> tuple[list[Memory], list[Memory]]:
         """Return (mandatory_rules, forbidden_rules) as typed Memory lists.
 
         Deliberately has NO LIMIT: rules must always load completely. Every
         active rule is returned so session start, the per-message hook, and
         memory_get_rules apply the full rule set - never a top-N subset.
+
+        When enforce_approval is True (server mode) only approved rules are
+        returned; when False (local mode) every active rule is returned, exactly
+        as before the approval columns existed.
         """
+        where_approval = " AND approval_status = 'approved'" if enforce_approval else ""
         with connect(project) as conn:
             rows = conn.execute(
                 f"""
                 SELECT {MEMORY_COLUMNS} FROM memories
-                WHERE category IN ('mandatory_rules', 'forbidden_rules') AND status = 'active'
+                WHERE category IN ('mandatory_rules', 'forbidden_rules')
+                  AND status = 'active'{where_approval}
                 ORDER BY priority DESC, created_at ASC
                 """
             ).fetchall()
@@ -128,6 +155,21 @@ class MemoryRepository:
             else:
                 forbidden.append(mem)
         return mandatory, forbidden
+
+    def rules_by_approval(self, project: str, approval_status: str) -> list[Memory]:
+        """Active rules in a given approval state (e.g. 'proposed'). Used by the
+        admin moderation queue; indexed by idx_memories_approval."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {MEMORY_COLUMNS} FROM memories
+                WHERE category IN ('mandatory_rules', 'forbidden_rules')
+                  AND status = 'active' AND approval_status = ?
+                ORDER BY priority DESC, created_at ASC
+                """,
+                [approval_status],
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
 
     def get_recent_by_category(
         self, project: str, category: str, since: datetime, limit: int = 20
@@ -234,8 +276,8 @@ class MemoryRepository:
 
         results: list[tuple[Memory, float]] = []
         for row in rows:
-            memory = _row_to_memory(row[:17])
-            distance = row[17]
+            memory = _row_to_memory(row[:MEMORY_COLUMN_COUNT])
+            distance = row[MEMORY_COLUMN_COUNT]
             results.append((memory, distance))
         return results
 

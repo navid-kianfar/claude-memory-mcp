@@ -2,12 +2,17 @@
 
 import json
 import uuid
+from datetime import datetime, timezone
 
+from memory_mcp.config import settings
+from memory_mcp.context import current_user
 from memory_mcp.embeddings import embed_text
-from memory_mcp.exceptions import MemoryNotFoundError, InvalidCategoryError
+from memory_mcp.exceptions import (
+    ForbiddenError, MemoryNotFoundError, InvalidCategoryError,
+)
 from memory_mcp.models import (
-    Memory, MemoryCategory, RULE_CATEGORIES,
-    StoreMemoryRequest, UpdateMemoryRequest,
+    GLOBAL_PROJECT_SLUG, Memory, MemoryCategory, RULE_CATEGORIES,
+    StoreMemoryRequest, UpdateMemoryRequest, is_global_project,
 )
 from memory_mcp.repositories import MemoryRepository, ProjectRepository, ProvenanceRepository
 from memory_mcp.services.rules_service import RulesService
@@ -32,11 +37,39 @@ class MemoryService:
 
     # ---------- Store ----------
 
+    def _resolve_authorship(self, request: StoreMemoryRequest) -> tuple[str | None, str]:
+        """Return (created_by, approval_status) applying the per-scope-mix policy.
+
+        Local mode: unattributed + always 'approved' (unchanged behavior).
+        Server mode:
+          - non-rule memories are attributed but never gated ('approved');
+          - admins' rules are auto-approved (they hold approval authority);
+          - a member's rule for a project they OWN is auto-approved;
+          - anything else (org-wide, or another owner's project) is 'proposed'
+            until an admin approves it.
+        """
+        if not settings.server_mode:
+            return request.created_by, "approved"
+
+        user = current_user()
+        created_by = request.created_by or user.id
+        if request.category not in RULE_CATEGORIES:
+            return created_by, "approved"
+        if user.is_admin:
+            return created_by, "approved"
+        if is_global_project(request.project):
+            return created_by, "proposed"
+        project = self._project_repo.get(request.project)
+        is_owner = project is not None and project.owner == created_by
+        return created_by, ("approved" if is_owner else "proposed")
+
     def store(self, request: StoreMemoryRequest) -> Memory:
         # Force priority for rules
         priority = request.priority
         if request.category in RULE_CATEGORIES:
             priority = max(priority, 2)
+
+        created_by, approval_status = self._resolve_authorship(request)
 
         summary = generate_summary(request.title, request.content)
         entities = extract_entities(f"{request.title} {request.content}")
@@ -59,6 +92,8 @@ class MemoryService:
             related_ids=request.related_ids,
             entities=entities,
             expires_at=expires_at,
+            created_by=created_by,
+            approval_status=approval_status,
         )
 
         self._project_repo.touch(request.project)
@@ -67,7 +102,9 @@ class MemoryService:
             {
                 "category": request.category.value, "title": request.title,
                 "source": request.source, "entities_extracted": len(entities),
+                "approval_status": approval_status,
             },
+            actor=created_by,
         )
 
         if request.category in RULE_CATEGORIES:
@@ -139,6 +176,43 @@ class MemoryService:
         if existing.category in RULE_CATEGORIES:
             self._rules_service.invalidate(request.project)
 
+        return updated
+
+    # ---------- Approval (server mode) ----------
+
+    def approve_rule(self, project: str, memory_id: str) -> Memory:
+        """Approve a proposed rule so it becomes enforced. Admin-only."""
+        return self._set_approval(project, memory_id, "approved", "approve")
+
+    def revoke_rule(self, project: str, memory_id: str) -> Memory:
+        """Revoke a rule: keep the row (auditable, restorable) but stop enforcing
+        it. Admin-only."""
+        return self._set_approval(project, memory_id, "revoked", "revoke")
+
+    def _set_approval(
+        self, project: str, memory_id: str, approval_status: str, op: str
+    ) -> Memory:
+        user = current_user()
+        if settings.server_mode and not user.is_admin:
+            raise ForbiddenError("Only an admin can approve or revoke rules")
+        existing = self._memory_repo.get_by_id(project, memory_id)
+        if existing is None:
+            raise MemoryNotFoundError(f"Memory not found: {memory_id}")
+        if existing.category not in RULE_CATEGORIES:
+            raise ValueError("Only rules can be approved or revoked")
+
+        updated = self._memory_repo.update(
+            project, memory_id,
+            {
+                "approval_status": approval_status,
+                "approved_by": user.id,
+                "approved_at": datetime.now(timezone.utc),
+            },
+        )
+        self._provenance_repo.record(
+            project, memory_id, op, {"approval_status": approval_status}, actor=user.id
+        )
+        self._rules_service.invalidate(project)
         return updated
 
     # ---------- Delete ----------

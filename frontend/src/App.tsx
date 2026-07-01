@@ -20,8 +20,13 @@ import type {
   ProjectUpdate,
   Session,
 } from "./types";
-import { api } from "./lib/api";
+import { api, setUnauthorizedHandler } from "./lib/api";
 import { buildCommands } from "./lib/commands";
+import { LoginScreen } from "./components/auth/LoginScreen";
+import { UserMenu } from "./components/auth/UserMenu";
+import { ModerationQueue } from "./components/admin/ModerationQueue";
+import { UsersView } from "./components/admin/UsersView";
+import { OrgRulesView } from "./components/admin/OrgRulesView";
 import { useTheme } from "./hooks/useTheme";
 import { useHotkey } from "./hooks/useHotkey";
 import { ToastProvider, useToast } from "./components/ui/Toast";
@@ -54,7 +59,7 @@ interface EditorState {
   lockCategory?: boolean;
 }
 
-function AppInner() {
+function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
   const { theme, toggleTheme } = useTheme();
   const { toast } = useToast();
 
@@ -64,10 +69,18 @@ function AppInner() {
   const [bootLoading, setBootLoading] = useState(true);
   const [bootError, setBootError] = useState<string | null>(null);
 
+  // Governance is only active in server mode; in local mode these are all
+  // falsy/null and every governance affordance stays hidden.
+  const serverMode = meta?.mode === "server";
+  const currentUser = meta?.current_user ?? null;
+  const isAdmin = meta?.role === "admin";
+
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
   const [tab, setTab] = useState<TabValue>("memories");
   const [view, setView] = useState<SidebarView>("projects");
+  const isAdminView =
+    view === "moderation" || view === "users" || view === "org-rules";
   const [newTemplateNonce, setNewTemplateNonce] = useState(0);
 
   // memories tab
@@ -349,6 +362,42 @@ function AppInner() {
     }
   }, [selectedSlug, deleteTarget, loadMemories, loadRules, loadProjects, toast]);
 
+  const approveRule = useCallback(
+    async (memory: Memory) => {
+      if (!selectedSlug) return;
+      try {
+        await api.approveRule(selectedSlug, memory.id);
+        toast({ title: "Rule approved", variant: "success" });
+        void loadRules();
+      } catch (err) {
+        toast({
+          title: "Failed to approve rule",
+          description: err instanceof Error ? err.message : undefined,
+          variant: "error",
+        });
+      }
+    },
+    [selectedSlug, loadRules, toast]
+  );
+
+  const revokeRule = useCallback(
+    async (memory: Memory) => {
+      if (!selectedSlug) return;
+      try {
+        await api.revokeRule(selectedSlug, memory.id);
+        toast({ title: "Rule revoked", variant: "success" });
+        void loadRules();
+      } catch (err) {
+        toast({
+          title: "Failed to revoke rule",
+          description: err instanceof Error ? err.message : undefined,
+          variant: "error",
+        });
+      }
+    },
+    [selectedSlug, loadRules, toast]
+  );
+
   const createProject = useCallback(
     async (input: {
       slug: string;
@@ -493,6 +542,17 @@ function AppInner() {
         },
         refresh: refreshAll,
         toggleTheme,
+        admin:
+          serverMode && isAdmin
+            ? {
+                goToModeration: () => setView("moderation"),
+                goToUsers: () => setView("users"),
+                goToOrgRules: () => setView("org-rules"),
+                logout: () => {
+                  void api.logout().finally(onLoggedOut);
+                },
+              }
+            : undefined,
       }),
     [
       projects,
@@ -506,6 +566,9 @@ function AppInner() {
       filterByCategory,
       refreshAll,
       toggleTheme,
+      serverMode,
+      isAdmin,
+      onLoggedOut,
     ]
   );
 
@@ -539,12 +602,18 @@ function AppInner() {
         }}
         onOpenPalette={() => setPaletteOpen(true)}
         loading={bootLoading}
+        serverMode={serverMode}
+        isAdmin={isAdmin}
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-start justify-between gap-4 border-b border-border px-6 py-4">
           <div className="min-w-0">
-            {view === "templates" ? (
+            {isAdminView ? (
+              <h1 className="text-lg font-semibold capitalize">
+                {view === "org-rules" ? "Org-wide rules" : view}
+              </h1>
+            ) : view === "templates" ? (
               <>
                 <h1 className="text-lg font-semibold">Templates</h1>
                 <p className="truncate text-sm text-muted-foreground">
@@ -628,6 +697,13 @@ function AppInner() {
             >
               {theme === "dark" ? <Sun /> : <Moon />}
             </Button>
+            {serverMode && currentUser && (
+              <UserMenu
+                username={currentUser.username}
+                role={currentUser.role}
+                onLoggedOut={onLoggedOut}
+              />
+            )}
           </div>
         </header>
 
@@ -644,6 +720,11 @@ function AppInner() {
               newTemplateNonce={newTemplateNonce}
             />
           )}
+
+          {/* Admin views: server mode + admin only (server also enforces 403). */}
+          {serverMode && isAdmin && view === "moderation" && <ModerationQueue />}
+          {serverMode && isAdmin && view === "users" && <UsersView />}
+          {serverMode && isAdmin && view === "org-rules" && <OrgRulesView />}
 
           {view === "projects" &&
             !bootError &&
@@ -702,6 +783,10 @@ function AppInner() {
                   }
                   onDelete={(m) => setDeleteTarget(m)}
                   onBulkAdd={() => setBulkRuleOpen(true)}
+                  serverMode={serverMode}
+                  isAdmin={isAdmin}
+                  onApprove={approveRule}
+                  onRevoke={revokeRule}
                 />
               )}
 
@@ -822,10 +907,67 @@ function AppInner() {
   );
 }
 
+/**
+ * Gates the app behind login in server mode. In local mode (or any backend that
+ * doesn't report a mode) it renders the app immediately - byte-for-byte the
+ * previous behavior.
+ */
+function AuthGate() {
+  const [phase, setPhase] = useState<"loading" | "login" | "app" | "error">(
+    "loading"
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  const check = useCallback(async () => {
+    setPhase("loading");
+    setError(null);
+    try {
+      const m = await api.getMeta();
+      if (m.mode === "server" && !m.current_user) setPhase("login");
+      else setPhase("app");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reach the server");
+      setPhase("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    void check();
+  }, [check]);
+
+  // A stale session surfaces as a 401 mid-app: re-check and fall back to login.
+  useEffect(() => {
+    setUnauthorizedHandler(() => void check());
+    return () => setUnauthorizedHandler(null);
+  }, [check]);
+
+  if (phase === "loading") {
+    return (
+      <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
+        Loading…
+      </div>
+    );
+  }
+  if (phase === "error") {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 p-4 text-center">
+        <p className="text-sm text-destructive">{error}</p>
+        <Button variant="outline" size="sm" onClick={() => void check()}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  if (phase === "login") {
+    return <LoginScreen onLoggedIn={check} />;
+  }
+  return <AppInner onLoggedOut={check} />;
+}
+
 export default function App() {
   return (
     <ToastProvider>
-      <AppInner />
+      <AuthGate />
     </ToastProvider>
   );
 }

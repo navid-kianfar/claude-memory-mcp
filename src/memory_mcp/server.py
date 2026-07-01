@@ -11,6 +11,7 @@ import os
 
 from fastmcp import FastMCP
 
+from memory_mcp.config import settings
 from memory_mcp.container import container
 from memory_mcp.context import (
     load_active_project, resolve_project, set_active_project,
@@ -57,13 +58,29 @@ next session has continuity.
 
 mcp = FastMCP("memory-mcp", instructions=SERVER_INSTRUCTIONS)
 
+# Server mode: require a valid bearer token on every MCP call. FastMCP wraps the
+# /mcp endpoint in auth middleware when `mcp.auth` is set. In local mode (the
+# default) this stays None and /mcp is mounted exactly as before - no auth.
+if settings.server_mode:
+    from memory_mcp.auth import RegistryTokenVerifier
+
+    mcp.auth = RegistryTokenVerifier(
+        base_url=f"http://{settings.daemon_hostname}:{settings.daemon_port}"
+    )
+
 
 # ---------- Helpers ----------
 
 
 def _resolve(project: str | None) -> str:
-    """Resolve project slug: explicit > active > CWD-detected. Raises if none."""
-    slug = resolve_project(project, os.getcwd())
+    """Resolve project slug: explicit > active > CWD-detected. Raises if none.
+
+    In server mode the daemon's own working directory is meaningless (clients are
+    remote), so CWD auto-detection is disabled - callers pass project= or rely on
+    their per-user active project.
+    """
+    cwd = None if settings.server_mode else os.getcwd()
+    slug = resolve_project(project, cwd)
     if not slug:
         raise ValueError(
             "No project specified and none detected. "
@@ -89,8 +106,7 @@ def _safe(fn):
 def memory_version() -> dict:
     """Get the current version of the Memory MCP server and configuration."""
     from memory_mcp import __version__
-    from memory_mcp.config import settings
-    from memory_mcp.context import _active_project
+    from memory_mcp.context import get_active_project
 
     return {
         "version": __version__,
@@ -98,7 +114,7 @@ def memory_version() -> dict:
         "model_preset": settings.model_preset,
         "embedding_dim": settings.embedding_dim,
         "data_dir": str(settings.data_dir),
-        "active_project": _active_project,
+        "active_project": get_active_project(),
     }
 
 
@@ -440,6 +456,33 @@ def memory_delete_rule(
         slug = _resolve(project)
         _load_rule(slug, rule_id)
         return container.memory_service.delete(slug, rule_id, hard=hard)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_approve_rule(rule_id: str, project: str | None = None) -> dict:
+    """Approve a proposed rule (server mode, admin only) so it becomes enforced.
+
+    In local mode rules are always enforced, so this is only meaningful on a
+    shared server where members propose rules for admin review.
+    """
+    def _run():
+        slug = _resolve(project)
+        _load_rule(slug, rule_id)
+        memory = container.memory_service.approve_rule(slug, rule_id)
+        return {"status": "ok", "rule": memory.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_revoke_rule(rule_id: str, project: str | None = None) -> dict:
+    """Revoke a rule (server mode, admin only): it stops being enforced but is
+    kept for audit and can be re-approved later."""
+    def _run():
+        slug = _resolve(project)
+        _load_rule(slug, rule_id)
+        memory = container.memory_service.revoke_rule(slug, rule_id)
+        return {"status": "ok", "rule": memory.model_dump(mode="json")}
     return _safe(_run)
 
 

@@ -1,23 +1,29 @@
 import type {
   ApplyTemplateResult,
+  AuthSession,
   BulkAddRuleInput,
   BulkAddRuleResult,
+  CreateUserInput,
+  CreateUserResult,
   Health,
   ImportResult,
   ImportRulesResult,
   LinkFolderResult,
   LoadFromFolderResult,
+  LoginInput,
   Memory,
   MemoryInput,
   MemoryListResponse,
   MemoryStatus,
   MemoryUpdate,
   Meta,
+  PendingRulesResponse,
   Project,
   ProjectDetail,
   ProjectInput,
   ProjectUpdate,
   ProvenanceEntry,
+  RotateTokenResult,
   RulesResponse,
   Session,
   Template,
@@ -26,6 +32,8 @@ import type {
   TemplateItemInput,
   TemplateItemUpdate,
   TemplateUpdate,
+  User,
+  UsersResponse,
 } from "../types";
 
 class ApiError extends Error {
@@ -39,12 +47,22 @@ class ApiError extends Error {
   }
 }
 
+// Called on an unexpected 401 (server-mode session expired). AuthGate registers
+// this to bounce back to the login screen. Never fires in local mode (no 401s).
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  onUnauthorized = fn;
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
+    // CSRF guard for cookie-authenticated writes (server mode). Harmless for
+    // GETs and for local mode, so it's sent on every request.
+    "X-Requested-With": "memory-mcp",
     ...(options.headers as Record<string, string>),
   };
   if (options.body && !headers["Content-Type"]) {
@@ -53,7 +71,7 @@ async function request<T>(
 
   let res: Response;
   try {
-    res = await fetch(path, { ...options, headers });
+    res = await fetch(path, { credentials: "same-origin", ...options, headers });
   } catch (err) {
     throw new ApiError(
       err instanceof Error ? err.message : "Network request failed",
@@ -73,6 +91,11 @@ async function request<T>(
   }
 
   if (!res.ok) {
+    // Session expired mid-app: signal AuthGate to return to login. Auth
+    // endpoints handle their own 401s (bad login), so exclude them.
+    if (res.status === 401 && !path.startsWith("/api/auth/") && onUnauthorized) {
+      onUnauthorized();
+    }
     const body = (data ?? {}) as { error?: string; type?: string };
     throw new ApiError(
       body.error || `Request failed (${res.status})`,
@@ -355,6 +378,100 @@ export const api = {
     return request<BulkAddRuleResult>("/api/rules/bulk", {
       method: "POST",
       body: JSON.stringify(input),
+    });
+  },
+
+  // ---------- auth (server mode) ----------
+
+  login(input: LoginInput): Promise<AuthSession> {
+    return request<AuthSession>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  logout(): Promise<{ status: string }> {
+    return request<{ status: string }>("/api/auth/logout", { method: "POST" });
+  },
+
+  whoami(): Promise<{ mode: string; user: AuthSession["user"] }> {
+    return request("/api/auth/whoami");
+  },
+
+  // ---------- users (admin) ----------
+
+  listUsers(): Promise<UsersResponse> {
+    return request<UsersResponse>("/api/users");
+  },
+
+  createUser(input: CreateUserInput): Promise<CreateUserResult> {
+    return request<CreateUserResult>("/api/users", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  deactivateUser(id: string): Promise<{ status: string; user: User }> {
+    return request(`/api/users/${encodeURIComponent(id)}/deactivate`, {
+      method: "POST",
+    });
+  },
+
+  rotateUserToken(id: string): Promise<RotateTokenResult> {
+    return request<RotateTokenResult>(
+      `/api/users/${encodeURIComponent(id)}/rotate-token`,
+      { method: "POST" }
+    );
+  },
+
+  // ---------- rule governance (admin) ----------
+
+  listPendingRules(): Promise<PendingRulesResponse> {
+    return request<PendingRulesResponse>("/api/rules/pending");
+  },
+
+  approveRule(slug: string, rid: string): Promise<{ status: string; rule: Memory }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/rules/${encodeURIComponent(rid)}/approve`,
+      { method: "POST" }
+    );
+  },
+
+  revokeRule(slug: string, rid: string): Promise<{ status: string; rule: Memory }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/rules/${encodeURIComponent(rid)}/revoke`,
+      { method: "POST" }
+    );
+  },
+
+  // ---------- org-wide rules (admin) ----------
+
+  listOrgRules(): Promise<RulesResponse> {
+    return request<RulesResponse>("/api/org/rules");
+  },
+
+  createOrgRule(
+    input: BulkAddRuleInput
+  ): Promise<{ status: string; rule: Memory }> {
+    return request("/api/org/rules", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  updateOrgRule(
+    rid: string,
+    input: MemoryUpdate
+  ): Promise<{ status: string; rule: Memory }> {
+    return request(`/api/org/rules/${encodeURIComponent(rid)}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  deleteOrgRule(rid: string): Promise<{ status: string }> {
+    return request(`/api/org/rules/${encodeURIComponent(rid)}`, {
+      method: "DELETE",
     });
   },
 };

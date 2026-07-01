@@ -6,7 +6,8 @@ export type CommandGroup =
   | "Create"
   | "Navigate"
   | "Filters"
-  | "Actions";
+  | "Actions"
+  | "Admin";
 
 export interface Command {
   id: string;
@@ -37,6 +38,14 @@ export interface CommandContext {
   bulkAddRule: () => void;
   refresh: () => void;
   toggleTheme: () => void;
+  // Admin (server mode only). Present only when the caller is a server-mode
+  // admin, so the commands never appear in local mode.
+  admin?: {
+    goToModeration: () => void;
+    goToUsers: () => void;
+    goToOrgRules: () => void;
+    logout: () => void;
+  };
 }
 
 /**
@@ -198,6 +207,40 @@ export function buildCommands(ctx: CommandContext): Command[] {
       run: () => ctx.toggleTheme(),
     }
   );
+
+  if (ctx.admin) {
+    const a = ctx.admin;
+    commands.push(
+      {
+        id: "admin:moderation",
+        group: "Admin",
+        label: "Open moderation queue",
+        keywords: "pending approve revoke governance queue admin",
+        run: () => a.goToModeration(),
+      },
+      {
+        id: "admin:org-rules",
+        group: "Admin",
+        label: "Edit org-wide rules",
+        keywords: "org global shared rules admin",
+        run: () => a.goToOrgRules(),
+      },
+      {
+        id: "admin:users",
+        group: "Admin",
+        label: "Manage users",
+        keywords: "users admin member accounts tokens",
+        run: () => a.goToUsers(),
+      },
+      {
+        id: "admin:logout",
+        group: "Admin",
+        label: "Log out",
+        keywords: "sign out logout session",
+        run: () => a.logout(),
+      }
+    );
+  }
 
   return commands;
 }

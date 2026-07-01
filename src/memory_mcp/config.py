@@ -56,10 +56,31 @@ class Settings(BaseSettings):
     daemon_port: int = 8765
     daemon_hostname: str = "claude-memory-mcp"
 
+    # Deployment mode. "local" (default) is the original single-user, no-auth
+    # behavior - every new auth/identity/approval path is a no-op. "server"
+    # opts in to multi-user token auth, per-request isolation, and the rule
+    # approval workflow. Set with MEMORY_MCP_MODE=server on a shared install.
+    mode: str = "local"
+
+    # Mark the UI session cookie Secure (HTTPS-only). Correct for a server behind
+    # TLS (the expected deployment); set MEMORY_MCP_COOKIE_SECURE=false only for a
+    # plain-HTTP server install where the browser talks to the daemon over http.
+    cookie_secure: bool = True
+
     # Explicit path to the built frontend (frontend/dist). Leave empty to use
     # the repo-relative location; set MEMORY_MCP_UI_DIR for non-editable
     # installs (e.g. Homebrew) where the package is not next to the repo.
     ui_dir: str = ""
+
+    @property
+    def server_mode(self) -> bool:
+        """True when running as a shared multi-user server (auth + governance).
+
+        Read from the module-level `settings` singleton, which is evaluated
+        from the environment at import time, so this is safe to consult while
+        wiring `mcp.auth` during import.
+        """
+        return self.mode.strip().lower() == "server"
 
     @property
     def projects_dir(self) -> Path:

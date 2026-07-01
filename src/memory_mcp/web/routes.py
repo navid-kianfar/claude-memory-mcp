@@ -8,8 +8,11 @@ the UI and the Claude clients never contend for locks.
 
 from pathlib import Path
 
+import httpx
 from anyio import to_thread
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import (
+    FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response,
+)
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -20,6 +23,7 @@ from memory_mcp.context import (
     LOCAL_USER, RequestUser, current_user, get_active_project, get_request_user,
     reset_request_user, set_active_project, set_request_user,
 )
+from memory_mcp.db.registry import get_credential
 from memory_mcp.exceptions import (
     AuthError, ForbiddenError, MemoryMCPError, MemoryNotFoundError,
     ProjectNotFoundError,
@@ -104,7 +108,51 @@ def _hook_authorized(request) -> bool:
     return _request_user_obj(request) is not None
 
 
-def _api(fn, *, public: bool = False, admin: bool = False):
+async def _proxy_to_remote(request, project) -> Response:
+    """Forward a request for a remote-bound project to its org server, verbatim,
+    carrying the stored credential. The local handler is bypassed entirely, so a
+    remote project's data never touches local storage."""
+    token = await to_thread.run_sync(get_credential, project.remote_url)
+    url = project.remote_url.rstrip("/") + request.url.path
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    ct = request.headers.get("content-type")
+    if ct:
+        headers["Content-Type"] = ct
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.request(
+                request.method, url,
+                params=dict(request.query_params), content=body, headers=headers,
+            )
+    except httpx.HTTPError as e:
+        return JSONResponse(
+            {"error": f"Remote server unreachable: {e}", "type": "RemoteError"},
+            status_code=502,
+        )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type=resp.headers.get("content-type", "application/json"),
+    )
+
+
+def _remote_project(slug: str | None):
+    """Return the ProjectInfo if slug names a remote-bound project, else None."""
+    if not slug:
+        return None
+    try:
+        proj = container.project_repo.get(slug)
+    except Exception:  # noqa: BLE001
+        return None
+    if proj and proj.backend == "remote" and proj.remote_url:
+        return proj
+    return None
+
+
+def _api(fn, *, public: bool = False, admin: bool = False, remote_aware: bool = False):
     """Wrap a sync handler `fn(params, body, query) -> data | (data, status)`.
 
     In server mode the caller is authenticated (Bearer token or session cookie)
@@ -113,6 +161,10 @@ def _api(fn, *, public: bool = False, admin: bool = False):
     identity. `public=True` skips the auth requirement (login/meta/health);
     `admin=True` additionally requires the admin role. In local mode auth is a
     no-op: a synthetic local admin is bound and nothing is ever rejected.
+
+    `remote_aware=True` marks a project-scoped data route: when its `slug`
+    project is bound to a remote server, the request is proxied there instead of
+    running the local handler (the gateway - see _proxy_to_remote).
     """
 
     async def handler(request):
@@ -124,6 +176,13 @@ def _api(fn, *, public: bool = False, admin: bool = False):
                 body = {}
         params = dict(request.path_params)
         query = dict(request.query_params)
+
+        # Gateway: hand off remote-bound projects to their org server before any
+        # local work. Not gated on server_mode - a local daemon gateways too.
+        if remote_aware:
+            proj = await to_thread.run_sync(_remote_project, params.get("slug"))
+            if proj is not None:
+                return await _proxy_to_remote(request, proj)
 
         if settings.server_mode:
             user, method = _authenticate(request)
@@ -520,6 +579,14 @@ def _create_memory(params, body, query):
     return {"status": "ok", "memory": _mem(memory)}, 201
 
 
+def _get_memory(params, body, query):
+    slug = params["slug"]
+    memory = container.memory_repo.get_by_id(slug, params["mid"])
+    if memory is None:
+        raise MemoryNotFoundError(f"Memory not found: {params['mid']}")
+    return {"memory": _mem(memory)}
+
+
 def _update_memory(params, body, query):
     slug = params["slug"]
     req = UpdateMemoryRequest(
@@ -892,21 +959,22 @@ def build_routes() -> list:
         Route("/api/projects/load-from-folder", _api(_load_from_folder), methods=["POST"]),
         Route("/api/pick-folder", _api(_pick_folder), methods=["POST"]),
         Route("/api/active", _api(_set_active), methods=["POST"]),
-        Route("/api/projects/{slug}", _api(_project_info), methods=["GET"]),
+        Route("/api/projects/{slug}", _api(_project_info, remote_aware=True), methods=["GET"]),
         Route("/api/projects/{slug}", _api(_update_project), methods=["PUT"]),
         Route("/api/rules/bulk", _api(_bulk_add_rule), methods=["POST"]),
-        Route("/api/projects/{slug}/memories", _api(_list_memories), methods=["GET"]),
-        Route("/api/projects/{slug}/memories", _api(_create_memory), methods=["POST"]),
-        Route("/api/projects/{slug}/memories/{mid}", _api(_update_memory), methods=["PUT"]),
-        Route("/api/projects/{slug}/memories/{mid}", _api(_delete_memory), methods=["DELETE"]),
-        Route("/api/projects/{slug}/memories/{mid}/provenance", _api(_provenance), methods=["GET"]),
-        Route("/api/projects/{slug}/rules", _api(_rules), methods=["GET"]),
-        Route("/api/projects/{slug}/rules", _api(_add_rule), methods=["POST"]),
-        Route("/api/projects/{slug}/rules/{rid}", _api(_update_rule), methods=["PUT"]),
-        Route("/api/projects/{slug}/rules/{rid}", _api(_delete_rule), methods=["DELETE"]),
+        Route("/api/projects/{slug}/memories", _api(_list_memories, remote_aware=True), methods=["GET"]),
+        Route("/api/projects/{slug}/memories", _api(_create_memory, remote_aware=True), methods=["POST"]),
+        Route("/api/projects/{slug}/memories/{mid}", _api(_get_memory, remote_aware=True), methods=["GET"]),
+        Route("/api/projects/{slug}/memories/{mid}", _api(_update_memory, remote_aware=True), methods=["PUT"]),
+        Route("/api/projects/{slug}/memories/{mid}", _api(_delete_memory, remote_aware=True), methods=["DELETE"]),
+        Route("/api/projects/{slug}/memories/{mid}/provenance", _api(_provenance, remote_aware=True), methods=["GET"]),
+        Route("/api/projects/{slug}/rules", _api(_rules, remote_aware=True), methods=["GET"]),
+        Route("/api/projects/{slug}/rules", _api(_add_rule, remote_aware=True), methods=["POST"]),
+        Route("/api/projects/{slug}/rules/{rid}", _api(_update_rule, remote_aware=True), methods=["PUT"]),
+        Route("/api/projects/{slug}/rules/{rid}", _api(_delete_rule, remote_aware=True), methods=["DELETE"]),
         # Rule governance (server mode, admin only)
-        Route("/api/projects/{slug}/rules/{rid}/approve", _api(_approve_rule, admin=True), methods=["POST"]),
-        Route("/api/projects/{slug}/rules/{rid}/revoke", _api(_revoke_rule, admin=True), methods=["POST"]),
+        Route("/api/projects/{slug}/rules/{rid}/approve", _api(_approve_rule, admin=True, remote_aware=True), methods=["POST"]),
+        Route("/api/projects/{slug}/rules/{rid}/revoke", _api(_revoke_rule, admin=True, remote_aware=True), methods=["POST"]),
         Route("/api/rules/pending", _api(_pending_rules, admin=True), methods=["GET"]),
         Route("/api/org/rules", _api(_list_org_rules, admin=True), methods=["GET"]),
         Route("/api/org/rules", _api(_create_org_rule, admin=True), methods=["POST"]),
@@ -917,7 +985,7 @@ def build_routes() -> list:
         Route("/api/users", _api(_create_user, admin=True), methods=["POST"]),
         Route("/api/users/{uid}/deactivate", _api(_deactivate_user, admin=True), methods=["POST"]),
         Route("/api/users/{uid}/rotate-token", _api(_rotate_user_token, admin=True), methods=["POST"]),
-        Route("/api/projects/{slug}/sessions", _api(_sessions), methods=["GET"]),
+        Route("/api/projects/{slug}/sessions", _api(_sessions, remote_aware=True), methods=["GET"]),
         Route("/api/projects/{slug}/import-claude-md", _api(_import_claude_md), methods=["POST"]),
         Route("/api/projects/{slug}/sync-export", _api(_sync_export), methods=["GET"]),
         Route("/api/projects/{slug}/sync-import", _api(_sync_import), methods=["POST"]),

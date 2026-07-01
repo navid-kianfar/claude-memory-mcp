@@ -89,6 +89,21 @@ def _resolve(project: str | None) -> str:
     return slug
 
 
+def _remote(slug: str):
+    """Return a RemoteBackend when this project is bound to a remote server, else
+    None. When set, the tool must serve the project from the org server so its
+    data never touches local storage (the gateway)."""
+    try:
+        proj = container.project_repo.get(slug)
+    except Exception:  # noqa: BLE001
+        return None
+    if proj and proj.backend == "remote" and proj.remote_url:
+        from memory_mcp.remote_backend import for_project
+
+        return for_project(proj)
+    return None
+
+
 def _safe(fn):
     """Wrap a tool body with uniform error handling."""
     try:
@@ -97,6 +112,9 @@ def _safe(fn):
         return {"error": str(e), "type": type(e).__name__}
     except ValueError as e:
         return {"error": str(e), "type": "ValueError"}
+    except Exception as e:  # noqa: BLE001
+        # Includes RemoteError from the gateway path.
+        return {"error": str(e), "type": type(e).__name__}
 
 
 # ---------- Version ----------
@@ -235,8 +253,14 @@ def memory_store(
 ) -> dict:
     """Store a new memory with auto-embedding, summary, entity extraction, and TTL."""
     def _run():
+        slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            return rb.store(slug, category, title, content,
+                            tags=tags or [], priority=priority,
+                            metadata=metadata, source=source)
         req = StoreMemoryRequest(
-            project=_resolve(project),
+            project=slug,
             category=MemoryCategory(category),
             title=title,
             content=content,
@@ -268,8 +292,13 @@ def memory_search(
 ) -> dict:
     """Semantic search with composite relevance scoring."""
     def _run():
+        slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            return rb.list(slug, q=query, category=category,
+                           status=status, limit=limit)
         req = SearchRequest(
-            project=_resolve(project),
+            project=slug,
             query=query,
             category=MemoryCategory(category) if category else None,
             tags=tags,
@@ -295,7 +324,13 @@ def memory_recall(
 ) -> dict:
     """Recall a specific memory by ID or exact title."""
     def _run():
-        memory = container.memory_service.recall(_resolve(project), memory_id, title)
+        slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            if not memory_id:
+                raise ValueError("Recall by memory_id is required for remote projects")
+            return rb.get_memory(slug, memory_id)
+        memory = container.memory_service.recall(slug, memory_id, title)
         return {"memory": memory.model_dump(mode="json")}
     return _safe(_run)
 
@@ -314,8 +349,18 @@ def memory_update(
 ) -> dict:
     """Update an existing memory. Re-embeds if title/content changed."""
     def _run():
+        slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            fields = {
+                k: v for k, v in {
+                    "title": title, "content": content, "tags": tags,
+                    "metadata": metadata, "status": status, "priority": priority,
+                }.items() if v is not None
+            }
+            return rb.update_memory(slug, memory_id, fields)
         req = UpdateMemoryRequest(
-            project=_resolve(project), memory_id=memory_id,
+            project=slug, memory_id=memory_id,
             title=title, content=content, tags=tags, metadata=metadata,
             status=status, priority=priority, related_ids=related_ids,
         )
@@ -333,8 +378,12 @@ def memory_delete(
 ) -> dict:
     """Soft-delete (archive) or hard-delete a memory."""
     def _run():
+        slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            return rb.delete_memory(slug, memory_id, hard=hard)
         return container.memory_service.delete(
-            _resolve(project), memory_id, hard=hard, reason=reason,
+            slug, memory_id, hard=hard, reason=reason,
         )
     return _safe(_run)
 
@@ -353,6 +402,10 @@ def memory_list(
     """List memories with filtering, sorting, and pagination."""
     def _run():
         slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            return rb.list(slug, category=category, status=status,
+                           limit=limit, offset=offset)
         filters = MemoryFilter(status=status, category=category, tags=tags)
         pagination = Pagination(
             limit=limit, offset=offset, sort_by=sort_by, sort_order=sort_order,
@@ -389,7 +442,11 @@ def memory_provenance(memory_id: str, project: str | None = None) -> dict:
 def memory_get_rules(project: str | None = None) -> dict:
     """Get all mandatory and forbidden rules (direct SQL, cached)."""
     def _run():
-        response = container.rules_service.get_rules(_resolve(project))
+        slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            return rb.get_rules(slug)
+        response = container.rules_service.get_rules(slug)
         return response.model_dump(mode="json")
     return _safe(_run)
 
@@ -413,8 +470,12 @@ def memory_add_rule(
     """Add a project rule. rule_type is 'mandatory' (always do) or 'forbidden'
     (never do). The rule is enforced in every future session."""
     def _run():
+        slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            return rb.add_rule(slug, rule_type, title, content, priority=priority)
         req = StoreMemoryRequest(
-            project=_resolve(project),
+            project=slug,
             category=rule_category(rule_type),
             title=title,
             content=content,
@@ -436,6 +497,9 @@ def memory_update_rule(
     """Update an existing mandatory or forbidden rule by its id."""
     def _run():
         slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            return rb.update_rule(slug, rule_id, title=title, content=content)
         _load_rule(slug, rule_id)
         req = UpdateMemoryRequest(
             project=slug, memory_id=rule_id, title=title, content=content,
@@ -454,6 +518,9 @@ def memory_delete_rule(
     """Delete a rule by its id. Soft-deletes (archives) unless hard=True."""
     def _run():
         slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            return rb.delete_rule(slug, rule_id, hard=hard)
         _load_rule(slug, rule_id)
         return container.memory_service.delete(slug, rule_id, hard=hard)
     return _safe(_run)
@@ -468,6 +535,9 @@ def memory_approve_rule(rule_id: str, project: str | None = None) -> dict:
     """
     def _run():
         slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            return rb.approve_rule(slug, rule_id)
         _load_rule(slug, rule_id)
         memory = container.memory_service.approve_rule(slug, rule_id)
         return {"status": "ok", "rule": memory.model_dump(mode="json")}
@@ -480,6 +550,9 @@ def memory_revoke_rule(rule_id: str, project: str | None = None) -> dict:
     kept for audit and can be re-approved later."""
     def _run():
         slug = _resolve(project)
+        rb = _remote(slug)
+        if rb:
+            return rb.revoke_rule(slug, rule_id)
         _load_rule(slug, rule_id)
         memory = container.memory_service.revoke_rule(slug, rule_id)
         return {"status": "ok", "rule": memory.model_dump(mode="json")}

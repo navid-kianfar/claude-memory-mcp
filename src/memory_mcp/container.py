@@ -12,7 +12,7 @@ from memory_mcp.services import (
     MemoryService, SearchService, RulesService, RulesCache,
     SessionService, ProjectService, PortableService,
     ExportImportService, ModelService, UpdateService, ClaudeMdService,
-    TaskService, TemplateService, SyncService, AsoodeBridge,
+    TaskService, TemplateService, SyncService, AsoodeBridge, TaskPlanner,
 )
 
 
@@ -55,6 +55,7 @@ class Container:
         # The asoode client is built lazily inside the bridge, so a machine
         # with no PAT stored still constructs the container fine.
         self.asoode_bridge = AsoodeBridge(self.project_service, self.task_service)
+        self.task_planner = TaskPlanner(self.task_service, self.asoode_bridge)
         # Constructed after the bridge: a bound project's session brief tells the
         # agent to work the board, so the session service needs it.
         self.session_service = SessionService(

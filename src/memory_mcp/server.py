@@ -69,6 +69,21 @@ parked. memory_session_start returns them as `queued_tasks`.
     memory_task_claim_next(session_id) ONLY when you have finished what you were
     doing. A busy session must not claim. memory_session_end releases claims.
 
+WHEN A REQUEST HAS SEVERAL DELIVERABLES, record it before working it. Call
+memory_task_plan(request, tasks) with the user's wording verbatim and one task
+per SEPARABLE deliverable - something that could be committed or reviewed on its
+own. "Add the endpoint, wire the UI and write the docs" is three tasks; then work
+them top-down. The point is that the queue, not the transcript, holds what was
+asked: if the session ends after the first one, the rest are still there.
+  - Do NOT decompose a question, a lookup, an explanation, or a single change
+    described in several clauses. That is one job - just do it, or use
+    memory_task_add. Over-decomposition buries a board in rows nobody would plan
+    around, which is worse than not decomposing at all.
+  - Decompose by deliverable, never by step. Steps hang off a deliverable with
+    parent_index.
+  - Every task needs a description stating the requirement in full. The tool
+    rejects one without it.
+
 ASOODE is the task manager this server bridges to. A project can be BOUND to an
 asoode work package (a board), and the binding changes what the task list means.
   - memory_asoode_status shows which asoode and whether a PAT is stored. The PAT
@@ -214,6 +229,47 @@ def memory_asoode_links(project: str | None = None) -> dict:
     def _run():
         slug = _resolve(project)
         return {"slug": slug, "links": container.asoode_bridge.links(slug)}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_plan(
+    request: str,
+    tasks: list[dict],
+    project: str | None = None,
+) -> dict:
+    """Record a multi-part request as an ordered set of tasks, then work them.
+
+    CALL THIS FIRST when a request contains two or more SEPARABLE DELIVERABLES -
+    things that could each be committed or reviewed on their own ("add the
+    endpoint, wire the UI, write the docs" is three). The queue then holds what
+    was asked for, so nothing is lost if the session ends after the first one.
+
+    DO NOT call it for a question, a lookup, an explanation, or a single change
+    described in several clauses - that is one job, and one job is
+    memory_task_add or just doing it. A plan of fewer than 2 tasks is rejected,
+    and more than 20 is over the cap: decompose by deliverable, never by step.
+    Steps go under a parent task via parent_index.
+
+    `request` is the user's wording, verbatim - it is stored on every task the
+    plan produces, so what was actually asked survives later edits to a title.
+
+    Each item in `tasks` takes:
+      title           short imperative name
+      description     REQUIRED - the requirement in full: what, why, the
+                      constraint that shapes it, and the files or endpoints
+                      involved. A bare title loses the detail the list exists for.
+      priority        0-3, optional
+      labels          list of strings, optional
+      parent_index    index of an EARLIER item in this list, to hang a step off a
+                      deliverable, optional
+
+    List them in dependency order - the queue is worked top-down. They are
+    mirrored to the asoode board immediately when the project is bound.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.task_planner.plan(slug, request, tasks)
     return _safe(_run)
 
 

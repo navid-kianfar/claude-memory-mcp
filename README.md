@@ -221,7 +221,7 @@ A React single-page app served by the daemon at `/`:
 
 ## MCP tools
 
-All 59 tools:
+All 60 tools:
 
 | Area | Tools |
 |------|-------|
@@ -233,6 +233,7 @@ All 59 tools:
 | Imported rules | `memory_pending_list`, `memory_adapt_pending`, `memory_discard_pending` |
 | Tasks | `memory_task_add`, `memory_task_list`, `memory_task_get`, `memory_task_update`, `memory_task_comment`, `memory_task_start`, `memory_task_stop`, `memory_task_done`, `memory_task_archive`, `memory_task_convert`, `memory_task_delete` |
 | Task claims (multi-session) | `memory_task_claim_next`, `memory_task_release` |
+| Planning | `memory_task_plan` |
 | Sessions | `memory_session_start`, `memory_session_end` |
 | Portability | `memory_attach_project`, `memory_make_portable`, `memory_sync` |
 | Import/Export | `memory_export`, `memory_import`, `memory_import_claude_md` |
@@ -277,6 +278,19 @@ through a `Referer`, and stripped from the address bar on arrival. The link is
 handed straight to the browser and printed redacted; no HTTP route returns or
 redirects to it, which would put the token in a response body or a `Location`
 header.
+
+### Multi-part requests become tasks before they are worked
+
+`memory_task_plan(request, tasks)` records a request with several separable
+deliverables as an ordered set of tasks — the user's wording kept verbatim on
+each one — then they get worked top-down. If the session ends after the first,
+the rest are still in the queue rather than only in the transcript.
+
+The boundary is one task per **deliverable**, not per step: a question or a single
+change described in several clauses is not a plan. Fewer than 2 tasks is rejected
+(that is `memory_task_add`), more than 20 is over the cap, and a task with no
+description is refused — over-decomposition buries a board in rows nobody would
+plan around.
 
 ### Binding a project makes its board the work queue
 

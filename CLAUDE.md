@@ -51,6 +51,14 @@ a `MemoryCategory`, so they never enter the committed `.claude-memory/*.json` sn
   ONLY when you have finished what you were doing — never mid-task, and never just because the list
   is non-empty. `memory_session_end` releases whatever you held.
 
+### Multi-part requests
+
+Call `memory_task_plan(request, tasks)` FIRST when a request has two or more
+separable deliverables, then work them top-down. One task per deliverable, never
+per step (steps use `parent_index`); a question or a single change in several
+clauses is not a plan. Every task needs a description — the tool rejects one
+without it.
+
 ### asoode (the task bridge)
 
 Endpoints default to the hosted service — `app.asoode.com`, `api.asoode.com`,

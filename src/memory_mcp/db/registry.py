@@ -501,6 +501,14 @@ def upsert_project_link(
     import json
 
     with registry_conn() as conn:
+        # A project links to many boards but only one is the default, so promoting
+        # this row demotes the rest. Without this, re-linking a project to a new
+        # board leaves two rows flagged default and get_default_project_link keeps
+        # returning the OLDER one - the push would silently go to the old board.
+        if is_default:
+            conn.execute(
+                "UPDATE project_links SET is_default = 0 WHERE slug = ?", (slug,)
+            )
         conn.execute(
             """INSERT INTO project_links (
                    slug, provider, base_url, socket_url, remote_project_id,

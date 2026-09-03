@@ -295,3 +295,54 @@ class TestLinkTable:
     def test_a_project_is_never_auto_linked(self, linked_project):
         """Copies bind_backend's rule: linking is always explicit."""
         assert get_project_links(linked_project) == []
+
+
+class TestRebinding:
+    """Re-linking a project to a different board must actually redirect pushes."""
+
+    def test_a_new_default_demotes_the_previous_one(self, linked_project):
+        first = upsert_project_link(
+            linked_project, base_url="https://api.asoode.com",
+            remote_project_id="p1", remote_work_package_id="wp-old", label="Old",
+        )
+        second = upsert_project_link(
+            linked_project, base_url="https://api.asoode.com",
+            remote_project_id="p2", remote_work_package_id="wp-new", label="New",
+        )
+        assert first["id"] != second["id"], "a different board is a different link"
+
+        default = get_default_project_link(linked_project)
+        assert default["remote_work_package_id"] == "wp-new"
+        assert len(get_project_links(linked_project)) == 2, "the old link is kept"
+        old = [
+            l for l in get_project_links(linked_project)
+            if l["remote_work_package_id"] == "wp-old"
+        ][0]
+        assert old["is_default"] is False
+
+    def test_push_follows_the_new_board(self, linked_project):
+        fake = FakeClient()
+        bridge = AsoodeBridge(container.project_service, container.task_service, fake)
+        bridge.bootstrap(linked_project)
+        container.task_service.create(
+            CreateTaskRequest(project=linked_project, title="Follow me")
+        )
+        upsert_project_link(
+            linked_project, base_url="https://api.asoode.com",
+            remote_project_id="p2", remote_work_package_id="wp-new",
+            default_list_id="l-new", state_list_map={"todo": "l-new"},
+        )
+        bridge.push(linked_project)
+        assert fake.created_tasks[0]["list_id"] == "l-new"
+
+    def test_explicit_non_default_link_does_not_steal_the_default(self, linked_project):
+        upsert_project_link(
+            linked_project, base_url="https://api.asoode.com",
+            remote_project_id="p1", remote_work_package_id="wp-main",
+        )
+        upsert_project_link(
+            linked_project, base_url="https://api.asoode.com",
+            remote_project_id="p1", remote_work_package_id="wp-side",
+            is_default=False,
+        )
+        assert get_default_project_link(linked_project)["remote_work_package_id"] == "wp-main"

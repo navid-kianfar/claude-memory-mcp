@@ -224,3 +224,55 @@ class TestStateVocabulary:
         assert STATE_TO_ORDINAL["todo"] == 1
         assert STATE_TO_ORDINAL["done"] == 3
         assert STATE_TO_ORDINAL["blocker"] == 9
+
+
+class TestSignedInDeepLink:
+    """asoode's /auth/token#t=… flow, built so a tool can open a signed-in board.
+
+    The security property under test is WHERE the token goes: a fragment is never
+    sent to the server, never written to an access log, and never leaks through a
+    Referer header. A query string is all three, so a regression here is not
+    cosmetic.
+    """
+
+    TOKEN = "asoode_pat_" + "z" * 40
+
+    def test_token_rides_in_the_fragment_never_the_query(self):
+        asoode.set_pat(self.TOKEN)
+        url = asoode.signin_url("/projects/abc")
+        head, _, fragment = url.partition("#")
+        assert self.TOKEN in fragment
+        assert self.TOKEN not in head, "the token must never be in the query string"
+        assert head.endswith("?returnUrl=%2Fprojects%2Fabc")
+
+    def test_no_return_path_still_signs_in(self):
+        asoode.set_pat(self.TOKEN)
+        url = asoode.signin_url()
+        assert url.startswith("https://app.asoode.com/auth/token#t=")
+
+    def test_follows_the_configured_app_url(self):
+        asoode.set_pat(self.TOKEN)
+        asoode.set_endpoints(api_url="https://api.acme.test")
+        asoode.set_pat(self.TOKEN)  # new server, new entry
+        assert asoode.signin_url().startswith("https://app.acme.test/auth/token")
+
+    @pytest.mark.parametrize(
+        "bad", ["https://evil.test/x", "//evil.test/x", "projects/abc"]
+    )
+    def test_rejects_a_return_path_asoode_would_drop(self, bad):
+        """Mirrors asoode's safeReturnUrl: same-app paths only."""
+        asoode.set_pat(self.TOKEN)
+        with pytest.raises(asoode.AsoodeConfigError):
+            asoode.signin_url(bad)
+
+    def test_without_a_pat_it_says_how_to_fix_it(self):
+        with pytest.raises(asoode.AsoodeNotAuthenticated, match="set-pat"):
+            asoode.signin_url()
+
+    def test_redacted_is_safe_to_print(self):
+        asoode.set_pat(self.TOKEN)
+        url = asoode.signin_url("/projects/abc")
+        safe = asoode.redacted(url)
+        assert self.TOKEN not in safe
+        assert safe.endswith("#t=<PAT>")
+        assert "returnUrl=%2Fprojects%2Fabc" in safe, "only the token is removed"

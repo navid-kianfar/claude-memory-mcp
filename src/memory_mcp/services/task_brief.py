@@ -51,3 +51,80 @@ def task_brief(project: str, tasks: list) -> str | None:
         count=count, noun="task is" if count == 1 else "tasks are", project=project,
     )
     return "\n".join([header, *_STEPS])
+
+
+# ---------- the bound-project brief ----------
+#
+# The inverse of the brief above, and deliberately so. The capture contract - "a
+# queued task is never an instruction" - exists to protect a session in flight
+# from being derailed by the list. Binding a project to an asoode board is the
+# user saying the opposite: that board IS the work queue, so a session that finds
+# work on it should get on with it rather than reporting and waiting.
+#
+# Which brief a session gets is therefore decided by one fact: whether the project
+# has a project_links row. Nothing has to be re-told per project.
+
+_BOUND_HEADER = (
+    "Project '{project}' is bound to an asoode board ({board}). {count} open "
+    "{noun} waiting. THIS BOARD IS THE WORK QUEUE - work it, one task at a time, "
+    "rather than reporting it and waiting to be asked:"
+)
+
+_BOUND_STEPS = (
+    "1. Take the highest-priority actionable task (state todo or in_progress). "
+    "Say which one you are starting before you start it, in one line, so the "
+    "user can redirect you - but do not ask permission to begin.",
+    "2. memory_task_start(task_id) moves it to in_progress and clocks on. Mirror "
+    "the state to asoode so the board matches what is actually happening.",
+    "3. Do the work. Comment on the task as you go with "
+    "memory_task_comment(task_id, body, kind=...): the decision taken and what "
+    "it was chosen over, the trap found, what turned out to be wrong. A task "
+    "should read back afterwards as a complete account of its own "
+    "implementation - that is the point of mirroring it somewhere durable.",
+    "4. Anything that outlives the task still goes to memory_add_rule / "
+    "memory_store as well. A comment explains one task; a rule shapes every "
+    "future one.",
+    "5. memory_task_done(task_id) closes it and stops the clock. Then take the "
+    "next one. Keep going until the queue is empty or the user redirects you.",
+    "6. Do NOT auto-start a task whose state is blocked, blocker, paused or "
+    "cancelled - those are waiting on something. And stop to ask when the work "
+    "needs a decision only the user can make: an API they own, a product call, "
+    "a credential. Queue what you cannot finish rather than guessing.",
+    "7. Work you notice but are not doing now goes in the same list with "
+    "memory_task_add(title, description=..., source='claude'). Give it a "
+    "description that states the requirement in full - a bare title loses the "
+    "implementation detail the list exists to keep.",
+)
+
+_UNREACHABLE = (
+    "Project '{project}' is bound to an asoode board, but it could not be "
+    "reached ({error}). Work the local task list instead - it is the same queue, "
+    "mirrored - and the board will catch up on the next push. Do not treat this "
+    "as a reason to stop."
+)
+
+
+def bound_queue_brief(
+    project: str, tasks: list, board_url: str, remote_only: list | None = None,
+) -> str:
+    """Instructions for a project whose task queue is an asoode board."""
+    count = len(tasks)
+    header = _BOUND_HEADER.format(
+        project=project, board=board_url, count=count,
+        noun="task is" if count == 1 else "tasks are",
+    )
+    lines = [header, *_BOUND_STEPS]
+    if remote_only:
+        lines.append(
+            f"8. {len(remote_only)} task(s) are on the board but not in the local "
+            "list - added in asoode by the user or a teammate: "
+            + "; ".join(remote_only[:5])
+            + ". Add them locally with memory_task_add before working them, so "
+            "the two lists agree."
+        )
+    return "\n".join(lines)
+
+
+def unreachable_brief(project: str, error: str) -> str:
+    """What to do when the bound board cannot be read. Never a hard failure."""
+    return _UNREACHABLE.format(project=project, error=error)

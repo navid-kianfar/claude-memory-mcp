@@ -159,6 +159,71 @@ class AsoodeBridge:
     def links(self, slug: str) -> list[dict]:
         return get_project_links(slug)
 
+    def queue_status(self, slug: str, *, timeout: float = 6.0) -> dict | None:
+        """What the bound board currently holds. None when the project is unbound.
+
+        Called on the session-start path, so it must never raise and never hang:
+        an unreachable asoode, a revoked PAT and a project with no link are all
+        ordinary outcomes reported in the return value. The short timeout is
+        deliberate - a session opening is not the place to wait on a network.
+
+        `remote_only` is the interesting half: tasks that exist on the board but
+        not in the local list, i.e. requirements someone added in asoode. Matched
+        by title today, because asoode's board fetch drops externalRef (see the
+        queued task about it) - good enough to report, not good enough to import,
+        which is why this reports rather than writing.
+        """
+        link = get_default_project_link(slug)
+        if link is None:
+            return None
+
+        endpoints = get_endpoints()
+        board_url = (
+            f"{endpoints.app_url}/projects/{link['remote_project_id']}"
+            if link.get("remote_project_id") else endpoints.app_url
+        )
+        status = {
+            "bound": True,
+            "board_url": board_url,
+            "work_package_id": link["remote_work_package_id"],
+            "reachable": False,
+            "error": None,
+            "remote_open": [],
+            "remote_only": [],
+        }
+        try:
+            client = self._client or AsoodeClient.from_settings(timeout=timeout)
+            board = client.fetch_work_package(link["remote_work_package_id"])
+        except AsoodeError as e:
+            status["error"] = str(e)
+            return status
+        except Exception as e:  # noqa: BLE001 - session start must survive anything
+            status["error"] = f"{type(e).__name__}: {e}"
+            return status
+
+        status["reachable"] = True
+        # asoode states 3/6/7 are Done/Cancelled/Duplicate - closed work.
+        closed = {3, 6, 7}
+        remote_open = [
+            {"id": task.get("id"), "title": task.get("title"), "state": task.get("state")}
+            for board_list in _board_lists(board)
+            for task in (board_list.get("tasks") or [])
+            if task.get("state") not in closed
+        ]
+        status["remote_open"] = remote_open
+
+        local_titles = {
+            task.title.strip().lower()
+            for task in self._tasks.list_tasks(
+                slug, TaskFilter(include_done=True, include_subtasks=True), limit=500,
+            ).tasks
+        }
+        status["remote_only"] = [
+            task["title"] for task in remote_open
+            if (task["title"] or "").strip().lower() not in local_titles
+        ]
+        return status
+
     # ---------- pushing ----------
 
     def push(self, slug: str, *, limit: int = 500, include_done: bool = True) -> dict:

@@ -8,6 +8,7 @@
   memory-mcp asoode check                  prove the PAT reaches the server
   memory-mcp asoode link <slug>            create/find the project + board
   memory-mcp asoode push <slug>            mirror local tasks onto that board
+  memory-mcp asoode open [slug]            open the board, already signed in
 
 The token is read from a no-echo prompt, or from stdin with --stdin. It is
 deliberately NOT a command-line argument: argv lands in shell history and is
@@ -19,6 +20,8 @@ import sys
 
 from memory_mcp.asoode import (
     AsoodeConfigError,
+    redacted,
+    signin_url,
     clear_pat,
     get_endpoints,
     reset_endpoints,
@@ -35,7 +38,7 @@ _CLI_ERRORS = (AsoodeConfigError, AsoodeError)
 
 USAGE = (
     "Usage: memory-mcp asoode "
-    "[status|set-pat|clear-pat|set-url|reset-url|check|link|push]"
+    "[status|set-pat|clear-pat|set-url|reset-url|check|link|push|open]"
 )
 
 
@@ -191,6 +194,48 @@ def main(argv: list[str]) -> None:
             )
             for failure in result["failed"]:
                 print(f"  FAILED {failure['title']}: {failure['error']}", file=sys.stderr)
+
+        elif cmd == "open":
+            p = argparse.ArgumentParser(prog="memory-mcp asoode open")
+            p.add_argument(
+                "slug", nargs="?", default=None,
+                help="open this project's bound board (default: the app itself)",
+            )
+            p.add_argument(
+                "--path", default=None,
+                help="an app-relative path to land on, e.g. /projects/<id>",
+            )
+            p.add_argument(
+                "--print", dest="print_only", action="store_true",
+                help="print the link instead of opening it. It CONTAINS THE TOKEN - "
+                     "pipe it to a browser, never into a log or a chat",
+            )
+            ns = p.parse_args(rest)
+
+            return_path = ns.path
+            if return_path is None and ns.slug:
+                from memory_mcp.db.registry import get_default_project_link
+
+                link = get_default_project_link(ns.slug)
+                if link is None:
+                    print(
+                        f"'{ns.slug}' is not linked to an asoode board - run "
+                        f"`memory-mcp asoode link {ns.slug}` first.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                return_path = f"/projects/{link['remote_project_id']}"
+
+            url = signin_url(return_path or "")
+            if ns.print_only:
+                print(url)
+            else:
+                import subprocess
+
+                opener = {"darwin": "open", "win32": "start"}.get(sys.platform, "xdg-open")
+                subprocess.run([opener, url], check=False)
+                # Redacted on purpose: the real link carries the PAT.
+                print(f"Opened {redacted(url)}")
 
         else:
             print(f"Unknown asoode command: {cmd}\n{USAGE}", file=sys.stderr)

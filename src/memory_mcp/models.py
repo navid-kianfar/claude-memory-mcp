@@ -429,3 +429,7 @@ class SessionContext(BaseModel):
     # can see the queue, and none of them is started unless the user asks.
     queued_tasks: list[Task] = Field(default_factory=list)
     task_instructions: str | None = None
+    # Set only when the project is bound to an asoode board. Its presence is what
+    # flips task_instructions from "surface these, start nothing" to "this board
+    # is the work queue" - so the loop never has to be re-told per project.
+    asoode: dict | None = None

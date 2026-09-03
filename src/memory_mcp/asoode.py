@@ -262,3 +262,56 @@ def status() -> dict:
         "pat": pat_fingerprint(token) if token else None,
         "warnings": warnings,
     }
+
+
+# ---------- opening asoode already signed in ----------
+#
+# asoode ships a deep link for exactly this (apps/frontend: AccessTokenCallbackPage
+# + lib/access-token-link.ts): /auth/token?returnUrl=<path>#t=<PAT> signs the
+# browser in and strips the fragment from the address bar on arrival. The token
+# rides in the FRAGMENT, never a query string - a fragment is not sent to the
+# server, not written to an access log, and not leaked through Referer.
+#
+# Because the resulting string contains the secret, it stays in-process: the CLI
+# hands it straight to the browser and prints a redacted line instead. There is
+# deliberately no HTTP route that returns or redirects to it - that would put the
+# PAT in a response body or a Location header, readable by anything that can
+# reach the daemon.
+
+
+class AsoodeNotAuthenticated(AsoodeConfigError):
+    """No PAT is stored, so no signed-in link can be built."""
+
+
+def signin_url(return_path: str = "") -> str:
+    """A deep link that opens asoode already signed in as the stored PAT's user.
+
+    `return_path` must be an app-relative path (asoode's safeReturnUrl rejects
+    anything else, so an absolute URL here would silently drop to the dashboard).
+
+    NEVER print, log, or send the result anywhere but a browser.
+    """
+    from urllib.parse import quote, urlencode
+
+    endpoints = get_endpoints()
+    token = get_pat(endpoints.api_url)
+    if not token:
+        raise AsoodeNotAuthenticated(
+            f"No asoode PAT stored for {endpoints.api_url}. Run "
+            "`memory-mcp asoode set-pat` once and every project can open signed in."
+        )
+    url = f"{endpoints.app_url}/auth/token"
+    if return_path:
+        if not return_path.startswith("/") or return_path.startswith("//"):
+            raise AsoodeConfigError(
+                f"return_path must be an app-relative path like '/projects/x' "
+                f"(got {return_path!r})"
+            )
+        url += "?" + urlencode({"returnUrl": return_path})
+    return f"{url}#t={quote(token, safe='')}"
+
+
+def redacted(url: str) -> str:
+    """The same link with the token replaced - safe to print or log."""
+    head, _, _ = url.partition("#t=")
+    return f"{head}#t=<PAT>"

@@ -42,10 +42,6 @@ class Container:
             self.task_repo, self.provenance_repo, self.project_repo,
             self.session_repo,
         )
-        self.session_service = SessionService(
-            self.session_repo, self.memory_repo,
-            self.project_repo, self.rules_service, self.task_service,
-        )
         self.project_service = ProjectService(self.project_repo)
         self.portable_service = PortableService(self.project_repo)
         self.export_import_service = ExportImportService(
@@ -59,6 +55,12 @@ class Container:
         # The asoode client is built lazily inside the bridge, so a machine
         # with no PAT stored still constructs the container fine.
         self.asoode_bridge = AsoodeBridge(self.project_service, self.task_service)
+        # Constructed after the bridge: a bound project's session brief tells the
+        # agent to work the board, so the session service needs it.
+        self.session_service = SessionService(
+            self.session_repo, self.memory_repo, self.project_repo,
+            self.rules_service, self.task_service, self.asoode_bridge,
+        )
 
 
 # Module-level singleton

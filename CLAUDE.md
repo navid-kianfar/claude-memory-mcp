@@ -64,6 +64,14 @@ returns a fingerprint, never the token.
 
 - `memory_asoode_link` creates/finds the asoode project + board for this project.
 - `memory_asoode_push` mirrors local tasks onto it.
+- `memory-mcp asoode open <slug>` opens that board already signed in.
+
+**A bound project's board IS the work queue.** `memory_session_start` returns it
+with a brief saying to work it one task at a time — take the highest-priority
+actionable one, start it, mirror the state, comment as you go, mark it done, next.
+That inverts the "surface but never start" contract, which still holds for every
+unbound project. Do not auto-start blocked/blocker/paused/cancelled tasks, and
+stop to ask when the work needs a decision only the user can make.
 
 Both are **idempotent via `externalRef`** (the project uid and the task id), so
 re-running pushes changes rather than duplicating. Both create real objects on the

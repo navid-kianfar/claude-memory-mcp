@@ -9,7 +9,9 @@ from memory_mcp.repositories import (
     MemoryRepository, ProjectRepository, SessionRepository,
 )
 from memory_mcp.services.rules_service import RulesService
-from memory_mcp.services.task_brief import task_brief
+from memory_mcp.services.task_brief import (
+    bound_queue_brief, task_brief, unreachable_brief,
+)
 from memory_mcp.services.task_service import TaskService
 
 AUTO_CLOSE_SUMMARY = "[Auto-closed: session was not properly ended (context overflow or crash)]"
@@ -28,12 +30,16 @@ class SessionService:
         project_repo: ProjectRepository,
         rules_service: RulesService,
         task_service: TaskService,
+        asoode_bridge=None,
     ):
         self._session_repo = session_repo
         self._memory_repo = memory_repo
         self._project_repo = project_repo
         self._rules_service = rules_service
         self._task_service = task_service
+        # Optional: absent in tests and on installs that never link a board, in
+        # which case a session behaves exactly as it always has.
+        self._asoode_bridge = asoode_bridge
 
     def start(self, project: str) -> SessionContext:
         session_id = str(uuid.uuid4())
@@ -79,6 +85,7 @@ class SessionService:
         # surfaced, never started: the brief below is what keeps a queued task
         # from being read as an instruction.
         queued_tasks = self._task_service.queued(project)
+        asoode, instructions = self._task_context(project, queued_tasks)
 
         return SessionContext(
             session_id=session_id,
@@ -92,7 +99,34 @@ class SessionService:
             pending_adaptations=pending,
             pending_instructions=adaptation_brief(project, pending),
             queued_tasks=queued_tasks,
-            task_instructions=task_brief(project, queued_tasks),
+            task_instructions=instructions,
+            asoode=asoode,
+        )
+
+    def _task_context(self, project: str, queued: list) -> tuple[dict | None, str | None]:
+        """Pick the brief the queue gets, and why.
+
+        Unbound project -> the capture brief: surface the list, start nothing.
+        Bound to an asoode board -> that board is the work queue, so the brief
+        says to work it. The binding IS the opt-in; nothing needs configuring per
+        project, which is the whole point.
+
+        A bound-but-unreachable board still gets a brief telling the session to
+        work the local list, because the local list is the same queue mirrored.
+        Never raises: no integration failure may stop a session from starting.
+        """
+        if self._asoode_bridge is None:
+            return None, task_brief(project, queued)
+        try:
+            status = self._asoode_bridge.queue_status(project)
+        except Exception:  # noqa: BLE001 - defensive; queue_status already swallows
+            return None, task_brief(project, queued)
+        if status is None:
+            return None, task_brief(project, queued)
+        if not status["reachable"]:
+            return status, unreachable_brief(project, status["error"] or "unreachable")
+        return status, bound_queue_brief(
+            project, queued, status["board_url"], status["remote_only"],
         )
 
     def end(

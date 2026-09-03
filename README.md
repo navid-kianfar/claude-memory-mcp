@@ -268,7 +268,27 @@ memory-mcp asoode set-pat          # prompts; the input is not echoed
 memory-mcp asoode check            # prove it reaches the server
 memory-mcp asoode link <slug>      # create/find the project + board
 memory-mcp asoode push <slug>      # mirror the task list onto it
+memory-mcp asoode open <slug>      # open that board already signed in
 ```
+
+`open` uses asoode's `/auth/token` deep link, which carries the token in the URL
+**fragment** — never sent to the server, never in an access log, never leaked
+through a `Referer`, and stripped from the address bar on arrival. The link is
+handed straight to the browser and printed redacted; no HTTP route returns or
+redirects to it, which would put the token in a response body or a `Location`
+header.
+
+### Binding a project makes its board the work queue
+
+A bound project's `memory_session_start` returns the board's open tasks and a
+brief telling the agent to **work** them one at a time — start, mirror the state,
+comment as it goes, mark done, next. An unbound project keeps the opposite
+contract: its queued tasks are surfaced and never started, so parking a
+requirement mid-session cannot derail the session.
+
+The binding is the whole opt-in — nothing is configured per project. If the board
+cannot be reached, the session still starts and is told to work the local list,
+which is the same queue mirrored.
 
 The token lives in the local registry (`~/.claude-memory-mcp/registry.db`), never
 in the committed `.claude-memory/` snapshot, and is never printed back — `status`

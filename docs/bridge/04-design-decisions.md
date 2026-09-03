@@ -58,7 +58,35 @@ that forces `sync_cli` into Claude's process does **not** apply to it.
 A reconcile poll runs on every (re)connect to catch anything missed while disconnected, since socket
 delivery is not durable.
 
-### D5 — tasks live in DuckDB and never enter the JSON snapshot
+### D5 — several sessions, one claim: pull, don't push
+
+Multiple Claude Code sessions run against one project at once. A task must be picked up by exactly one,
+and never by a busy one.
+
+**There is no fan-out to deduplicate.** memory-mcp is one launchd daemon on `127.0.0.1:8765` and every
+session is an MCP *client* of it; the port bind plus `KeepAlive` make a second daemon impossible. The
+socket subscription lives in the daemon's lifespan, so one event produces one row.
+
+**Idleness is self-declared.** The daemon cannot push to a session — sessions only speak when they call
+a tool. So sessions *pull*: inbound tasks land unclaimed and inert, and a session claims one at
+`memory_session_start` or via `memory_task_claim_next` when it has finished what it was doing. A busy
+session never asks, so it never gets work. No heartbeat protocol, and nothing is ever interrupted —
+which was the original requirement anyway.
+
+**The claim** is `claimed_by` / `claimed_at` / `lease_expires_at` on `tasks`, taken with a conditional
+`UPDATE … WHERE claimed_by IS NULL OR lease_expires_at < now()`; rowcount is the answer. DuckDB is
+single-writer and this repo opens a connection per operation, so serialize it with a per-project
+`threading.Lock` — sufficient because there is exactly one daemon. If server mode ever runs several
+daemons, the claim table moves to the SQLite registry.
+
+**Crash recovery:** lease TTL checked lazily on the next claim, `last_seen_at` refreshed by any tool
+call (free — every call already hits the daemon), and `memory_session_end` releasing that session's claims.
+
+⚠️ **Known limit:** two machines means two daemons and two local rows; local claims can't see each
+other. Cross-machine exclusion requires a server-side claim in asoode (a bot assignee, or a
+`claimed:<host>` label). Deferred to Phase 2+.
+
+### D6 — tasks live in DuckDB and never enter the JSON snapshot
 
 This kills the *"JSON files could become 100MB+"* worry at the root.
 
@@ -70,7 +98,7 @@ existed because memories round-trip through `.claude-memory/*.json` — tasks wo
 *category*, they will start being written to the snapshot. **They must be separate tables, not a
 category** — or explicitly excluded.
 
-### D6 — DuckDB vs JSON files: the question was framed wrong
+### D7 — DuckDB vs JSON files: the question was framed wrong
 
 Neither. **Don't move files at all.**
 
@@ -83,7 +111,7 @@ Neither. **Don't move files at all.**
 A file-based exchange would only be right for an offline, committed-to-git task manifest — and then it
 should be JSON, per-target, sorted, exactly like `.claude-memory/`.
 
-### D7 — the embedded window is `.claude/launch.json` + the Browser pane
+### D8 — the embedded window is `.claude/launch.json` + the Browser pane
 
 Not a plugin. **Plugins have no UI extension point of any kind** (`03-claude-ui-surfaces.md` §2).
 Config goes in the **asoode** repo, since that's the folder the session opens. Remember: a localhost
@@ -107,12 +135,17 @@ tasks(
   due_at, begin_at, end_at, estimated_minutes, parent_id, position,
   source,            -- 'user' | 'claude' | 'asoode'
   triage,            -- inbound items awaiting a decision (mirrors memories.pending semantics)
+  claimed_by,        -- session id holding this task; NULL = free   (D5)
+  claimed_at, lease_expires_at,
   created_at, updated_at, done_at, archived_at
 )
 task_comments(id, task_id, body, kind, author, created_at, remote_id)
 task_time_entries(id, task_id, begin, end, manual, remote_id)
 task_sync(task_id, link_id, remote_task_id, last_pushed_hash, remote_updated_at, sync_state)
 task_outbox(id, task_id, link_id, op, payload, created_at, attempts, last_error)
+
+-- existing table, altered:
+sessions( … , last_seen_at )   -- free heartbeat; every tool call already hits the daemon   (D5)
 ```
 
 **State vocabulary = asoode's, verbatim**, to avoid a lossy mapping:

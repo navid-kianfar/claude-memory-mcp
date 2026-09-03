@@ -28,7 +28,9 @@ New tables in the **per-project DuckDB**:
 ```
 tasks(id, title, description, state, priority, assignee, labels[],
       due_at, begin_at, end_at, estimated_minutes, parent_id, position,
-      source, triage, created_at, updated_at, done_at, archived_at)
+      source, triage,
+      claimed_by, claimed_at, lease_expires_at,
+      created_at, updated_at, done_at, archived_at)
 task_comments(id, task_id, body, kind, author, created_at)
 task_time_entries(id, task_id, begin, end, manual)
 ```
@@ -38,6 +40,12 @@ task_time_entries(id, task_id, begin, end, manual)
 - `source` ∈ `user | claude` (add `asoode` in Phase 2).
 - `kind` on comments distinguishes a note from a rule/decision/reminder.
 - Leave `triage` in the schema now (Phase 2 uses it for inbound items) but nothing sets it yet.
+- `claimed_by` / `claimed_at` / `lease_expires_at` implement the multi-session claim (see §1a). They
+  are cheap now and awkward to retrofit after v5 ships, so add them even though Phase 1 barely uses them.
+
+The migration must also **`ALTER` the existing `sessions` table** to add `last_seen_at`, backfilled
+explicitly from `started_at`. Every tool call already reaches the daemon, so stamping this is a free
+heartbeat.
 
 ⚠️ **These must be separate tables, never a `MemoryCategory`.** `SYNC_CATEGORIES` is derived
 automatically from the category enum (`constants.py:24`), so a new category would immediately start
@@ -50,6 +58,51 @@ Follow the migration contract exactly (`db/schema.py:159-177` is the model): bum
 never rely on a column DEFAULT for backfill. Add a test in the shape of
 `tests/test_migrations.py:107-120` — version detection, tables appear, **existing rows preserved**,
 **idempotent**.
+
+### 1a · The multi-session claim
+
+I run **several Claude Code sessions against one project at the same time.** A task must be picked up
+by exactly one of them, and never by a session that is busy.
+
+The architecture already solves most of this: memory-mcp is **one launchd daemon bound to
+`127.0.0.1:8765`**, and every session is an MCP *client* of it. A second daemon can't even start — the
+port bind and launchd `KeepAlive` enforce it. So there is one writer, and no fan-out to deduplicate.
+
+**The rule: pull, don't push.** The daemon cannot push to a session — sessions only speak when they
+call a tool. So never route work *to* a session; let a session ask *for* work. Only the session knows
+whether it is mid-task, which makes "idle" definitionally correct with no heartbeat machinery: a busy
+session simply doesn't ask.
+
+Build:
+
+- `memory_task_claim_next` — the session asks for one unclaimed task. Claude calls this **when it has
+  finished what it was doing**, never in the middle of work. Its description must say exactly that.
+- `memory_task_release` — give a claim back.
+- The claim is a conditional update, and the rowcount is the answer:
+
+  ```sql
+  UPDATE tasks SET claimed_by = ?, claimed_at = now(), lease_expires_at = now() + <ttl>
+  WHERE id = ? AND (claimed_by IS NULL OR lease_expires_at < now())
+  ```
+
+  1 = you got it, 0 = someone else did.
+
+⚠️ **DuckDB is single-writer and this repo opens a connection per operation** (`db/connection.py`), so
+that read-modify-write needs serializing. There is exactly one daemon process and `_api` already runs
+handlers in a worker thread pool, so a **per-project `threading.Lock` in the service is a complete
+fix**. Don't reach for anything heavier. (If `MEMORY_MCP_MODE=server` ever runs multiple daemons, the
+claim table moves to the SQLite registry, where cross-process `UPDATE … WHERE` is genuinely atomic.
+Leave a comment saying so.)
+
+**Crash recovery**, all cheap:
+
+- lease TTL (start at 30 minutes), checked **lazily on the next claim attempt** — no sweeper thread
+- refresh the lease on any tool call from that session, via the `last_seen_at` stamp
+- `memory_session_end` releases every claim that session holds
+
+**Known limit, don't try to solve it now:** two Macs means two daemons, two socket subscriptions, and
+two local rows — local claims can't see each other. Cross-machine exclusion needs the claim to live
+server-side in asoode (assign to a bot member, or a `claimed:<host>` label). That is Phase 2+.
 
 ### 2 · Repository + service + models
 
@@ -71,7 +124,8 @@ dict; body in a nested `def _run():` returning `_safe(_run)`. Model them on `mem
 
 `memory_task_add`, `memory_task_list`, `memory_task_get`, `memory_task_update` (title/description/
 state/priority/assignee/dates/estimate), `memory_task_comment`, `memory_task_start`, `memory_task_stop`
-(time entries), `memory_task_done`, `memory_task_archive`.
+(time entries), `memory_task_done`, `memory_task_archive`, plus `memory_task_claim_next` and
+`memory_task_release` from §1a.
 
 **Capture semantics matter most here.** A task with `source='user'` is a **queued requirement, not an
 instruction**. `memory_task_add`'s description must say so explicitly, and the session brief must
@@ -99,6 +153,9 @@ of `(project, tasks)`. Update the session-start hook text in `enforcement.py:39-
 `tests/services/test_task_service.py` in the shape of `tests/services/test_template_service.py`, plus
 the migration test. Cover: create/update/state transitions, comments, time entries, and — importantly —
 that **tasks never appear in `all_for_categories()` / the sync snapshot**.
+
+Also test the claim: **two concurrent claims on one task, exactly one wins**; an expired lease is
+reclaimable; `memory_session_end` releases what that session held.
 
 ## Design the seams, don't build them
 

@@ -33,10 +33,13 @@ meaning, and automatically loaded every time you start a session.
 - **Templates** — define a set of default rules once, then seed every new
   project from it (pick exactly which rules with checkboxes) instead of
   re-typing them. New projects can also import selected rules from any
-  existing project.
+  existing project — those arrive **pending**, and are rewritten for the
+  project they land in before they take effect.
 - **CLAUDE.md import** — convert an existing `CLAUDE.md` into structured memory.
 - **Portable & team-shareable** — move a project's database into the repo,
-  commit it, and teammates get the same memory after `git pull`.
+  commit it, and teammates get the same memory after `git pull`. A project's
+  identity is committed with it, so moving or renaming its folder never
+  produces a duplicate project.
 
 ## How it works
 
@@ -158,6 +161,10 @@ Rules you set (`mandatory_rules` / `forbidden_rules`) are enforced three ways:
 Hooks are silent in directories that are not registered memory projects, so
 they can be installed globally without noise.
 
+Rules imported from another project are the one exception: they are **not**
+enforced until they have been adapted to the project they were imported into
+(see [Importing rules from another project](#importing-rules-from-another-project)).
+
 ### Importing an existing CLAUDE.md
 
 ```text
@@ -181,13 +188,14 @@ A React single-page app served by the daemon at `/`:
 
 ## MCP tools
 
-39 tools, including:
+All 42 tools:
 
 | Area | Tools |
 |------|-------|
-| Projects | `memory_init_project`, `memory_load_from_folder`, `memory_link_folder`, `memory_list_projects`, `memory_project_info`, `memory_use` |
+| Projects | `memory_init_project`, `memory_load_from_folder`, `memory_link_folder`, `memory_list_projects`, `memory_project_info`, `memory_rename_project`, `memory_use` |
 | Memories | `memory_store`, `memory_search`, `memory_recall`, `memory_update`, `memory_delete`, `memory_list` |
-| Rules | `memory_get_rules`, `memory_add_rule`, `memory_update_rule`, `memory_delete_rule` |
+| Rules | `memory_get_rules`, `memory_add_rule`, `memory_add_rule_bulk`, `memory_update_rule`, `memory_delete_rule` |
+| Governance (server mode) | `memory_approve_rule`, `memory_revoke_rule` |
 | Templates | `memory_list_templates`, `memory_create_template`, `memory_add_template_rule`, `memory_apply_template`, `memory_import_rules` |
 | Imported rules | `memory_pending_list`, `memory_adapt_pending`, `memory_discard_pending` |
 | Sessions | `memory_session_start`, `memory_session_end` |
@@ -237,6 +245,12 @@ The snapshot's `manifest.json` carries a **`project_id`** — the project's stab
 identity. Because it is committed with the code, moving or renaming the project
 folder re-binds the existing project instead of registering a duplicate, and a
 teammate's clone resolves to the same project on their machine.
+
+**If memory is not reaching the snapshot**, look at
+`~/.claude-memory-mcp/sync.log`: the hooks discard the sync command's stderr so
+it can never disturb a Claude turn, so every failure writes a dated traceback
+there instead. Export also warns when `.claude-memory/` is gitignored, since
+an ignored snapshot never reaches your teammates.
 
 ## Importing rules from another project
 

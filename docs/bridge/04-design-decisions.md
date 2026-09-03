@@ -28,17 +28,32 @@ must never degrade memory-mcp beyond "mirroring is paused".
 So this is **not** a thin ledger. The local `tasks` tables are a working task store: create, describe,
 assign, change state, comment, track time — all functional offline.
 
-### D2 — asoode integration is per-project, opt-in, and fully configurable
+### D2 — hosted by default, fully overridable, and the PAT is machine-wide
 
-asoode is **on-premise**. Base URL, socket URL, project id, work-package id, credentials are all
-per-link configuration. Nothing is hardcoded to `localhost:3000`.
+**Revised 2026-09-03.** The original rule was "nothing is hardcoded" — written against an MCP whose
+default was `localhost:3000`, i.e. a default that was wrong everywhere. asoode is hosted at
+`app.` / `api.` / `socket.asoode.com`, which is the right answer for ~90% of installs, so those are
+now defaults in `constants.py` and a fresh install needs no configuration at all.
+
+Defaults are not hardcoding: every endpoint resolves through `asoode.get_endpoints()` with the
+precedence **env > stored setting > default**, so an on-premise site overrides them from the daemon's
+launchd environment or the UI, and `sources` reports where each value came from. Setting only
+`api_url` derives the sibling subdomains when the host looks like `api.<domain>`, and returns nothing
+rather than a guess otherwise.
+
+Project id, work-package id and list ids stay per-link configuration in `project_links`.
 
 **Copy the gateway's rule verbatim** (`project_service.py:66-67`): a project is **never auto-bound**.
 Linking is always an explicit action, so a private project can't leak to someone's server.
 
-**Copy the credential storage verbatim** (`registry.py:264-281`): the PAT goes in
-`app_settings['cred:<base_url>']`, keyed by URL not by project, and **never** enters the committable
-`.claude-memory/` snapshot.
+**The PAT is stored once per machine, not per project.** It goes in
+`app_settings['cred:<api_url>']` — keyed by server URL, so every project that talks to the same
+asoode reuses it and the user is never asked twice — and **never** enters the committable
+`.claude-memory/` snapshot. It is write-only from outside the process: `status()`, the HTTP routes and
+the MCP tool all return a fingerprint (prefix + last4, asoode's own `PersonalAccessToken` shape),
+never the token. There is deliberately **no MCP tool to set it**, because a PAT pasted into a chat
+message stays in the transcript; `memory-mcp asoode set-pat` reads it from a no-echo prompt or stdin,
+never argv.
 
 ### D3 — offline-first with an outbox
 

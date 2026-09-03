@@ -87,6 +87,41 @@
     "approved_at": null,
     "approved_by": null,
     "category": "architecture",
+    "content": "app.asoode.com / api.asoode.com / socket.asoode.com are defaults in constants.py, not hardcoding: every read goes through asoode.get_endpoints() with precedence env > stored setting > default, and `sources` reports which one won. Setting only api_url derives the app./socket. siblings when the host looks like api.<domain>, and returns nothing rather than a guess otherwise. This revises design decision D2, which was written against an MCP whose default was localhost:3000 - a default that was wrong everywhere, unlike this one.\n\nThe PAT is keyed by API base URL in the SQLite registry's app_settings (reusing get_credential/set_credential), so it is machine-wide by construction: one entry covers every project, and switching to an on-premise URL and back does not lose the cloud token. It never enters the committable .claude-memory snapshot. It is write-only from outside the process - status(), the HTTP routes and the MCP tool return only a prefix+last4 fingerprint. There is deliberately NO MCP tool to set it, because a PAT pasted into a chat message stays in the transcript; the CLI reads it from a no-echo prompt or stdin, never argv. Also chmod 600 on registry.db, which was 644 while holding a credential.",
+    "created_at": "2026-09-03T23:10:11.780241",
+    "created_by": null,
+    "entities": [
+      "API",
+      "CLI",
+      "HTTP",
+      "MCP",
+      "NO",
+      "PAT",
+      "SQLite",
+      "URL"
+    ],
+    "expires_at": null,
+    "id": "5712e92d-e07b-41a9-a7dd-38d31c5c7e41",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "assistant",
+    "status": "active",
+    "summary": "asoode: hosted endpoints by default, PAT stored once per machine: app",
+    "tags": [
+      "asoode",
+      "config",
+      "credentials",
+      "bridge"
+    ],
+    "title": "asoode: hosted endpoints by default, PAT stored once per machine",
+    "updated_at": "2026-09-03T23:10:11.780241"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "architecture",
     "content": "Each project has a project_uid (UUID) in the SQLite registry, written into .claude-memory/manifest.json as `project_id`. Because that file is committed, moving or renaming a project folder re-binds the existing project instead of registering a duplicate, and a teammate's clone resolves to the same project. Resolution order in ProjectService.claim_folder: uid match (matched/rebound) -> same-slug project bound to this same folder or with no uid (adopted) -> otherwise a new project on a free slug (created). detect_project_from_cwd checks the manifest uid first, then falls back to portable DB / bound path / folder name. The sync CLI calls POST /api/hook/claim before import or export, and session-start.sh runs `sync import` BEFORE auto-register so auto-register can never create the duplicate first.",
     "created_at": "2026-09-03T07:00:03.341941",
     "created_by": null,
@@ -114,6 +149,41 @@
     ],
     "title": "Project identity is the project_uid in the committed manifest, not the path",
     "updated_at": "2026-09-03T07:00:03.341941"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "architecture",
+    "content": "app./api./socket.asoode.com are defaults in constants.py, not hardcoding: every read goes through asoode.get_endpoints() with precedence env > stored setting > default, and `sources` reports which one won. Setting only api_url derives the sibling subdomains when the host looks like api.<domain>, and returns nothing rather than a guess otherwise. This revises design decision D2, which was written against an MCP whose default was localhost:3000 - a default that was wrong everywhere, unlike this one.\n\nThe PAT is keyed by API base URL in the SQLite registry's app_settings (reusing get_credential/set_credential), so it is machine-wide by construction: one entry covers every project, and switching to an on-premise URL and back does not lose the cloud token. It never enters the committable .claude-memory snapshot, and is write-only from outside the process - status(), the HTTP routes and the MCP tool return only a prefix+last4 fingerprint. There is deliberately NO MCP tool to set it, because a PAT pasted into a chat message stays in the transcript; the CLI reads it from a no-echo prompt or stdin, never argv. registry.db was also chmod'd to 600 - it was 644 while holding a credential.",
+    "created_at": "2026-09-03T23:10:30.518868",
+    "created_by": null,
+    "entities": [
+      "API",
+      "CLI",
+      "HTTP",
+      "MCP",
+      "NO",
+      "PAT",
+      "SQLite",
+      "URL"
+    ],
+    "expires_at": null,
+    "id": "761504fe-bcd1-49dc-823d-0173523b738f",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "user",
+    "status": "active",
+    "summary": "asoode: hosted endpoints by default, PAT stored once per machine: app",
+    "tags": [
+      "asoode",
+      "config",
+      "credentials",
+      "bridge"
+    ],
+    "title": "asoode: hosted endpoints by default, PAT stored once per machine",
+    "updated_at": "2026-09-03T23:10:30.518868"
   },
   {
     "approval_status": "approved",

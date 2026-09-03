@@ -17,6 +17,8 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from memory_mcp import __version__
+from memory_mcp import asoode
+from memory_mcp.asoode_client import AsoodeAuthError, AsoodeError
 from memory_mcp.config import settings
 from memory_mcp.container import container
 from memory_mcp.context import (
@@ -224,6 +226,12 @@ def _api(fn, *, public: bool = False, admin: bool = False, remote_aware: bool = 
             TaskNotFoundError,
         ) as e:
             return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=404)
+        except AsoodeAuthError as e:
+            # The stored PAT was refused. 502, not 401: the caller of THIS API is
+            # fine - it is our credential for the upstream that is not.
+            return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=502)
+        except AsoodeError as e:
+            return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=502)
         except AuthError as e:
             return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=401)
         except ForbiddenError as e:
@@ -786,6 +794,68 @@ def _tpl(template) -> dict:
     return template.model_dump(mode="json")
 
 
+# ---------- asoode integration (machine-wide, not per project) ----------
+#
+# Endpoints default to the hosted service and the PAT is stored once per asoode
+# server, so a project never carries either. Writes are admin-gated: in local mode
+# that is a no-op, on a shared server it stops a member repointing everyone's
+# integration. The raw token is write-only here - reads return a fingerprint.
+
+
+def _asoode_status(params, body, query):
+    return asoode.status()
+
+
+def _asoode_set_urls(params, body, query):
+    if body.get("reset"):
+        asoode.reset_endpoints()
+        return asoode.status()
+    asoode.set_endpoints(
+        api_url=body.get("api_url"),
+        app_url=body.get("app_url"),
+        socket_url=body.get("socket_url"),
+        derive=bool(body.get("derive", True)),
+    )
+    return asoode.status()
+
+
+def _asoode_set_pat(params, body, query):
+    asoode.set_pat(body.get("token") or "", body.get("api_url"))
+    return asoode.status()
+
+
+def _asoode_clear_pat(params, body, query):
+    asoode.clear_pat(query.get("api_url"))
+    return asoode.status()
+
+
+def _asoode_link(params, body, query):
+    """Create or find the asoode project + board for this memory project.
+
+    Idempotent via externalRef, but it does create real objects on the user's
+    asoode account the first time - the UI asks before calling it.
+    """
+    return container.asoode_bridge.bootstrap(
+        params["slug"],
+        project_title=body.get("project_title"),
+        board_title=body.get("board_title"),
+        reuse_project_id=body.get("asoode_project_id"),
+    )
+
+
+def _asoode_push(params, body, query):
+    return container.asoode_bridge.push(
+        params["slug"], include_done=bool(body.get("include_done", True)),
+    )
+
+
+def _asoode_links(params, body, query):
+    return {
+        "slug": params["slug"],
+        "links": container.asoode_bridge.links(params["slug"]),
+    }
+
+
 def _list_templates(params, body, query):
     return {"templates": [_tpl(t) for t in container.template_service.list_templates()]}
 
@@ -1234,6 +1304,13 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/tasks/{tid}/activity", _api(_task_activity), methods=["GET"]),
         Route("/api/projects/{slug}/tasks/{tid}/release", _api(_task_release), methods=["POST"]),
         Route("/api/projects/{slug}/tasks/{tid}/archive", _api(_task_archive), methods=["POST"]),
+        Route("/api/projects/{slug}/asoode/links", _api(_asoode_links), methods=["GET"]),
+        Route("/api/projects/{slug}/asoode/link", _api(_asoode_link), methods=["POST"]),
+        Route("/api/projects/{slug}/asoode/push", _api(_asoode_push), methods=["POST"]),
+        Route("/api/asoode", _api(_asoode_status), methods=["GET"]),
+        Route("/api/asoode", _api(_asoode_set_urls, admin=True), methods=["PUT"]),
+        Route("/api/asoode/pat", _api(_asoode_set_pat, admin=True), methods=["POST"]),
+        Route("/api/asoode/pat", _api(_asoode_clear_pat, admin=True), methods=["DELETE"]),
         Route("/api/templates", _api(_list_templates), methods=["GET"]),
         Route("/api/templates", _api(_create_template), methods=["POST"]),
         Route("/api/templates/{tid}", _api(_get_template), methods=["GET"]),

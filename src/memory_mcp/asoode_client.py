@@ -1,0 +1,243 @@
+"""REST client for asoode: the outbound half of the bridge.
+
+Every asoode route is a POST with a JSON body - no query strings anywhere - and
+every response is an `OperationResult` envelope, `{status, data, message?}`, where
+status 2 is success and anything else is a failure the HTTP status code will not
+tell you about (a 201 can still carry status 7, Validation). `_post` collapses
+both failure modes into one `AsoodeError`, so callers never inspect an envelope.
+
+Auth is the machine-wide PAT from `memory_mcp.asoode` - `Authorization: Bearer
+asoode_pat_…`. `from_settings()` is the only constructor most callers want; it
+resolves the endpoints and the token together and fails loudly if no PAT is set.
+
+Idempotency is the reason this can be re-run safely: work packages, lists and
+tasks all take a caller-supplied `externalRef`, unique per parent, and repeating a
+create with the same value returns the existing row instead of a duplicate. The
+bridge passes the local UUID, so "push everything again" is a no-op rather than a
+second copy of the board.
+"""
+
+from typing import Any
+
+import httpx
+
+from memory_mcp.asoode import get_endpoints, get_pat
+
+# asoode's BoardTemplate enum (app.enum.ts:80).
+BOARD_KANBAN = 5
+
+# asoode's WorkPackageTaskState (app.enum.ts:283) keyed by the local TaskState
+# value - the two vocabularies are the same list, which is why this is a plain
+# lookup and not a translation with a fallback.
+STATE_TO_ORDINAL = {
+    "todo": 1,
+    "in_progress": 2,
+    "done": 3,
+    "paused": 4,
+    "blocked": 5,
+    "cancelled": 6,
+    "duplicate": 7,
+    "incomplete": 8,
+    "blocker": 9,
+}
+ORDINAL_TO_STATE = {v: k for k, v in STATE_TO_ORDINAL.items()}
+
+# OperationResult.status (app.enum.ts) - 2 is Success; the rest are why not.
+_STATUS_MESSAGE = {
+    1: "not found",
+    3: "already exists",
+    4: "access denied",
+    5: "rejected",
+    6: "unauthorized",
+    7: "validation failed",
+    8: "failed",
+    9: "captcha required",
+    10: "over capacity",
+    11: "expired",
+}
+
+
+class AsoodeError(Exception):
+    """An asoode call failed: unreachable, non-2xx, or a non-success envelope."""
+
+
+class AsoodeAuthError(AsoodeError):
+    """The PAT is missing, revoked, expired, or not accepted."""
+
+
+class AsoodeClient:
+    def __init__(self, base_url: str, token: str, timeout: float = 20.0):
+        self._base = base_url.rstrip("/")
+        self._token = token
+        self._timeout = timeout
+
+    @property
+    def base_url(self) -> str:
+        return self._base
+
+    @classmethod
+    def from_settings(cls, timeout: float = 20.0) -> "AsoodeClient":
+        """Build a client from the machine-wide endpoint + PAT configuration."""
+        endpoints = get_endpoints()
+        token = get_pat(endpoints.api_url)
+        if not token:
+            raise AsoodeAuthError(
+                f"No asoode PAT stored for {endpoints.api_url}. Set it once with "
+                "`memory-mcp asoode set-pat` - it then covers every project."
+            )
+        return cls(endpoints.api_url, token, timeout)
+
+    # ---------- transport ----------
+
+    def _post(self, path: str, body: dict | None = None) -> Any:
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                resp = client.post(self._base + path, json=body or {}, headers=headers)
+        except httpx.HTTPError as e:
+            raise AsoodeError(f"asoode unreachable ({self._base}): {e}") from e
+
+        if resp.status_code in (401, 403):
+            raise AsoodeAuthError(
+                f"asoode rejected the PAT ({resp.status_code}) on {path}. "
+                "It may be revoked or expired - reissue it in Profile → Access "
+                "Tokens and store it with `memory-mcp asoode set-pat`."
+            )
+        if resp.status_code >= 400:
+            raise AsoodeError(f"asoode {resp.status_code} on {path}: {resp.text[:300]}")
+
+        try:
+            payload = resp.json()
+        except ValueError as e:
+            raise AsoodeError(f"asoode returned non-JSON on {path}") from e
+
+        # The envelope. A 2xx with status != 2 is still a failure.
+        if isinstance(payload, dict) and "status" in payload:
+            status = payload.get("status")
+            if status != 2:
+                reason = _STATUS_MESSAGE.get(status, f"status {status}")
+                detail = payload.get("message") or payload.get("errors") or ""
+                raise AsoodeError(f"asoode {path}: {reason}{f' - {detail}' if detail else ''}")
+            return payload.get("data")
+        return payload
+
+    # ---------- projects ----------
+
+    def list_projects(self) -> list[dict]:
+        return self._post("/projects/list") or []
+
+    def find_project_by_title(self, title: str) -> dict | None:
+        """Projects have no externalRef, so identity is the title.
+
+        Only used to make `bootstrap` re-runnable; the work package below is
+        keyed properly and is what the bridge actually stores.
+        """
+        wanted = title.strip().lower()
+        for project in self.list_projects():
+            if (project.get("title") or "").strip().lower() == wanted:
+                return project
+        return None
+
+    def create_project(
+        self, title: str, description: str = "", *, complex_: bool = False,
+        board_template: int = BOARD_KANBAN,
+    ) -> dict:
+        return self._post("/projects/create", {
+            "title": title,
+            "description": description,
+            "complex": complex_,
+            "boardTemplate": board_template,
+        })
+
+    def fetch_project(self, project_id: str) -> dict:
+        return self._post(f"/projects/{project_id}/fetch")
+
+    # ---------- work packages ----------
+
+    def create_work_package(
+        self, project_id: str, title: str, *, description: str = "",
+        external_ref: str | None = None, board_template: int = BOARD_KANBAN,
+    ) -> dict:
+        """Create a board. Returns the full board, lists included.
+
+        With `external_ref` this is idempotent: the same key returns the board
+        that already exists rather than adding a second one.
+        """
+        body: dict = {
+            "title": title,
+            "description": description,
+            "boardTemplate": board_template,
+        }
+        if external_ref:
+            body["externalRef"] = external_ref
+        return self._post(f"/work-packages/create/{project_id}", body)
+
+    def fetch_work_package(self, package_id: str) -> dict:
+        return self._post(f"/work-packages/fetch/{package_id}")
+
+    # ---------- tasks ----------
+
+    def create_task(
+        self, list_id: str, title: str, *, description: str = "",
+        external_ref: str | None = None, parent_id: str | None = None,
+        assign_self: bool = True, assignees: list[str] | None = None,
+    ) -> dict:
+        """Create a task. Returns the full task, `id` included.
+
+        `assign_self` defaults to True on purpose: `my_tasks`/kartabl filters on
+        TaskMember, so a task created with no assignee is invisible in the
+        creator's own list - the single most surprising behaviour of this API.
+        """
+        body: dict = {"title": title, "listId": list_id}
+        if description:
+            body["description"] = description
+        if external_ref:
+            body["externalRef"] = external_ref
+        if parent_id:
+            body["parentId"] = parent_id
+        if assignees:
+            body["assignees"] = assignees
+        elif assign_self:
+            body["assignSelf"] = True
+        return self._post(f"/tasks/{list_id}/create", body)
+
+    def change_state(self, task_id: str, state: str | int) -> Any:
+        ordinal = state if isinstance(state, int) else STATE_TO_ORDINAL.get(state)
+        if not ordinal:
+            raise AsoodeError(f"unknown task state: {state!r}")
+        return self._post(f"/tasks/{task_id}/change-state", {"state": ordinal})
+
+    def change_priority(self, task_id: str, objective_value: int) -> Any:
+        return self._post(
+            f"/tasks/{task_id}/change-priority", {"objectiveValue": objective_value}
+        )
+
+    def change_description(self, task_id: str, description: str) -> Any:
+        return self._post(
+            f"/tasks/{task_id}/change-description", {"description": description}
+        )
+
+    def set_dates(self, task_id: str, **dates) -> Any:
+        """`beginAt` / `endAt` / `dueAt`, ISO strings. Omitted fields are untouched."""
+        body = {k: v for k, v in dates.items() if v is not None}
+        return self._post(f"/tasks/{task_id}/set-date", body)
+
+    def kartabl(self, **filters) -> Any:
+        """Tasks assigned to this token's user.
+
+        `updatedSince` makes it a change feed, which is what the inbound
+        reconcile poll uses; `states`, `take` and `skip` narrow it further.
+        """
+        body = {k: v for k, v in filters.items() if v is not None}
+        return self._post("/tasks/kartabl", body)
+
+    def whoami(self) -> dict | None:
+        """Best-effort identity check, used by `asoode check` to prove the PAT works."""
+        try:
+            return self._post("/account/profile")
+        except AsoodeError:
+            return None

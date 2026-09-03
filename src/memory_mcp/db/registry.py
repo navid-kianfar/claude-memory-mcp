@@ -67,36 +67,39 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE INDEX IF NOT EXISTS idx_users_token ON users(token_hash);
 CREATE INDEX IF NOT EXISTS idx_users_session ON users(session_hash);
+CREATE TABLE IF NOT EXISTS project_links (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug                   TEXT NOT NULL REFERENCES projects(slug) ON DELETE CASCADE,
+    provider               TEXT NOT NULL DEFAULT 'asoode',
+    base_url               TEXT NOT NULL,
+    socket_url             TEXT,
+    remote_project_id      TEXT,
+    remote_work_package_id TEXT,
+    label                  TEXT,
+    is_default             INTEGER NOT NULL DEFAULT 0,
+    default_list_id        TEXT,
+    default_assignee_id    TEXT,
+    state_list_map         TEXT,
+    match_paths            TEXT,
+    active                 INTEGER NOT NULL DEFAULT 1,
+    created_at             TEXT NOT NULL,
+    UNIQUE(slug, remote_work_package_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_links_slug ON project_links(slug);
 """
 
-# Phase 2 seam - the asoode link table goes HERE, in _SCHEMA above, with any
-# later column added idempotently in _ensure_columns (executescript runs before
-# those ALTERs, so a column referenced by an index must be created there):
+# `project_links` above is the asoode bridge's routing table. One memory project
+# links to MANY remote boards - `match_paths` (a JSON array of repo subpaths) is
+# what lets a monorepo send apps/backend/** and apps/frontend/** to different
+# boards instead of one pile.
 #
-#   project_links(
-#       id INTEGER PRIMARY KEY AUTOINCREMENT,
-#       slug TEXT NOT NULL REFERENCES projects(slug) ON DELETE CASCADE,
-#       provider TEXT NOT NULL DEFAULT 'asoode',
-#       base_url TEXT NOT NULL, socket_url TEXT,     -- on-premise: never hardcoded
-#       remote_project_id TEXT, remote_work_package_id TEXT,
-#       label TEXT, is_default INTEGER NOT NULL DEFAULT 0,
-#       default_list_id TEXT, default_assignee_id TEXT,
-#       state_list_map TEXT,   -- JSON: task state -> remote list id
-#       match_paths TEXT,      -- JSON array of repo subpaths, so a monorepo's
-#                              -- apps/backend/** and apps/frontend/** can route
-#                              -- to different boards instead of one pile
-#       active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
-#       UNIQUE(slug, remote_work_package_id)
-#   )
+# Linking is always explicit, copying the rule from ProjectService.bind_backend:
+# projects default to unlinked and are never auto-bound, so a private project
+# cannot leak onto someone else's server.
 #
-# One memory project links to MANY remote targets. Linking is always explicit -
-# copy the rule from ProjectService.bind_backend, where projects default to
-# 'local' and are never auto-bound so a private project cannot leak to someone
-# else's server.
-#
-# Credentials do NOT belong in that table: the asoode token reuses
-# get_credential/set_credential below, which key on the server URL and live in
-# app_settings only - never in the committable .claude-memory snapshot.
+# Credentials are deliberately NOT in this table: the PAT lives in
+# get_credential/set_credential below, keyed by server URL, so one token covers
+# every project and never enters the committable .claude-memory snapshot.
 
 _migration_lock = threading.Lock()
 
@@ -464,3 +467,90 @@ def get_user_active_project(user_id: str) -> str | None:
 
 def set_user_active_project(user_id: str, slug: str) -> None:
     set_setting(f"active_project:{user_id}", slug)
+
+
+# ---------- project links (the asoode bridge's routing table) ----------
+
+
+def _link_public(row: sqlite3.Row) -> dict:
+    import json
+
+    link = dict(row)
+    for field in ("state_list_map", "match_paths"):
+        raw = link.get(field)
+        link[field] = json.loads(raw) if raw else None
+    link["is_default"] = bool(link["is_default"])
+    link["active"] = bool(link["active"])
+    return link
+
+
+def upsert_project_link(
+    slug: str, *, base_url: str, remote_project_id: str,
+    remote_work_package_id: str, socket_url: str | None = None,
+    label: str | None = None, default_list_id: str | None = None,
+    default_assignee_id: str | None = None, state_list_map: dict | None = None,
+    match_paths: list | None = None, provider: str = "asoode",
+    is_default: bool = True,
+) -> dict:
+    """Create or refresh the link between a memory project and a remote board.
+
+    Keyed on (slug, remote_work_package_id), which is the UNIQUE constraint, so
+    re-running a bootstrap updates the existing row rather than adding a second
+    link to the same board.
+    """
+    import json
+
+    with registry_conn() as conn:
+        conn.execute(
+            """INSERT INTO project_links (
+                   slug, provider, base_url, socket_url, remote_project_id,
+                   remote_work_package_id, label, is_default, default_list_id,
+                   default_assignee_id, state_list_map, match_paths, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(slug, remote_work_package_id) DO UPDATE SET
+                   base_url = excluded.base_url,
+                   socket_url = excluded.socket_url,
+                   remote_project_id = excluded.remote_project_id,
+                   label = excluded.label,
+                   is_default = excluded.is_default,
+                   default_list_id = excluded.default_list_id,
+                   default_assignee_id = excluded.default_assignee_id,
+                   state_list_map = excluded.state_list_map,
+                   match_paths = excluded.match_paths,
+                   active = 1""",
+            (
+                slug, provider, base_url.rstrip("/"), socket_url,
+                remote_project_id, remote_work_package_id, label,
+                1 if is_default else 0, default_list_id, default_assignee_id,
+                json.dumps(state_list_map) if state_list_map else None,
+                json.dumps(match_paths) if match_paths else None,
+                now_iso(),
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM project_links WHERE slug = ? AND remote_work_package_id = ?",
+            (slug, remote_work_package_id),
+        ).fetchone()
+    return _link_public(row)
+
+
+def get_project_links(slug: str, *, active_only: bool = True) -> list[dict]:
+    sql = "SELECT * FROM project_links WHERE slug = ?"
+    if active_only:
+        sql += " AND active = 1"
+    sql += " ORDER BY is_default DESC, id ASC"
+    with registry_conn() as conn:
+        rows = conn.execute(sql, (slug,)).fetchall()
+    return [_link_public(r) for r in rows]
+
+
+def get_default_project_link(slug: str) -> dict | None:
+    links = get_project_links(slug)
+    return links[0] if links else None
+
+
+def delete_project_link(link_id: int) -> bool:
+    """Forget a link. The remote board is left completely alone."""
+    with registry_conn() as conn:
+        cur = conn.execute("DELETE FROM project_links WHERE id = ?", (link_id,))
+    return cur.rowcount > 0

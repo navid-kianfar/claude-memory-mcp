@@ -37,5 +37,33 @@
     ],
     "title": "Bridge audit docs \u2014 read these instead of re-reading either repo",
     "updated_at": "2026-09-03T07:46:27.976828"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "reference",
+    "content": "Project 'Claude Memory MCP' ef3918fb-60c5-40ae-a5ba-3259658e1936, work package 9eb1316b-2fb3-4984-b708-5e6738a255f7, board at https://app.asoode.com/projects/ef3918fb-60c5-40ae-a5ba-3259658e1936. Kanban template gives four lists: Backlog / To Do / In Progress / Done; states with no matching column (paused, blocked, cancelled, duplicate, incomplete, blocker) land in Backlog with their real state set explicitly. Stored locally in the registry's project_links table - re-derive with `memory-mcp asoode link claude-memory-mcp`, which is idempotent.",
+    "created_at": "2026-09-03T23:10:30.793799",
+    "created_by": null,
+    "entities": [
+      "Claude Memory MCP",
+      "MCP"
+    ],
+    "expires_at": "2028-03-03T23:10:30.691310",
+    "id": "d3af0cd1-a677-41f4-a874-7fd6ca96272a",
+    "metadata": null,
+    "priority": 1,
+    "related_ids": [],
+    "source": "user",
+    "status": "active",
+    "summary": "Project 'Claude Memory MCP' ef3918fb-60c5-40ae-a5ba-3259658e1936, work package 9eb1316b-2fb3-4984-b708-5e6738a255f7, board at https://app",
+    "tags": [
+      "asoode",
+      "reference",
+      "ids"
+    ],
+    "title": "asoode project + board for claude-memory-mcp",
+    "updated_at": "2026-09-03T23:10:30.793799"
   }
 ]

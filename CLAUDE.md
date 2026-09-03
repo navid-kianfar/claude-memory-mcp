@@ -51,6 +51,27 @@ a `MemoryCategory`, so they never enter the committed `.claude-memory/*.json` sn
   ONLY when you have finished what you were doing — never mid-task, and never just because the list
   is non-empty. `memory_session_end` releases whatever you held.
 
+### asoode (the task bridge)
+
+Endpoints default to the hosted service — `app.asoode.com`, `api.asoode.com`,
+`socket.asoode.com` — so nothing needs configuring unless this is an on-premise
+install (`memory-mcp asoode set-url --api …`, or `MEMORY_MCP_ASOODE_*_URL`).
+
+The PAT is stored **once for the machine**, keyed by server URL, and shared by
+every project. Never ask the user for it per project, and never accept it in
+chat: `memory-mcp asoode set-pat` prompts without echoing. `memory_asoode_status`
+returns a fingerprint, never the token.
+
+- `memory_asoode_link` creates/finds the asoode project + board for this project.
+- `memory_asoode_push` mirrors local tasks onto it.
+
+Both are **idempotent via `externalRef`** (the project uid and the task id), so
+re-running pushes changes rather than duplicating. Both create real objects on the
+user's account — ask before the first link, and say what was created afterwards.
+
+**The bridge is one-way today.** Nothing reads asoode back into the local store,
+so never tell the user the two are in sync.
+
 ### Session Lifecycle
 - At conversation start → `memory_session_start()`
 - At conversation end → `memory_session_end(session_id, summary)`

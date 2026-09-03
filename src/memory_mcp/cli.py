@@ -9,11 +9,15 @@
   memory-mcp update     -> rebuild the runtime from source + reload the daemon
   memory-mcp user ...   -> manage server-mode users (create/list/rotate tokens)
   memory-mcp bind ...   -> route a project to a local or remote backend
+  memory-mcp asoode ... -> asoode endpoints + the machine-wide PAT
 """
 
 import sys
 
-USAGE = "Usage: memory-mcp [stdio|serve|rules|sync|setup|update|user|bind]"
+USAGE = (
+    "Usage: memory-mcp "
+    "[stdio|serve|rules|sync|setup|update|user|bind|asoode]"
+)
 
 
 def main() -> None:
@@ -55,6 +59,9 @@ def main() -> None:
         users_main(args[1:])
     elif cmd == "bind":
         _bind(args[1:])
+    elif cmd == "asoode":
+        from memory_mcp.asoode_cli import main as asoode_main
+        asoode_main(args[1:])
     elif cmd in ("-h", "--help", "help"):
         print(USAGE)
     else:

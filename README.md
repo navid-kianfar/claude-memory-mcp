@@ -221,7 +221,7 @@ A React single-page app served by the daemon at `/`:
 
 ## MCP tools
 
-All 55 tools:
+All 59 tools:
 
 | Area | Tools |
 |------|-------|
@@ -237,6 +237,7 @@ All 55 tools:
 | Portability | `memory_attach_project`, `memory_make_portable`, `memory_sync` |
 | Import/Export | `memory_export`, `memory_import`, `memory_import_claude_md` |
 | Model | `memory_model_info`, `memory_set_model`, `memory_reembed` |
+| asoode bridge | `memory_asoode_status`, `memory_asoode_link`, `memory_asoode_push`, `memory_asoode_links` |
 | Misc | `memory_provenance`, `memory_version`, `memory_check_update` |
 
 ## Configuration
@@ -249,6 +250,47 @@ Environment variables (prefix `MEMORY_MCP_`):
 | `MEMORY_MCP_DAEMON_HOST` | `127.0.0.1` | Daemon bind address (`0.0.0.0` in Docker) |
 | `MEMORY_MCP_DAEMON_PORT` | `8765` | Daemon port |
 | `MEMORY_MCP_DAEMON_HOSTNAME` | `claude-memory-mcp` | Hostname used in the UI URL |
+| `MEMORY_MCP_ASOODE_API_URL` | `https://api.asoode.com` | asoode REST base (on-premise override) |
+| `MEMORY_MCP_ASOODE_APP_URL` | `https://app.asoode.com` | asoode web app, for links |
+| `MEMORY_MCP_ASOODE_SOCKET_URL` | `https://socket.asoode.com` | asoode realtime origin |
+
+## asoode integration
+
+Mirror a project's task list onto an [asoode](https://app.asoode.com) board. The
+endpoints above default to the hosted service, so on-premise is the only case
+that needs configuring.
+
+The access token is stored **once per machine**, not per project — every project
+that talks to the same asoode reuses it:
+
+```bash
+memory-mcp asoode set-pat          # prompts; the input is not echoed
+memory-mcp asoode check            # prove it reaches the server
+memory-mcp asoode link <slug>      # create/find the project + board
+memory-mcp asoode push <slug>      # mirror the task list onto it
+```
+
+The token lives in the local registry (`~/.claude-memory-mcp/registry.db`), never
+in the committed `.claude-memory/` snapshot, and is never printed back — `status`
+shows only a `prefix…last4` fingerprint. Pass `--api-url` to store one for a
+second server.
+
+`link` and `push` are idempotent: the board carries the project's stable uid as
+its `externalRef` and each task carries its local id, so asoode returns the
+existing row instead of creating a duplicate. Re-running pushes changes.
+
+On-premise:
+
+```bash
+memory-mcp asoode set-url --api https://api.asoode.internal
+```
+
+The sibling `app.`/`socket.` URLs are derived when the host looks like
+`api.<domain>`; otherwise pass `--app` and `--socket` too. `reset-url` returns to
+the hosted defaults.
+
+**One-way today.** Local tasks reach asoode; changes made in asoode do not come
+back yet (that needs the socket subscription and the `updatedSince` reconcile).
 
 ## Team / multi-device memory (git sync)
 

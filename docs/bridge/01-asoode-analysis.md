@@ -474,6 +474,25 @@ scoping that actually restricts anything.** The PAT is a full-power user credent
 
 ## 6. Gaps blocking the bridge
 
+> **Superseded 2026-09-03 for items 1, 3, 4, 10, 11, 12 and 17.** asoode was changed
+> after this audit was written, and the changes are exactly the ones the bridge needed:
+>
+> | Was | Now |
+> |---|---|
+> | no idempotency key (1) | `externalRef` on `WorkPackage`, `WorkPackageList` and `WorkPackageTask`, each `@@unique` with its parent. A repeated create **returns the existing row** (`tasks.service.ts:475-509`, `work-packages.service.ts:438-474`) |
+> | `create_task` had no description (3) | `CreateTaskDto.description` |
+> | `create_task` assigned nobody (4) | `CreateTaskDto.assignees[]` / `assignSelf`, written in the same transaction |
+> | no `updated_since` anywhere (10) | `KartablDto.updatedSince` — a real change feed |
+> | no pagination on kartabl (11) | `KartablDto.take` / `skip`, default 200, cap 500 |
+> | no state filter on kartabl (12) | `KartablDto.states[]`, plus `includeGroups` / `includeArchived` |
+> | socket unauthenticated (17) | handshake takes `auth.token` or a Bearer header (`main.gateway.ts:61-64`) |
+>
+> The rest of the list below is unverified against the current tree. **One gap found while
+> building the outbound half:** the board fetch maps tasks through a private `mapTask`
+> (`work-packages.service.ts:149`) that omits `externalRef`, though `common/dto/task.dto.ts:73`
+> declares it and create returns it — so a reconcile that reads a board cannot tell which
+> local task a remote one came from.
+
 ### 6.1 Claude → asoode (mirror created tasks)
 
 1. **No `external_ref`/idempotency key on `WorkPackageTask`.** Verified: `grep -rn "externalId|external_ref|externalRef|idempot|clientRef"` across backend/mcp/shared returns only unrelated comments and a `sourceId` local in `work-packages.service.ts:783`. **Every re-sync creates duplicates.** No unique constraint can prevent it — `WorkPackageTask` has no `@@unique` at all.

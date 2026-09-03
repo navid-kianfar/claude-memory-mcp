@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     # plain-HTTP server install where the browser talks to the daemon over http.
     cookie_secure: bool = True
 
+    # asoode endpoints. Empty means "use the hosted default" (constants.py);
+    # set these only for an on-premise asoode, e.g.
+    # MEMORY_MCP_ASOODE_API_URL=https://api.asoode.internal. An env value wins
+    # over one stored from the UI, so a site can bake its URLs into the daemon's
+    # launchd environment and have that be authoritative.
+    asoode_app_url: str = ""
+    asoode_api_url: str = ""
+    asoode_socket_url: str = ""
+
     # Explicit path to the built frontend (frontend/dist). Leave empty to use
     # the repo-relative location; set MEMORY_MCP_UI_DIR for non-editable
     # installs (e.g. Homebrew) where the package is not next to the repo.

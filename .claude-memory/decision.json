@@ -121,5 +121,39 @@
     ],
     "title": "Rules imported from another project land pending and must be adapted first",
     "updated_at": "2026-09-03T07:00:03.370262"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "decision",
+    "content": "The bridge audit (docs/bridge/01, section 6) listed idempotency, assignee-on-create and a delta feed as hard blockers. Navid changed asoode instead: externalRef with @@unique on WorkPackage/WorkPackageList/WorkPackageTask (a repeated create returns the existing row), CreateTaskDto.description + assignees[]/assignSelf written in the same transaction, KartablDto.updatedSince/states/take/skip, and a socket handshake that accepts auth.token or a Bearer header.\n\nThis is why the outbound half needs no local mapping table: create-with-the-same-externalRef IS the lookup, so re-pushing is a no-op rather than a duplicate. Verified live - three pushes of 7 tasks left exactly 7 tasks on the board. One gap remains on the asoode side: work-packages.service.ts:149 maps board tasks through a private mapTask() that drops externalRef, so a board read cannot yet tell which local task a remote one came from.",
+    "created_at": "2026-09-03T23:10:30.649172",
+    "created_by": null,
+    "entities": [
+      "@unique",
+      "CreateTaskDto",
+      "IS",
+      "KartablDto",
+      "WorkPackage",
+      "WorkPackageList",
+      "WorkPackageTask"
+    ],
+    "expires_at": null,
+    "id": "ce27b80e-56f9-4bd8-bf11-5709ccd58cce",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "user",
+    "status": "active",
+    "summary": "The bridge audit (docs/bridge/01, section 6) listed idempotency, assignee-on-create and a delta feed as hard blockers",
+    "tags": [
+      "asoode",
+      "bridge",
+      "phase-2",
+      "idempotency"
+    ],
+    "title": "The three Phase 2 blockers were fixed in asoode, not worked around here",
+    "updated_at": "2026-09-03T23:10:30.649172"
   }
 ]

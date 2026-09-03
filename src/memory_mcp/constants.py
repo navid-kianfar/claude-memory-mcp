@@ -22,3 +22,11 @@ MANIFEST_NAME = "manifest.json"
 
 # Categories carried by the snapshot; `session` is device-local and excluded.
 SYNC_CATEGORIES = [c.value for c in MemoryCategory if c.value != "session"]
+
+# asoode's hosted service - the right answer for ~90% of installs, so these are
+# defaults rather than required configuration. An on-premise site overrides them
+# (MEMORY_MCP_ASOODE_*_URL, or the Integrations screen); nothing reads these
+# names directly except `asoode.get_endpoints`, which applies that precedence.
+ASOODE_DEFAULT_APP_URL = "https://app.asoode.com"
+ASOODE_DEFAULT_API_URL = "https://api.asoode.com"
+ASOODE_DEFAULT_SOCKET_URL = "https://socket.asoode.com"

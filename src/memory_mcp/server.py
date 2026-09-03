@@ -138,6 +138,79 @@ def _safe(fn):
 
 
 @mcp.tool()
+def memory_asoode_link(
+    project: str | None = None,
+    project_title: str | None = None,
+    board_title: str | None = None,
+    asoode_project_id: str | None = None,
+) -> dict:
+    """Link this memory project to an asoode board, creating what is missing.
+
+    Finds or creates the asoode project, then creates the work package that
+    mirrors this project's task list, and remembers the pairing. Pass
+    asoode_project_id to put the board inside a project that already exists
+    instead of making a new one.
+
+    Safe to re-run: the work package carries the memory project's stable uid as
+    its externalRef, so a second call returns the same board rather than a
+    duplicate. Creating anything on the user's asoode account is outward-facing
+    though - ask before the first link, and say afterwards what was created.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.asoode_bridge.bootstrap(
+            slug, project_title=project_title, board_title=board_title,
+            reuse_project_id=asoode_project_id,
+        )
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_asoode_push(project: str | None = None, include_done: bool = True) -> dict:
+    """Mirror this project's local tasks onto its linked asoode board.
+
+    One-way, local -> asoode. Each task is sent with its local id as externalRef,
+    so asoode returns the task that already exists instead of creating a second
+    one: re-running this pushes changes, never duplicates.
+
+    Nothing reads asoode back yet, so a change made in asoode does not reach the
+    local list - do not tell the user the two are in sync.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.asoode_bridge.push(slug, include_done=include_done)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_asoode_links(project: str | None = None) -> dict:
+    """Show which asoode boards this memory project is linked to."""
+    def _run():
+        slug = _resolve(project)
+        return {"slug": slug, "links": container.asoode_bridge.links(slug)}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_asoode_status() -> dict:
+    """Show the asoode integration config: which server, and whether a PAT is stored.
+
+    The endpoints default to asoode's hosted service, so nothing needs configuring
+    unless this is an on-premise install. The PAT is stored once for the whole
+    machine and shared by every project - it is never per-project, and never in
+    the committed .claude-memory snapshot.
+
+    Returns a FINGERPRINT of the token (prefix + last4), never the token itself.
+    There is deliberately no tool to set it: a PAT pasted into a chat message
+    lives on in the transcript. Direct the user to `memory-mcp asoode set-pat`
+    (a hidden prompt) or the Integrations screen in the UI.
+    """
+    from memory_mcp import asoode
+
+    return asoode.status()
+
+
+@mcp.tool()
 def memory_version() -> dict:
     """Get the current version of the Memory MCP server and configuration."""
     from memory_mcp import __version__

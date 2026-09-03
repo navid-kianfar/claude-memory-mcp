@@ -128,3 +128,24 @@ def bound_queue_brief(
 def unreachable_brief(project: str, error: str) -> str:
     """What to do when the bound board cannot be read. Never a hard failure."""
     return _UNREACHABLE.format(project=project, error=error)
+
+
+_UNBOUND_HINT = (
+    "\n\nThis project is NOT bound to an asoode board, and an asoode PAT is "
+    "configured on this machine - so memory_asoode_link(project='{project}') "
+    "would create a board and mirror this queue onto it, making the work visible "
+    "outside this session. Offer that if the user asks about asoode or about "
+    "getting the queue out of the terminal. Do NOT bind on your own: linking is "
+    "always an explicit choice, so a private project cannot end up on a server "
+    "the user did not pick."
+)
+
+
+def unbound_hint(project: str) -> str:
+    """Told to unbound projects when a PAT exists, so binding is discoverable.
+
+    Without this a new project's session has the asoode tools available and no
+    idea they apply to it - which is exactly how the feature went unnoticed on a
+    second project.
+    """
+    return _UNBOUND_HINT.format(project=project)

@@ -10,7 +10,7 @@ from memory_mcp.repositories import (
 )
 from memory_mcp.services.rules_service import RulesService
 from memory_mcp.services.task_brief import (
-    bound_queue_brief, task_brief, unreachable_brief,
+    bound_queue_brief, task_brief, unbound_hint, unreachable_brief,
 )
 from memory_mcp.services.task_service import TaskService
 
@@ -122,12 +122,29 @@ class SessionService:
         except Exception:  # noqa: BLE001 - defensive; queue_status already swallows
             return None, task_brief(project, queued)
         if status is None:
-            return None, task_brief(project, queued)
+            return None, self._unbound_instructions(project, queued)
         if not status["reachable"]:
             return status, unreachable_brief(project, status["error"] or "unreachable")
         return status, bound_queue_brief(
             project, queued, status["board_url"], status["remote_only"],
         )
+
+    def _unbound_instructions(self, project: str, queued: list) -> str | None:
+        """The capture brief, plus a note that binding is possible on this machine.
+
+        Only when a PAT is actually stored: telling a user with no asoode account
+        about asoode is noise, and the hint has to be earned by the machine
+        already being set up for it.
+        """
+        base = task_brief(project, queued)
+        try:
+            from memory_mcp.asoode import get_pat
+
+            if not get_pat():
+                return base
+        except Exception:  # noqa: BLE001 - a config read must not break session start
+            return base
+        return (base or "") + unbound_hint(project)
 
     def end(
         self,

@@ -156,3 +156,47 @@ class TestQueueStatus:
         assert status["bound"] is True
         assert status["reachable"] is False
         assert "401" in status["error"]
+
+
+class TestDiscoverability:
+    """A second project must not have to be told what asoode is.
+
+    This is the bug that prompted them: the tools were registered globally, but a
+    session on an unbound project had no idea they applied to it.
+    """
+
+    def test_the_server_instructions_explain_asoode(self):
+        from memory_mcp.server import SERVER_INSTRUCTIONS
+
+        assert "ASOODE" in SERVER_INSTRUCTIONS
+        assert "memory_asoode_link" in SERVER_INSTRUCTIONS
+        assert "BOARD IS THE WORK QUEUE" in SERVER_INSTRUCTIONS
+        # the credential rule has to travel with it, or a session will ask in chat
+        assert "stays in the transcript" in SERVER_INSTRUCTIONS
+
+    def test_an_unbound_project_is_told_binding_is_possible(self, project, monkeypatch):
+        monkeypatch.setattr("memory_mcp.asoode.get_pat", lambda *a, **k: "asoode_pat_x")
+        ctx = _service(project, bind=False).start(project)
+        assert "NOT bound to an asoode board" in ctx.task_instructions
+        assert f"memory_asoode_link(project='{project}')" in ctx.task_instructions
+
+    def test_but_never_binds_on_its_own(self, project, monkeypatch):
+        monkeypatch.setattr("memory_mcp.asoode.get_pat", lambda *a, **k: "asoode_pat_x")
+        ctx = _service(project, bind=False).start(project)
+        assert "Do NOT bind on your own" in ctx.task_instructions
+        assert ctx.asoode is None
+
+    def test_no_pat_means_no_asoode_noise(self, project, monkeypatch):
+        """Telling a user with no asoode account about asoode is just noise."""
+        monkeypatch.setattr("memory_mcp.asoode.get_pat", lambda *a, **k: None)
+        ctx = _service(project, bind=False).start(project)
+        assert "asoode" not in (ctx.task_instructions or "").lower()
+
+    def test_a_broken_config_read_cannot_break_session_start(self, project, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("registry unreadable")
+
+        monkeypatch.setattr("memory_mcp.asoode.get_pat", boom)
+        ctx = _service(project, bind=False).start(project)
+        assert ctx.session_id
+        assert "NOT instructions" in ctx.task_instructions

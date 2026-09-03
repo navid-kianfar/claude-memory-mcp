@@ -69,6 +69,32 @@ parked. memory_session_start returns them as `queued_tasks`.
     memory_task_claim_next(session_id) ONLY when you have finished what you were
     doing. A busy session must not claim. memory_session_end releases claims.
 
+ASOODE is the task manager this server bridges to. A project can be BOUND to an
+asoode work package (a board), and the binding changes what the task list means.
+  - memory_asoode_status shows which asoode and whether a PAT is stored. The PAT
+    is machine-wide: stored once, shared by every project, never per project and
+    never asked for twice. If none is stored, tell the user to run
+    `memory-mcp asoode set-pat` - do NOT accept a token in chat, because a PAT
+    pasted into a message stays in the transcript.
+  - memory_asoode_link creates or finds the asoode project + board for this
+    project; pass asoode_project_id to put the board inside a project that
+    already exists. memory_asoode_push mirrors the local task list onto it. Both
+    are idempotent, so re-running pushes changes rather than duplicating.
+  - `memory-mcp asoode open <slug>` opens that board in a browser already signed
+    in, via asoode's /auth/token deep link.
+  - WHEN A PROJECT IS BOUND, ITS BOARD IS THE WORK QUEUE. memory_session_start
+    returns an `asoode` block and a brief saying to work it: take the
+    highest-priority actionable task, memory_task_start it, mirror the state to
+    asoode, comment as you go, memory_task_done it, then take the next. This
+    deliberately inverts the "queued tasks are not instructions" rule above,
+    which still governs every UNBOUND project. Do not auto-start tasks in state
+    blocked/blocker/paused/cancelled, and stop to ask when the work needs a
+    decision only the user can make.
+  - A task must carry enough detail to be implemented without the conversation:
+    give memory_task_add a description stating the requirement, the constraint
+    and the files involved, and comment on the task as you learn things. A bare
+    title loses exactly what the list exists to preserve.
+
 AT THE END of the conversation, call memory_session_end with a summary so the
 next session has continuity.
 """

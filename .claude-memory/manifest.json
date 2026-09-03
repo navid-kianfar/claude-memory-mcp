@@ -1,8 +1,11 @@
 {
   "version": 1,
+  "project_id": "6a7fd2f4-e16a-4585-b373-9ede6e234b25",
   "slug": "claude-memory-mcp",
   "categories": [
+    "decision",
+    "architecture",
     "mandatory_rules"
   ],
-  "exported_at": "2026-07-01T18:38:18.084949+00:00"
+  "exported_at": "2026-09-03T04:01:33.028599+00:00"
 }

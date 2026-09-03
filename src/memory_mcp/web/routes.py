@@ -29,6 +29,7 @@ from memory_mcp.exceptions import (
     ProjectNotFoundError,
 )
 from memory_mcp.repositories import TemplateNotFoundError
+from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.models import (
     GLOBAL_PROJECT_SLUG, MemoryCategory, MemoryFilter, Pagination,
     RULE_CATEGORIES, SearchRequest, StoreMemoryRequest, UpdateMemoryRequest,
@@ -274,6 +275,39 @@ async def _hook_auto_register(request):
     except Exception:  # noqa: BLE001
         text = ""
     return PlainTextResponse(text)
+
+
+async def _hook_claim(request):
+    """Bind a folder to the project its committed snapshot names.
+
+    The SessionStart hook calls this before anything else. Keying on
+    manifest.json's project_id means a project that was moved or renamed is
+    re-bound to its new location instead of being registered a second time,
+    and a teammate's fresh clone adopts the same identity.
+    """
+    if not _hook_authorized(request):
+        return JSONResponse({"slug": None, "action": "unauthorized"})
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+
+    def _resolve() -> dict:
+        cwd = (body.get("cwd") or "").strip()
+        if not cwd:
+            return {"slug": None, "action": "unclaimed"}
+        return container.project_service.claim_folder(
+            cwd,
+            project_uid=body.get("project_id"),
+            slug_hint=body.get("slug"),
+            display_name=body.get("display_name"),
+        )
+
+    try:
+        result = await to_thread.run_sync(_resolve)
+    except Exception as exc:  # noqa: BLE001 - a hook must never see a 500
+        result = {"slug": None, "action": "error", "error": str(exc)}
+    return JSONResponse(result)
 
 
 def _index(_request):
@@ -821,13 +855,49 @@ def _import_rules(params, body, query):
     memory_ids = body.get("memory_ids") or []
     if not source or not memory_ids:
         raise ValueError("source_project and memory_ids are required")
-    result = container.memory_service.copy_memories(slug, source, memory_ids)
+    # Imports are pending unless explicitly waived: another project's specifics
+    # must be rewritten for this one before they are enforced anywhere.
+    pending = body.get("pending")
+    pending = True if pending is None else bool(pending)
+    result = container.memory_service.copy_memories(
+        slug, source, memory_ids, pending=pending,
+    )
     return {
         "status": "ok",
         "imported": result["imported"],
         "skipped": result["skipped"],
+        "pending": result["pending"],
         "memories": [_mem(m) for m in result["memories"]],
     }
+
+
+def _pending(params, body, query):
+    """Imports awaiting adaptation to this project, with the agent's brief."""
+    slug = params["slug"]
+    container.project_service.get(slug)
+    items = container.memory_service.list_pending(slug)
+    return {
+        "pending": [_mem(m) for m in items],
+        "total": len(items),
+        "instructions": adaptation_brief(slug, items),
+    }
+
+
+def _adapt_pending(params, body, query):
+    memory = container.memory_service.adapt_pending(
+        params["slug"], params["mid"],
+        title=body.get("title") or "",
+        content=body.get("content") or "",
+        tags=body.get("tags"),
+        priority=body.get("priority"),
+    )
+    return {"status": "ok", "memory": _mem(memory)}
+
+
+def _discard_pending(params, body, query):
+    return container.memory_service.discard_pending(
+        params["slug"], params["mid"], body.get("reason"),
+    )
 
 
 # ---------- governance: users, approvals, org-wide rules (server mode) ----------
@@ -949,6 +1019,7 @@ def build_routes() -> list:
         Route("/api/health", _api(_health, public=True), methods=["GET"]),
         Route("/api/hook/rules", _hook_rules, methods=["GET"]),
         Route("/api/hook/auto-register", _hook_auto_register, methods=["GET"]),
+        Route("/api/hook/claim", _hook_claim, methods=["POST"]),
         Route("/api/meta", _api(_meta, public=True), methods=["GET"]),
         # Auth (server mode): login/whoami are auth-optional; logout clears state.
         Route("/api/auth/login", _login, methods=["POST"]),
@@ -993,6 +1064,9 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/bind", _api(_bind_backend), methods=["POST"]),
         Route("/api/projects/{slug}/apply-template", _api(_apply_template), methods=["POST"]),
         Route("/api/projects/{slug}/import-rules", _api(_import_rules), methods=["POST"]),
+        Route("/api/projects/{slug}/pending", _api(_pending, remote_aware=True), methods=["GET"]),
+        Route("/api/projects/{slug}/pending/{mid}/adapt", _api(_adapt_pending, remote_aware=True), methods=["POST"]),
+        Route("/api/projects/{slug}/pending/{mid}", _api(_discard_pending, remote_aware=True), methods=["DELETE"]),
         Route("/api/templates", _api(_list_templates), methods=["GET"]),
         Route("/api/templates", _api(_create_template), methods=["POST"]),
         Route("/api/templates/{tid}", _api(_get_template), methods=["GET"]),

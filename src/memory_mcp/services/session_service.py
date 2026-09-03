@@ -4,12 +4,16 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from memory_mcp.models import SessionContext
+from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.repositories import (
     MemoryRepository, ProjectRepository, SessionRepository,
 )
 from memory_mcp.services.rules_service import RulesService
 
 AUTO_CLOSE_SUMMARY = "[Auto-closed: session was not properly ended (context overflow or crash)]"
+
+# How far back "recent decisions" reaches at session start.
+RECENT_DECISION_WINDOW = timedelta(days=7)
 
 
 class SessionService:
@@ -49,10 +53,22 @@ class SessionService:
             )
             last_summary = real_last.summary if real_last else None
 
-        active_sprint = self._memory_repo.get_active_by_category(project, "sprint", limit=10)
-        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        # Imports that have not been rewritten for this project yet. They are
+        # deliberately absent from `rules` above - the session runs without them
+        # until an agent adapts each one.
+        pending = self._memory_repo.pending_memories(project)
+
+        # No caps here, for the same reason rules have none: session context must
+        # load COMPLETELY. A top-N sample silently drops sprint goals and
+        # decisions, and nothing downstream can tell that anything is missing -
+        # the session just proceeds without them. "Recent" is bounded by the
+        # window below, not by an arbitrary count.
+        active_sprint = self._memory_repo.get_active_by_category(
+            project, "sprint", limit=None,
+        )
         recent_decisions = self._memory_repo.get_recent_by_category(
-            project, "decision", seven_days_ago, limit=20,
+            project, "decision", datetime.now(timezone.utc) - RECENT_DECISION_WINDOW,
+            limit=None,
         )
 
         return SessionContext(
@@ -64,6 +80,8 @@ class SessionService:
             active_sprint=active_sprint,
             recent_decisions=recent_decisions,
             orphaned_sessions_closed=len(orphans),
+            pending_adaptations=pending,
+            pending_instructions=adaptation_brief(project, pending),
         )
 
     def end(

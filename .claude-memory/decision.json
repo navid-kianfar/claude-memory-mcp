@@ -1,0 +1,58 @@
+[
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "decision",
+    "content": "SessionService.start loads active sprint items and recent decisions with limit=None (previously capped at 10 and 20). \"Recent\" is bounded by RECENT_DECISION_WINDOW (7 days), not by a count. Same rationale as MemoryRepository.get_rules, which has always been uncapped: a top-N sample silently drops context and nothing downstream can tell anything is missing. memory_search keeps its limit=10 default, because search is relevance-ranked by nature.",
+    "created_at": "2026-09-03T07:00:15.621079",
+    "created_by": null,
+    "entities": [
+      "MemoryRepository",
+      "Recent",
+      "SessionService"
+    ],
+    "expires_at": null,
+    "id": "542ad607-4963-40fa-8ed9-ae94a9c59904",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "assistant",
+    "status": "active",
+    "summary": "Session context and rules load completely, never a top-N sample: SessionService",
+    "tags": [
+      "session",
+      "context"
+    ],
+    "title": "Session context and rules load completely, never a top-N sample",
+    "updated_at": "2026-09-03T07:00:15.621079"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "decision",
+    "content": "memory_import_rules copies rules with pending=True by default (schema v4 `pending` column). A pending memory is stored but inert: excluded from get_rules (the injected rule block), vector search, session context, the default listing, and the git snapshot. memory_session_start returns them as pending_adaptations with a brief (services/adaptation.py) telling the agent to rewrite each one for this codebase, dropping the source project's component names/paths/stack, and to ASK THE USER rather than guess. memory_adapt_pending(memory_id, title, content) clears the flag and puts the rule in force; memory_discard_pending drops it. metadata.imported_from keeps the original text and source project. Rationale: rules copied verbatim from another project read as authoritative and steer the agent wrong.",
+    "created_at": "2026-09-03T07:00:03.370262",
+    "created_by": null,
+    "entities": [
+      "ASK",
+      "USER"
+    ],
+    "expires_at": null,
+    "id": "9e99323e-5b68-4ec3-9b8f-1f65a8f6c1ae",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "assistant",
+    "status": "active",
+    "summary": "memory_import_rules copies rules with pending=True by default (schema v4 `pending` column)",
+    "tags": [
+      "rules",
+      "import",
+      "pending"
+    ],
+    "title": "Rules imported from another project land pending and must be adapted first",
+    "updated_at": "2026-09-03T07:00:03.370262"
+  }
+]

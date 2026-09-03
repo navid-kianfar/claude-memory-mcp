@@ -88,6 +88,22 @@ class TestCopyMemories:
         )
         result = container.memory_service.copy_memories(dst, src, [memory.id])
         assert result["imported"] == 1
+        # Imported, but deliberately not yet in force: it still carries the
+        # source project's wording until an agent adapts it.
+        assert container.rules_service.get_rules(dst).total == 0
+        assert len(container.memory_service.list_pending(dst)) == 1
+
+    def test_copy_without_pending_takes_effect_immediately(self, container):
+        """The explicit opt-out, for text already known to be project-neutral."""
+        src = _project(container, "src-direct")
+        dst = _project(container, "dst-direct")
+        memory = container.memory_service.store(
+            StoreMemoryRequest(
+                project=src, category=MemoryCategory.MANDATORY_RULES,
+                title="Shared rule", content="A rule shared across projects.",
+            )
+        )
+        container.memory_service.copy_memories(dst, src, [memory.id], pending=False)
         assert container.rules_service.get_rules(dst).total == 1
 
     def test_copy_skips_missing_ids(self, container):

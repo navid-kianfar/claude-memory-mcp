@@ -81,6 +81,87 @@ class ProjectService:
             self._repo.set_backend(slug, "local", None)
         return self.get(slug)
 
+    def claim_folder(
+        self,
+        cwd: str,
+        project_uid: str | None = None,
+        slug_hint: str | None = None,
+        display_name: str | None = None,
+    ) -> dict:
+        """Resolve which project owns `cwd`, keyed on its committed uid.
+
+        A project's identity is the uid in its `.claude-memory/manifest.json`,
+        not its path or folder name - so moving or renaming the folder rebinds
+        the existing project instead of registering a second one, and a
+        teammate who clones the repo gets the same identity we do.
+
+        `action` explains what happened, for the caller's log line:
+          matched   - the uid already points here; nothing changed
+          rebound   - same project, new location; project_path updated
+          adopted   - a project existed under this slug with no uid; it took it
+          created   - the uid is new to this machine (a fresh clone)
+          unclaimed - no uid to go on; fall back to path/name detection
+        """
+        from pathlib import Path
+
+        folder = Path(cwd).resolve()
+
+        if not project_uid:
+            from memory_mcp.context import detect_project_from_cwd
+
+            return {"slug": detect_project_from_cwd(str(folder)), "action": "unclaimed"}
+
+        existing = self._repo.get_by_uid(project_uid)
+        if existing is not None:
+            bound = (
+                Path(existing.project_path).resolve()
+                if existing.project_path else None
+            )
+            if bound == folder:
+                return {"slug": existing.slug, "action": "matched"}
+            self._repo.update_project_path(existing.slug, str(folder))
+            return {
+                "slug": existing.slug,
+                "action": "rebound",
+                "previous_path": str(bound) if bound else None,
+            }
+
+        # The uid is unknown here, so this machine has never seen the snapshot.
+        # A local project under the same slug is the same project when it is
+        # bound to this very folder (a teammate who registered it locally before
+        # pulling, or a project registered before uids existed) - the committed
+        # uid then wins, because it is the identity the repository carries.
+        hint = slugify(slug_hint) if slug_hint else slugify(folder.name)
+        candidate = self._repo.get(hint) if hint else None
+        if candidate is not None:
+            bound = (
+                Path(candidate.project_path).resolve()
+                if candidate.project_path else None
+            )
+            if bound is None or bound == folder or not candidate.project_uid:
+                self._repo.set_uid(candidate.slug, project_uid)
+                self._repo.update_project_path(candidate.slug, str(folder))
+                return {"slug": candidate.slug, "action": "adopted"}
+
+        # The slug belongs to a different project living somewhere else, so this
+        # one needs a free slug of its own.
+        slug = self._free_slug(hint or "project")
+        self.init_project(
+            slug, display_name or folder.name, project_path=str(folder),
+        )
+        self._repo.set_uid(slug, project_uid)
+        return {"slug": slug, "action": "created"}
+
+    def _free_slug(self, base: str) -> str:
+        """`base`, or the first `base-2`, `base-3`, ... that is unregistered."""
+        if self._repo.get(base) is None:
+            return base
+        for n in range(2, 100):
+            candidate = f"{base}-{n}"
+            if self._repo.get(candidate) is None:
+                return candidate
+        raise ValueError(f"No free slug for '{base}'")
+
     def link_folder(self, slug: str, project_path: str) -> ProjectInfo:
         """Bind an existing project to a source folder for git-synced memory."""
         self.get(slug)  # raises if missing

@@ -1,12 +1,12 @@
 """Project repository - manages the SQLite registry's `projects` table."""
 
 from memory_mcp.config import settings
-from memory_mcp.db.registry import now_iso, registry_conn
+from memory_mcp.db.registry import new_project_uid, now_iso, registry_conn
 from memory_mcp.models import ProjectInfo
 
 _COLUMNS = (
     "slug, display_name, description, created_at, last_accessed, db_path, "
-    "project_path, owner, backend, remote_url"
+    "project_path, owner, backend, remote_url, project_uid"
 )
 
 
@@ -14,6 +14,7 @@ def _to_info(row) -> ProjectInfo:
     keys = row.keys()
     return ProjectInfo(
         slug=row["slug"],
+        project_uid=row["project_uid"] if "project_uid" in keys else None,
         display_name=row["display_name"],
         description=row["description"],
         created_at=row["created_at"],
@@ -37,6 +38,7 @@ class ProjectRepository:
         db_path: str | None = None,
         project_path: str | None = None,
         owner: str | None = None,
+        project_uid: str | None = None,
     ) -> ProjectInfo:
         if db_path is None:
             db_path = str(settings.projects_dir / f"{slug}.duckdb")
@@ -67,14 +69,34 @@ class ProjectRepository:
                 ts = now_iso()
                 conn.execute(
                     f"INSERT INTO projects ({_COLUMNS}) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'local', NULL)",
-                    (slug, display_name, description, ts, ts, db_path, project_path, owner),
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'local', NULL, ?)",
+                    (slug, display_name, description, ts, ts, db_path, project_path,
+                     owner, project_uid or new_project_uid()),
                 )
 
         result = self.get(slug)
         if result is None:
             raise RuntimeError(f"Failed to register project '{slug}'")
         return result
+
+    def get_by_uid(self, project_uid: str) -> ProjectInfo | None:
+        """Find a project by its stable uid, whatever its slug or folder is now."""
+        if not project_uid:
+            return None
+        with registry_conn() as conn:
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM projects WHERE project_uid = ?",
+                (project_uid,),
+            ).fetchone()
+        return _to_info(row) if row else None
+
+    def set_uid(self, slug: str, project_uid: str) -> None:
+        """Adopt a uid onto a project that does not have one yet."""
+        with registry_conn() as conn:
+            conn.execute(
+                "UPDATE projects SET project_uid = ? WHERE slug = ?",
+                (project_uid, slug),
+            )
 
     def get(self, slug: str) -> ProjectInfo | None:
         with registry_conn() as conn:

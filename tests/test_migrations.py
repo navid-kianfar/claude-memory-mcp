@@ -38,7 +38,7 @@ def test_migration_adds_v2_columns_and_tables(tmp_path):
     conn = duckdb.connect(str(db))
     try:
         version = run_migrations(conn)
-        assert version == 3
+        assert version == 4
         cols = {r[1] for r in conn.execute("PRAGMA table_info('memories')").fetchall()}
         assert {"summary", "entities", "expires_at"} <= cols
         tables = {
@@ -97,8 +97,24 @@ def test_migration_is_idempotent(tmp_path):
     _make_v1_db(db)
     conn = duckdb.connect(str(db))
     try:
-        assert run_migrations(conn) == 3
-        assert run_migrations(conn) == 3
-        assert get_schema_version(conn) == 3
+        assert run_migrations(conn) == 4
+        assert run_migrations(conn) == 4
+        assert get_schema_version(conn) == 4
+    finally:
+        conn.close()
+
+
+def test_migration_adds_v4_pending_column_defaulting_to_false(tmp_path):
+    """Everything already stored was written for the project it lives in, so it
+    must stay in force: only later imports are pending."""
+    db = tmp_path / "legacy.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        run_migrations(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info('memories')").fetchall()}
+        assert "pending" in cols
+        pending = conn.execute("SELECT pending FROM memories WHERE id = 'm1'").fetchone()
+        assert pending[0] is False
     finally:
         conn.close()

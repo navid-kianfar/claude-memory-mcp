@@ -17,6 +17,7 @@ from memory_mcp.context import (
     load_active_project, resolve_project, set_active_project,
 )
 from memory_mcp.enforcement import rules_digest
+from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.exceptions import MemoryMCPError, MemoryNotFoundError
 from memory_mcp.models import (
     MemoryCategory, StoreMemoryRequest, UpdateMemoryRequest, SearchRequest,
@@ -659,17 +660,86 @@ def memory_import_rules(
     source_project: str,
     memory_ids: list[str],
     project: str | None = None,
+    pending: bool = True,
 ) -> dict:
     """Copy selected rules/memories from another project into this one. Use
-    memory_get_rules(source_project) first to get the ids to import."""
+    memory_get_rules(source_project) first to get the ids to import.
+
+    Imports arrive PENDING: stored, but kept out of the rule block, search and
+    the git snapshot until they are rewritten for this project - another
+    project's component names and paths must never silently become rules here.
+    memory_session_start returns them with instructions; adapt each one with
+    memory_adapt_pending (or drop it with memory_discard_pending). Pass
+    pending=False only for text you know is already project-neutral."""
     def _run():
         slug = _resolve(project)
-        result = container.memory_service.copy_memories(slug, source_project, memory_ids)
+        result = container.memory_service.copy_memories(
+            slug, source_project, memory_ids, pending=pending,
+        )
         return {
             "status": "ok",
             "imported": result["imported"],
             "skipped": result["skipped"],
+            "pending": result["pending"],
+            "next_step": (
+                "Adapt each import to this project with memory_adapt_pending "
+                "before relying on it - memory_pending_list() shows them."
+            ) if result["pending"] and result["imported"] else None,
         }
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_pending_list(project: str | None = None) -> dict:
+    """List imported memories still waiting to be adapted to this project.
+
+    Each carries `metadata.imported_from` with the original text and its source
+    project. None of them are in force until adapted."""
+    def _run():
+        slug = _resolve(project)
+        pending = container.memory_service.list_pending(slug)
+        return {
+            "project": slug,
+            "total": len(pending),
+            "instructions": adaptation_brief(slug, pending),
+            "pending": [m.model_dump(mode="json") for m in pending],
+        }
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_adapt_pending(
+    memory_id: str,
+    title: str,
+    content: str,
+    tags: list[str] | None = None,
+    priority: int | None = None,
+    project: str | None = None,
+) -> dict:
+    """Rewrite a pending import for THIS project and put it into force.
+
+    Pass the adapted title/content: the principle kept, the source project's
+    specifics (component names, paths, repo URLs, stack details) replaced with
+    this project's own or removed. Ask the user rather than guessing when a rule
+    cannot be translated without knowing something about this codebase. Clearing
+    pending adds the memory to the rules in force and to the git snapshot."""
+    def _run():
+        slug = _resolve(project)
+        memory = container.memory_service.adapt_pending(
+            slug, memory_id, title, content, tags=tags, priority=priority,
+        )
+        return {"status": "ok", "memory": memory.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_discard_pending(
+    memory_id: str, reason: str | None = None, project: str | None = None,
+) -> dict:
+    """Drop an imported memory that does not belong in this project."""
+    def _run():
+        slug = _resolve(project)
+        return container.memory_service.discard_pending(slug, memory_id, reason)
     return _safe(_run)
 
 

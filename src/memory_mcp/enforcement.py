@@ -31,11 +31,27 @@ def format_rules_block(slug: str, mandatory: list, forbidden: list) -> str:
 
 def format_intro(slug: str) -> str:
     """Session-start nudge text for a detected memory project."""
-    return (
+    text = (
         f"[Memory MCP] This directory is memory project '{slug}'. "
         f"Call memory_session_start('{slug}') now, before doing any work, to load "
         f"its rules, last session summary, sprint goals, and recent decisions."
     )
+    pending = _pending_count(slug)
+    if pending:
+        text += (
+            f" {pending} imported {'memory is' if pending == 1 else 'memories are'} "
+            f"waiting to be adapted to this project and {'is' if pending == 1 else 'are'} "
+            f"NOT in force yet - memory_session_start returns them with instructions."
+        )
+    return text
+
+
+def _pending_count(slug: str) -> int:
+    """Un-adapted imports, or 0 when that cannot be determined."""
+    try:
+        return container.memory_service.count_pending(slug)
+    except Exception:  # noqa: BLE001 - the intro must never fail a session start
+        return 0
 
 
 def format_session_end(slug: str) -> str:

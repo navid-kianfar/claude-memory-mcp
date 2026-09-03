@@ -11,12 +11,13 @@ Two isolation models live here, selected by settings.mode:
 
 import contextlib
 import contextvars
+import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from memory_mcp.config import settings
-from memory_mcp.services.portable_service import PORTABLE_DB_NAME
+from memory_mcp.constants import MANIFEST_NAME, PORTABLE_DB_NAME, SNAPSHOT_DIRNAME
 
 _active_project: str | None = None
 _lock = threading.Lock()
@@ -133,17 +134,59 @@ def load_active_project() -> None:
         pass
 
 
+def _uid_from_manifest(path: Path) -> str | None:
+    """Read the stable project uid out of `<path>/.claude-memory/manifest.json`.
+
+    Returns None for anything unreadable - a folder the daemon has no rights to,
+    a half-written file, an unresolved git conflict. Identity then falls back to
+    path and name matching, exactly as before uids existed.
+    """
+    try:
+        manifest = path / SNAPSHOT_DIRNAME / MANIFEST_NAME
+        if not manifest.is_file():
+            return None
+        uid = json.loads(manifest.read_text()).get("project_id")
+        return uid if isinstance(uid, str) and uid else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _slug_from_uid(path: Path) -> str | None:
+    """Match a folder to a project by the uid its committed snapshot carries."""
+    uid = _uid_from_manifest(path)
+    if not uid:
+        return None
+    try:
+        from memory_mcp.repositories import ProjectRepository
+
+        project = ProjectRepository().get_by_uid(uid)
+    except Exception:  # noqa: BLE001
+        return None
+    return project.slug if project else None
+
+
 def detect_project_from_cwd(cwd: str | None) -> str | None:
     """Detect a registered project purely from a directory, ignoring active state.
 
-    1. Walk up from cwd looking for a portable .memory-mcp.duckdb
-    2. Match the directory name to a registered project slug
+    1. Walk up from cwd looking for a committed .claude-memory/manifest.json and
+       match on its project_id - the only identity that survives a move/rename
+    2. Walk up looking for a portable .memory-mcp.duckdb
+    3. Match the bound path, then the directory name, to a registered project
     Returns None when the directory is not a memory project.
     """
     if not cwd:
         return None
 
     cwd_path = Path(cwd).resolve()
+
+    check = cwd_path
+    for _ in range(10):
+        slug = _slug_from_uid(check)
+        if slug:
+            return slug
+        if check.parent == check:
+            break
+        check = check.parent
 
     check = cwd_path
     for _ in range(10):

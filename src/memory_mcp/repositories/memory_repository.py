@@ -15,11 +15,15 @@ from memory_mcp.models import Memory, MemoryFilter, Pagination
 # by position. The four approval columns are appended AT THE END (indices 17-20)
 # so the existing indices 0-16 are untouched. When adding columns here, also bump
 # the slice in vector_search (which appends a computed `distance` after them).
-MEMORY_COLUMNS = "id, category, title, content, summary, tags, metadata, embedding, status, priority, source, related_ids, entities, access_count, expires_at, created_at, updated_at, created_by, approval_status, approved_by, approved_at"
+MEMORY_COLUMNS = "id, category, title, content, summary, tags, metadata, embedding, status, priority, source, related_ids, entities, access_count, expires_at, created_at, updated_at, created_by, approval_status, approved_by, approved_at, pending"
 
 # Number of columns MEMORY_COLUMNS selects (index of the first appended,
 # non-memory column such as vector_search's `distance`).
-MEMORY_COLUMN_COUNT = 21
+MEMORY_COLUMN_COUNT = 22
+
+# Un-adapted imports are inert: excluded from rules, search, session context and
+# the sync snapshot. COALESCE covers rows written before the column existed.
+NOT_PENDING = "NOT COALESCE(pending, FALSE)"
 
 
 def _row_to_memory(row, include_embedding: bool = False) -> Memory:
@@ -56,6 +60,8 @@ def _row_to_memory(row, include_embedding: bool = False) -> Memory:
         "approval_status": row[18] if len(row) > 18 and row[18] is not None else "approved",
         "approved_by": row[19] if len(row) > 19 else None,
         "approved_at": row[20] if len(row) > 20 else None,
+        # Import adaptation gate (v4); legacy-shaped rows read as not pending.
+        "pending": bool(row[21]) if len(row) > 21 and row[21] is not None else False,
     }
     if include_embedding:
         data["embedding"] = row[7]
@@ -86,18 +92,19 @@ class MemoryRepository:
         status: str = "active",
         created_by: str | None = None,
         approval_status: str = "approved",
+        pending: bool = False,
     ) -> Memory:
         with connect(project) as conn:
             conn.execute(
                 """
-                INSERT INTO memories (id, category, title, content, summary, tags, metadata, embedding, status, priority, source, related_ids, entities, expires_at, created_by, approval_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memories (id, category, title, content, summary, tags, metadata, embedding, status, priority, source, related_ids, entities, expires_at, created_by, approval_status, pending)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     memory_id, category, title, content, summary, tags,
                     json.dumps(metadata) if metadata else None,
                     embedding, status, priority, source, related_ids, entities, expires_at,
-                    created_by, approval_status,
+                    created_by, approval_status, pending,
                 ],
             )
             row = conn.execute(
@@ -141,7 +148,7 @@ class MemoryRepository:
                 f"""
                 SELECT {MEMORY_COLUMNS} FROM memories
                 WHERE category IN ('mandatory_rules', 'forbidden_rules')
-                  AND status = 'active'{where_approval}
+                  AND status = 'active' AND {NOT_PENDING}{where_approval}
                 ORDER BY priority DESC, created_at ASC
                 """
             ).fetchall()
@@ -164,7 +171,7 @@ class MemoryRepository:
                 f"""
                 SELECT {MEMORY_COLUMNS} FROM memories
                 WHERE category IN ('mandatory_rules', 'forbidden_rules')
-                  AND status = 'active' AND approval_status = ?
+                  AND status = 'active' AND {NOT_PENDING} AND approval_status = ?
                 ORDER BY priority DESC, created_at ASC
                 """,
                 [approval_status],
@@ -172,32 +179,44 @@ class MemoryRepository:
         return [_row_to_memory(r) for r in rows]
 
     def get_recent_by_category(
-        self, project: str, category: str, since: datetime, limit: int = 20
+        self, project: str, category: str, since: datetime, limit: int | None = 20
     ) -> list[Memory]:
+        """Memories in a category since a cutoff. `limit=None` returns them all -
+        session context must be complete, never a top-N sample."""
+        clause = "LIMIT ?" if limit is not None else ""
+        params: list = [category, since]
+        if limit is not None:
+            params.append(limit)
         with connect(project) as conn:
             rows = conn.execute(
                 f"""
                 SELECT {MEMORY_COLUMNS} FROM memories
-                WHERE category = ? AND status = 'active' AND created_at >= ?
+                WHERE category = ? AND status = 'active' AND {NOT_PENDING}
+                  AND created_at >= ?
                 ORDER BY created_at DESC
-                LIMIT ?
+                {clause}
                 """,
-                [category, since, limit],
+                params,
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
 
     def get_active_by_category(
-        self, project: str, category: str, limit: int = 10
+        self, project: str, category: str, limit: int | None = 10
     ) -> list[Memory]:
+        """Active memories in a category. `limit=None` returns them all."""
+        clause = "LIMIT ?" if limit is not None else ""
+        params: list = [category]
+        if limit is not None:
+            params.append(limit)
         with connect(project) as conn:
             rows = conn.execute(
                 f"""
                 SELECT {MEMORY_COLUMNS} FROM memories
-                WHERE category = ? AND status = 'active'
+                WHERE category = ? AND status = 'active' AND {NOT_PENDING}
                 ORDER BY priority DESC, updated_at DESC
-                LIMIT ?
+                {clause}
                 """,
-                [category, limit],
+                params,
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
 
@@ -219,6 +238,12 @@ class MemoryRepository:
 
         if filters.status == "active":
             conditions.append("(expires_at IS NULL OR expires_at > current_timestamp)")
+
+        # None means "both"; False hides un-adapted imports; True shows only them.
+        if filters.pending is False:
+            conditions.append(NOT_PENDING)
+        elif filters.pending is True:
+            conditions.append("COALESCE(pending, FALSE)")
 
         where = " AND ".join(conditions)
 
@@ -244,18 +269,46 @@ class MemoryRepository:
 
         return [_row_to_memory(r) for r in rows], total
 
-    def all_for_categories(self, project: str, categories: list[str]) -> list[Memory]:
-        """Every memory in the given categories, any status. Used for sync export."""
+    def all_for_categories(
+        self, project: str, categories: list[str], include_pending: bool = False,
+    ) -> list[Memory]:
+        """Every memory in the given categories, any status. Used for sync export.
+
+        Un-adapted imports are excluded by default: they still carry another
+        project's specifics, so committing them would push that project's
+        wording to every teammate. They ship once they have been adapted.
+        """
         if not categories:
             return []
         placeholders = ",".join("?" * len(categories))
+        pending_clause = "" if include_pending else f" AND {NOT_PENDING}"
         with connect(project) as conn:
             rows = conn.execute(
                 f"SELECT {MEMORY_COLUMNS} FROM memories "
-                f"WHERE category IN ({placeholders}) ORDER BY id",
+                f"WHERE category IN ({placeholders}){pending_clause} ORDER BY id",
                 categories,
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
+
+    def pending_memories(self, project: str) -> list[Memory]:
+        """Imports waiting to be rewritten for this project, oldest first."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {MEMORY_COLUMNS} FROM memories
+                WHERE COALESCE(pending, FALSE) AND status = 'active'
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
+    def count_pending(self, project: str) -> int:
+        with connect(project) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM memories "
+                "WHERE COALESCE(pending, FALSE) AND status = 'active'"
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def vector_search(
         self, project: str, query_embedding: list[float], status: str, limit: int
@@ -267,7 +320,8 @@ class MemoryRepository:
                 SELECT {MEMORY_COLUMNS},
                        array_cosine_distance(embedding, ?::FLOAT[384]) AS distance
                 FROM memories
-                WHERE status = ? AND (expires_at IS NULL OR expires_at > current_timestamp)
+                WHERE status = ? AND {NOT_PENDING}
+                  AND (expires_at IS NULL OR expires_at > current_timestamp)
                 ORDER BY array_cosine_distance(embedding, ?::FLOAT[384])
                 LIMIT ?
                 """,

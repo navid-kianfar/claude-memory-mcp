@@ -81,10 +81,18 @@ class Memory(BaseModel):
     approval_status: str = "approved"  # "approved" | "proposed" | "revoked"
     approved_by: str | None = None
     approved_at: datetime | None = None
+    # Imported from another project and not yet rewritten for this one. A pending
+    # memory is stored but deliberately invisible: it is kept out of the rule
+    # block, search, session context and the git snapshot until an agent adapts
+    # it, so another project's specifics can never quietly steer this one.
+    pending: bool = False
 
 
 class ProjectInfo(BaseModel):
     slug: str
+    # Stable identity written into .claude-memory/manifest.json. Survives the
+    # folder being moved or renamed; shared with teammates through git.
+    project_uid: str | None = None
     display_name: str
     description: str | None = None
     created_at: datetime | None = None
@@ -145,6 +153,7 @@ class StoreMemoryRequest(BaseModel):
     source: str = "assistant"
     related_ids: list[str] = Field(default_factory=list)
     created_by: str | None = None  # user id of the proposer (server mode)
+    pending: bool = False  # stored, but inert until adapted to this project
 
 
 class UpdateMemoryRequest(BaseModel):
@@ -174,6 +183,8 @@ class MemoryFilter(BaseModel):
     status: str = "active"
     category: str | None = None
     tags: list[str] | None = None
+    # False (default) hides un-adapted imports, True shows only those, None both.
+    pending: bool | None = False
 
 
 class Pagination(BaseModel):
@@ -229,3 +240,7 @@ class SessionContext(BaseModel):
     active_sprint: list[Memory]
     recent_decisions: list[Memory]
     orphaned_sessions_closed: int = 0
+    # Rules imported from other projects, waiting to be rewritten for this one.
+    # They are NOT in mandatory_rules/forbidden_rules above and are not in force.
+    pending_adaptations: list[Memory] = Field(default_factory=list)
+    pending_instructions: str | None = None

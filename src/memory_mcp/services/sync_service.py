@@ -12,13 +12,13 @@ unlike the launchd daemon, it can reach project folders on the Desktop.
 import json
 from datetime import datetime
 
+from memory_mcp.constants import SNAPSHOT_DIRNAME, SYNC_CATEGORIES
 from memory_mcp.embeddings import embed_text
 from memory_mcp.models import MemoryCategory
 from memory_mcp.repositories import MemoryRepository, ProjectRepository
 from memory_mcp.utils.text import prepare_embedding_text
 
-SNAPSHOT_DIRNAME = ".claude-memory"
-SYNC_CATEGORIES = [c.value for c in MemoryCategory if c.value != "session"]
+__all__ = ["SyncService", "SNAPSHOT_DIRNAME", "SYNC_CATEGORIES"]
 
 # Fields compared to decide whether a memory needs updating on import. Approval
 # fields are included so an approve/revoke propagates through git sync; a rule
@@ -32,10 +32,16 @@ _SYNC_FIELDS = (
 
 
 def _mem_to_dict(memory) -> dict:
-    """Serialize a Memory for the snapshot - without the embedding or stats."""
+    """Serialize a Memory for the snapshot - without the embedding or stats.
+
+    `pending` is dropped too: it is device-local staging state, and a pending
+    memory never reaches a snapshot in the first place (build_snapshot excludes
+    it). Writing the flag would only add a constant `false` to every entry.
+    """
     data = memory.model_dump(mode="json")
     data.pop("embedding", None)
     data.pop("access_count", None)
+    data.pop("pending", None)
     return data
 
 

@@ -29,7 +29,7 @@ export function ImportRulesDialog({
     <Dialog open={open} onClose={onClose} className="max-w-xl">
       <DialogHeader
         title={`Import rules into ${targetName}`}
-        description="Seed this project with rules from a template or another project."
+        description="Seed this project with rules from a template or another project. Rules copied from another project arrive in the Pending tab and stay out of this project's rules until they have been rewritten for it."
         onClose={onClose}
       />
       <DialogBody>

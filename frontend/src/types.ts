@@ -117,6 +117,9 @@ export interface Memory {
   approval_status?: "approved" | "proposed" | "revoked";
   approved_by?: string | null;
   approved_at?: string | null;
+  // Imported from another project and not yet rewritten for this one. Pending
+  // memories are stored but inert: no rule block, no search, no git snapshot.
+  pending?: boolean;
   _similarity?: number;
   _relevance?: number;
 }
@@ -273,7 +276,22 @@ export interface ImportRulesResult {
   status: string;
   imported: number;
   skipped: number;
+  pending?: boolean;
   memories: number;
+}
+
+/** The original a pending memory was copied from, kept for the adapting agent. */
+export interface ImportOrigin {
+  project: string;
+  memory_id: string;
+  title: string;
+  content: string;
+}
+
+export interface PendingAdaptationsResponse {
+  pending: Memory[];
+  total: number;
+  instructions: string | null;
 }
 
 export type LoadFromFolderSource =

@@ -181,7 +181,7 @@ A React single-page app served by the daemon at `/`:
 
 ## MCP tools
 
-35 tools, including:
+39 tools, including:
 
 | Area | Tools |
 |------|-------|
@@ -189,6 +189,7 @@ A React single-page app served by the daemon at `/`:
 | Memories | `memory_store`, `memory_search`, `memory_recall`, `memory_update`, `memory_delete`, `memory_list` |
 | Rules | `memory_get_rules`, `memory_add_rule`, `memory_update_rule`, `memory_delete_rule` |
 | Templates | `memory_list_templates`, `memory_create_template`, `memory_add_template_rule`, `memory_apply_template`, `memory_import_rules` |
+| Imported rules | `memory_pending_list`, `memory_adapt_pending`, `memory_discard_pending` |
 | Sessions | `memory_session_start`, `memory_session_end` |
 | Portability | `memory_attach_project`, `memory_make_portable`, `memory_sync` |
 | Import/Export | `memory_export`, `memory_import`, `memory_import_claude_md` |
@@ -231,6 +232,30 @@ Import is **safe by design**: it only adds new entries and applies edits that
 are strictly newer — it never deletes, and never reverts a more recent local
 change. Removing a rule is always explicit. Each project's memory is separate —
 sharing one never exposes the others.
+
+The snapshot's `manifest.json` carries a **`project_id`** — the project's stable
+identity. Because it is committed with the code, moving or renaming the project
+folder re-binds the existing project instead of registering a duplicate, and a
+teammate's clone resolves to the same project on their machine.
+
+## Importing rules from another project
+
+Rules written for one project carry that project's specifics — its component
+names, its paths, its stack. Copied verbatim into another project they read as
+authoritative and quietly steer the agent wrong. So `memory_import_rules` (and
+the UI's Import dialog) brings them in as **pending**:
+
+- stored and visible in the **Pending** tab, but **not in force** — kept out of
+  the injected rule block, out of search, out of session context, and out of the
+  git snapshot;
+- surfaced at the next `memory_session_start` with a brief telling the agent to
+  rewrite each one for *this* codebase, and to **ask you** rather than guess when
+  a rule cannot be translated without knowing something only you know;
+- activated by `memory_adapt_pending(memory_id, title, content)` — which clears
+  the flag, puts the rule in force from that moment on, and lets it sync — or
+  dropped with `memory_discard_pending(memory_id, reason)`.
+
+Pass `pending=False` to import text you already know is project-neutral.
 
 ## Architecture
 

@@ -94,6 +94,7 @@ class MemoryService:
             expires_at=expires_at,
             created_by=created_by,
             approval_status=approval_status,
+            pending=request.pending,
         )
 
         self._project_repo.touch(request.project)
@@ -240,11 +241,22 @@ class MemoryService:
     # ---------- Copy across projects ----------
 
     def copy_memories(
-        self, target_project: str, source_project: str, memory_ids: list[str],
+        self,
+        target_project: str,
+        source_project: str,
+        memory_ids: list[str],
+        pending: bool = True,
     ) -> dict:
         """Copy selected memories from one project into another (fresh embeddings).
 
-        Used to seed a new project with rules picked from an existing one.
+        Imports land PENDING by default. A rule written for another project
+        carries that project's specifics - its component names, its paths, its
+        stack - and injecting that verbatim into this project's rule block is
+        how an agent ends up confidently following instructions that do not
+        apply here. Pending memories are stored but inert until adapted; see
+        `adapt_pending`. Pass pending=False only for text already known to be
+        project-neutral.
+
         Returns the created Memory objects and any source ids that were missing.
         """
         copied: list[Memory] = []
@@ -254,6 +266,16 @@ class MemoryService:
             if src is None:
                 skipped.append(memory_id)
                 continue
+            metadata = dict(src.metadata or {})
+            if pending:
+                # The original is kept verbatim so the adapting agent can see
+                # exactly what it is rewriting, and so provenance survives.
+                metadata["imported_from"] = {
+                    "project": source_project,
+                    "memory_id": src.id,
+                    "title": src.title,
+                    "content": src.content,
+                }
             memory = self.store(
                 StoreMemoryRequest(
                     project=target_project,
@@ -261,10 +283,96 @@ class MemoryService:
                     title=src.title,
                     content=src.content,
                     tags=src.tags,
+                    metadata=metadata or None,
                     priority=src.priority,
                     source="imported",
+                    pending=pending,
                 )
             )
             copied.append(memory)
         return {"status": "ok", "imported": len(copied), "skipped": skipped,
-                "memories": copied}
+                "pending": pending, "memories": copied}
+
+    # ---------- Pending imports ----------
+
+    def list_pending(self, project: str) -> list[Memory]:
+        """Imports waiting to be rewritten for this project."""
+        return self._memory_repo.pending_memories(project)
+
+    def count_pending(self, project: str) -> int:
+        return self._memory_repo.count_pending(project)
+
+    def adapt_pending(
+        self,
+        project: str,
+        memory_id: str,
+        title: str,
+        content: str,
+        tags: list[str] | None = None,
+        priority: int | None = None,
+    ) -> Memory:
+        """Replace a pending import with text written for THIS project, activate it.
+
+        This is the step that makes an imported rule safe to enforce: the agent
+        has rewritten it against this codebase (asking the user whatever it
+        could not determine), so the pending flag comes off and the rule joins
+        the session from here on - rule block, search, and the git snapshot.
+        """
+        memory = self._memory_repo.get_by_id(project, memory_id)
+        if memory is None:
+            raise MemoryNotFoundError(f"Memory '{memory_id}' not found")
+        if not memory.pending:
+            raise ValueError(
+                f"Memory '{memory_id}' is not pending - use memory_update to edit it"
+            )
+
+        title = (title or "").strip()
+        content = (content or "").strip()
+        if not title or not content:
+            raise ValueError("adapt requires a non-empty title and content")
+
+        fields: dict = {
+            "title": title,
+            "content": content,
+            "summary": generate_summary(title, content),
+            "entities": extract_entities(f"{title} {content}"),
+            "embedding": embed_text(prepare_embedding_text(title, content)),
+            "source": "adapted",
+            "pending": False,
+        }
+        if tags is not None:
+            fields["tags"] = tags
+        if priority is not None:
+            fields["priority"] = max(0, min(3, priority))
+
+        updated = self._memory_repo.update(project, memory_id, fields)
+        origin = (memory.metadata or {}).get("imported_from") or {}
+        self._provenance_repo.record(
+            project, memory_id, "adapt",
+            {
+                "from_project": origin.get("project"),
+                "original_title": origin.get("title", memory.title),
+                "adapted_title": title,
+                "rewritten": content != (origin.get("content") or memory.content),
+            },
+            actor=current_user().id if settings.server_mode else None,
+        )
+        if updated.category in RULE_CATEGORIES:
+            self._rules_service.invalidate(project)
+        return updated
+
+    def discard_pending(
+        self, project: str, memory_id: str, reason: str | None = None,
+    ) -> dict:
+        """Reject an import that does not belong in this project."""
+        memory = self._memory_repo.get_by_id(project, memory_id)
+        if memory is None:
+            raise MemoryNotFoundError(f"Memory '{memory_id}' not found")
+        if not memory.pending:
+            raise ValueError(f"Memory '{memory_id}' is not pending")
+        self._memory_repo.soft_delete(project, memory_id)
+        self._provenance_repo.record(
+            project, memory_id, "discard_import", {"reason": reason},
+            actor=current_user().id if settings.server_mode else None,
+        )
+        return {"status": "ok", "discarded": memory_id, "title": memory.title}

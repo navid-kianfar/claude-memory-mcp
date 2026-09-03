@@ -10,16 +10,17 @@ folder I/O and talks to the daemon over HTTP for the database work:
 
 import argparse
 import json
+import subprocess
+import traceback
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 from memory_mcp.config import settings
-from memory_mcp.context import detect_project_from_cwd
+from memory_mcp.constants import MANIFEST_NAME, SNAPSHOT_DIRNAME, SYNC_CATEGORIES
 from memory_mcp.repositories import ProjectRepository
-from memory_mcp.services.sync_service import SNAPSHOT_DIRNAME, SYNC_CATEGORIES
 
-_MANIFEST = "manifest.json"
+_MANIFEST = MANIFEST_NAME
 
 
 def _daemon(path: str, method: str = "GET", payload: dict | None = None) -> dict:
@@ -39,10 +40,71 @@ def _snapshot_dir(cwd: str, slug: str) -> Path:
     return Path(base) / SNAPSHOT_DIRNAME
 
 
+def _find_manifest(cwd: str) -> tuple[Path | None, dict]:
+    """Walk up from cwd for a committed snapshot manifest. Returns (dir, data)."""
+    check = Path(cwd).resolve()
+    for _ in range(10):
+        manifest = check / SNAPSHOT_DIRNAME / MANIFEST_NAME
+        if manifest.is_file():
+            try:
+                return check, json.loads(manifest.read_text())
+            except Exception:  # noqa: BLE001 - unresolved conflict markers, etc.
+                return check, {}
+        if check.parent == check:
+            break
+        check = check.parent
+    return None, {}
+
+
+def _claim(cwd: str) -> str | None:
+    """Ask the daemon which project owns this folder, keyed on the committed uid.
+
+    This runs before anything else so a moved or renamed folder rebinds its
+    existing project instead of being registered a second time. Detection by
+    path or folder name cannot do that - the identity has to travel with the
+    repository, which is what manifest.json's project_id is for.
+    """
+    root, manifest = _find_manifest(cwd)
+    payload = {
+        "cwd": str(root or Path(cwd).resolve()),
+        "project_id": manifest.get("project_id"),
+        "slug": manifest.get("slug"),
+    }
+    result = _daemon("/api/hook/claim", "POST", payload)
+    action = result.get("action")
+    slug = result.get("slug")
+    if action == "rebound":
+        print(
+            f"[Memory MCP] Project '{slug}' moved here from "
+            f"{result.get('previous_path')} - re-bound, no duplicate created."
+        )
+    elif action == "created":
+        print(f"[Memory MCP] Registered project '{slug}' from its committed memory.")
+    return slug
+
+
+def _warn_if_ignored(snap: Path) -> None:
+    """Point out a snapshot git cannot carry - it defeats the whole point."""
+    try:
+        ignored = subprocess.run(
+            ["git", "check-ignore", "-q", snap.name],
+            cwd=snap.parent, capture_output=True, timeout=5,
+        ).returncode == 0
+    except Exception:  # noqa: BLE001 - no git, not a repo, whatever: stay quiet
+        return
+    if ignored:
+        print(
+            f"[Memory MCP] Warning: {snap.name}/ is gitignored in this repo, so "
+            f"this memory will never reach your teammates. Remove it from "
+            f".gitignore to share it."
+        )
+
+
 def _export(cwd: str) -> None:
-    slug = detect_project_from_cwd(cwd)
+    slug = _claim(cwd)
     if not slug:
         return
+    project = ProjectRepository().get(slug)
     categories = _daemon(f"/api/projects/{slug}/sync-export").get("categories", {})
     snap = _snapshot_dir(cwd, slug)
     snap.mkdir(parents=True, exist_ok=True)
@@ -57,16 +119,22 @@ def _export(cwd: str) -> None:
         elif path.exists():
             path.unlink()
 
+    # project_id is what makes this snapshot self-identifying: whoever reads it
+    # next - after a move, a rename, or a clone onto another machine - matches
+    # the project by uid instead of guessing from the folder.
     (snap / _MANIFEST).write_text(json.dumps({
-        "version": 1, "slug": slug, "categories": present,
+        "version": 1,
+        "project_id": project.project_uid if project else None,
+        "slug": slug, "categories": present,
         "exported_at": datetime.now(timezone.utc).isoformat(),
     }, indent=2))
     total = sum(len(v) for v in categories.values())
     print(f"[Memory MCP] Exported {total} memories to {snap}")
+    _warn_if_ignored(snap)
 
 
 def _import(cwd: str) -> None:
-    slug = detect_project_from_cwd(cwd)
+    slug = _claim(cwd)
     if not slug:
         return
     snap = _snapshot_dir(cwd, slug)
@@ -103,6 +171,24 @@ def _import(cwd: str) -> None:
         )
 
 
+def _log_failure(action: str, cwd: str) -> None:
+    """Append a failure to <data_dir>/sync.log.
+
+    The hooks send our stderr to /dev/null so a broken sync cannot pollute a
+    Claude turn - which also means a crash here is invisible. A circular import
+    once killed every export and import for weeks without a trace. Failures now
+    always leave a dated traceback behind.
+    """
+    try:
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with (settings.data_dir / "sync.log").open("a") as fh:
+            fh.write(f"\n=== {stamp} sync {action} --cwd {cwd} failed ===\n")
+            traceback.print_exc(file=fh)
+    except Exception:  # noqa: BLE001 - logging must never be the thing that breaks
+        pass
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(prog="memory-mcp sync")
     parser.add_argument("action", choices=["export", "import"])
@@ -114,4 +200,4 @@ def main(argv=None) -> None:
         else:
             _import(args.cwd)
     except Exception:  # noqa: BLE001 - never break the hook or the Claude turn
-        pass
+        _log_failure(args.action, args.cwd)

@@ -23,6 +23,15 @@ When this MCP is active and a project session is running, Claude should AUTOMATI
 ### Auto-Rules Check
 - Before any significant operation → `memory_get_rules()` to ensure mandatory rules are followed and forbidden patterns are avoided
 
+### Pending imports (rules copied from another project)
+- `memory_session_start` returns `pending_adaptations` — rules imported from
+  another project that are **not yet in force**. Adapt them before relying on
+  any of them: rewrite each for this codebase (dropping the source project's
+  component names, paths and stack details), **ask the user** when a rule cannot
+  be translated without information only they have, then call
+  `memory_adapt_pending(memory_id, title, content)`. Use
+  `memory_discard_pending(memory_id, reason)` for rules that do not belong here.
+
 ### Session Lifecycle
 - At conversation start → `memory_session_start()`
 - At conversation end → `memory_session_end(session_id, summary)`

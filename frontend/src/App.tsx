@@ -9,6 +9,7 @@ import {
   Moon,
   Pencil,
   ShieldAlert,
+  Sparkles,
   Sun,
 } from "lucide-react";
 import type {
@@ -35,6 +36,7 @@ import { Tabs } from "./components/ui/Tabs";
 import { Button } from "./components/ui/Button";
 import { CommandPalette } from "./components/ui/CommandPalette";
 import { MemoriesTab } from "./components/MemoriesTab";
+import { PendingTab } from "./components/PendingTab";
 import { RulesTab } from "./components/RulesTab";
 import { SessionsTab } from "./components/SessionsTab";
 import {
@@ -50,7 +52,7 @@ import { TemplatesView } from "./components/TemplatesView";
 import { EditProjectDialog } from "./components/EditProjectDialog";
 import { BulkAddRuleDialog } from "./components/BulkAddRuleDialog";
 
-type TabValue = "memories" | "rules" | "sessions";
+type TabValue = "memories" | "rules" | "pending" | "sessions";
 
 interface EditorState {
   open: boolean;
@@ -78,6 +80,7 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
   const [tab, setTab] = useState<TabValue>("memories");
+  const [pendingCount, setPendingCount] = useState(0);
   const [view, setView] = useState<SidebarView>("projects");
   const isAdminView =
     view === "moderation" || view === "users" || view === "org-rules";
@@ -207,6 +210,19 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
     }
   }, [selectedSlug]);
 
+  const loadPendingCount = useCallback(async () => {
+    if (!selectedSlug) {
+      setPendingCount(0);
+      return;
+    }
+    try {
+      const res = await api.listPendingAdaptations(selectedSlug);
+      setPendingCount(res.total);
+    } catch {
+      setPendingCount(0); // a count is a hint, never a reason to break the view
+    }
+  }, [selectedSlug]);
+
   const loadSessions = useCallback(async () => {
     if (!selectedSlug) return;
     setSessionsLoading(true);
@@ -234,6 +250,13 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
   useEffect(() => {
     if (selectedSlug && tab === "sessions") void loadSessions();
   }, [selectedSlug, tab, loadSessions]);
+
+  // The pending count drives the tab label, so it loads with the project rather
+  // than only when its own tab is open - otherwise nothing would reveal that
+  // imports are sitting there un-adapted.
+  useEffect(() => {
+    void loadPendingCount();
+  }, [loadPendingCount]);
 
   // ----- actions -----
   const refreshAll = useCallback(() => {
@@ -580,6 +603,13 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
   const tabs = [
     { value: "memories", label: "Memories", icon: <BookText /> },
     { value: "rules", label: "Rules", icon: <ShieldAlert /> },
+    {
+      value: "pending",
+      // The count is the point: un-adapted imports are invisible everywhere
+      // else, so the tab label is the only place they announce themselves.
+      label: pendingCount > 0 ? `Pending (${pendingCount})` : "Pending",
+      icon: <Sparkles />,
+    },
     { value: "sessions", label: "Sessions", icon: <ListChecks /> },
   ];
 
@@ -787,6 +817,17 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
                   isAdmin={isAdmin}
                   onApprove={approveRule}
                   onRevoke={revokeRule}
+                />
+              )}
+
+              {tab === "pending" && (
+                <PendingTab
+                  projectSlug={selectedProject.slug}
+                  onChanged={() => {
+                    void loadPendingCount();
+                    void loadRules();
+                    void loadMemories();
+                  }}
                 />
               )}
 

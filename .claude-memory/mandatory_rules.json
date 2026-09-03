@@ -1,8 +1,12 @@
 [
   {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
     "category": "mandatory_rules",
     "content": "After fixing any bug in this project, you must update the local installation so the running daemon reflects the fix. Rebuild the frontend if it changed (cd frontend && npm run build), then run `uv run memory-mcp-setup` to reinstall the runtime/UI and reload the launchd daemon, and verify the daemon is healthy. A bug fix is not considered complete until the local installation has been updated.",
     "created_at": "2026-05-19T12:17:39.381259",
+    "created_by": null,
     "entities": [
       "UI"
     ],

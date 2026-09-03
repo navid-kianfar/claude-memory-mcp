@@ -17,6 +17,7 @@ import type {
   MemoryStatus,
   MemoryUpdate,
   Meta,
+  PendingAdaptationsResponse,
   PendingRulesResponse,
   Project,
   ProjectDetail,
@@ -363,7 +364,7 @@ export const api = {
 
   importRules(
     slug: string,
-    input: { source_project: string; memory_ids: string[] }
+    input: { source_project: string; memory_ids: string[]; pending?: boolean }
   ): Promise<ImportRulesResult> {
     return request<ImportRulesResult>(
       `/api/projects/${encodeURIComponent(slug)}/import-rules`,
@@ -425,6 +426,34 @@ export const api = {
   },
 
   // ---------- rule governance (admin) ----------
+
+  listPendingAdaptations(slug: string): Promise<PendingAdaptationsResponse> {
+    return request<PendingAdaptationsResponse>(
+      `/api/projects/${encodeURIComponent(slug)}/pending`
+    );
+  },
+
+  adaptPending(
+    slug: string,
+    mid: string,
+    input: { title: string; content: string; priority?: number }
+  ): Promise<{ status: string; memory: Memory }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/pending/${encodeURIComponent(mid)}/adapt`,
+      { method: "POST", body: JSON.stringify(input) }
+    );
+  },
+
+  discardPending(
+    slug: string,
+    mid: string,
+    reason?: string
+  ): Promise<{ status: string; discarded: string; title: string }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/pending/${encodeURIComponent(mid)}`,
+      { method: "DELETE", body: JSON.stringify({ reason: reason ?? null }) }
+    );
+  },
 
   listPendingRules(): Promise<PendingRulesResponse> {
     return request<PendingRulesResponse>("/api/rules/pending");

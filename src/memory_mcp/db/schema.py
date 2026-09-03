@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -38,7 +38,8 @@ def create_schema(conn: duckdb.DuckDBPyConnection) -> None:
             created_by      VARCHAR,
             approval_status VARCHAR DEFAULT 'approved',
             approved_by     VARCHAR,
-            approved_at     TIMESTAMP
+            approved_at     TIMESTAMP,
+            pending         BOOLEAN DEFAULT FALSE
         )
     """)
 
@@ -79,6 +80,7 @@ def create_schema(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_category ON memories (category)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories (status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_approval ON memories (approval_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_pending ON memories (pending)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_created ON memories (created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories (expires_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_provenance_memory ON provenance (memory_id)")
@@ -157,6 +159,27 @@ def migrate_v2_to_v3(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (3)")
 
 
+def migrate_v3_to_v4(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v3 -> v4: `pending`, the import-adaptation gate.
+
+    A memory copied in from another project starts pending: it is stored, but
+    kept out of the rule block, search, session context and the git snapshot
+    until an agent has rewritten it for THIS project. Every pre-existing memory
+    was written for the project it lives in, so all of them backfill to FALSE -
+    behavior is unchanged for anything already stored.
+    """
+    try:
+        conn.execute("ALTER TABLE memories ADD COLUMN pending BOOLEAN DEFAULT FALSE")
+    except Exception:
+        pass
+    try:
+        conn.execute("UPDATE memories SET pending = FALSE WHERE pending IS NULL")
+    except Exception:
+        pass
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_pending ON memories (pending)")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (4)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -188,6 +211,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 3:
         migrate_v2_to_v3(conn)
         version = 3
+    if version < 4:
+        migrate_v3_to_v4(conn)
+        version = 4
     return version
 
 

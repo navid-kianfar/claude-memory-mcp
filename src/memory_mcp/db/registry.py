@@ -14,6 +14,7 @@ import hashlib
 import secrets
 import sqlite3
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from memory_mcp.config import settings
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
     slug          TEXT PRIMARY KEY,
+    project_uid   TEXT,
     display_name  TEXT NOT NULL,
     description   TEXT,
     created_at    TEXT NOT NULL,
@@ -74,6 +76,11 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def new_project_uid() -> str:
+    """A fresh stable project identity."""
+    return str(uuid.uuid4())
+
+
 @contextmanager
 def registry_conn():
     """Open the SQLite registry, ensuring schema + legacy migration."""
@@ -104,6 +111,30 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         )
     if "remote_url" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN remote_url TEXT")
+    if "project_uid" not in cols:
+        # Stable identity, independent of slug and folder path. Written into the
+        # committed .claude-memory/manifest.json so a project survives being
+        # moved or renamed, on this machine and on a teammate's.
+        conn.execute("ALTER TABLE projects ADD COLUMN project_uid TEXT")
+    # Created here rather than in _SCHEMA: executescript runs before the ALTER
+    # above, so on an existing registry the column would not exist yet.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_uid "
+        "ON projects(project_uid) WHERE project_uid IS NOT NULL"
+    )
+    _backfill_project_uids(conn)
+
+
+def _backfill_project_uids(conn: sqlite3.Connection) -> None:
+    """Give every pre-existing project a uid, so identity works from now on."""
+    rows = conn.execute(
+        "SELECT slug FROM projects WHERE project_uid IS NULL OR project_uid = ''"
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE projects SET project_uid = ? WHERE slug = ?",
+            (new_project_uid(), row[0]),
+        )
 
 
 def _migrate_legacy_once(conn: sqlite3.Connection) -> None:

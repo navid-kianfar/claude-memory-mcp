@@ -6,13 +6,14 @@ from pathlib import Path
 import duckdb
 
 from memory_mcp.config import settings
+from memory_mcp.constants import PORTABLE_DB_NAME
 from memory_mcp.db.connection import get_connection, invalidate_path_cache
 from memory_mcp.db.schema import create_hnsw_index, create_schema, install_vss
 from memory_mcp.exceptions import ProjectNotFoundError
 from memory_mcp.repositories import ProjectRepository
 from memory_mcp.utils.text import slugify, validate_slug
 
-PORTABLE_DB_NAME = ".memory-mcp.duckdb"
+__all__ = ["PortableService", "PORTABLE_DB_NAME"]
 
 
 class PortableService:

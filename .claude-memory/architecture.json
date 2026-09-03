@@ -1,0 +1,68 @@
+[
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "architecture",
+    "content": "Each project has a project_uid (UUID) in the SQLite registry, written into .claude-memory/manifest.json as `project_id`. Because that file is committed, moving or renaming a project folder re-binds the existing project instead of registering a duplicate, and a teammate's clone resolves to the same project. Resolution order in ProjectService.claim_folder: uid match (matched/rebound) -> same-slug project bound to this same folder or with no uid (adopted) -> otherwise a new project on a free slug (created). detect_project_from_cwd checks the manifest uid first, then falls back to portable DB / bound path / folder name. The sync CLI calls POST /api/hook/claim before import or export, and session-start.sh runs `sync import` BEFORE auto-register so auto-register can never create the duplicate first.",
+    "created_at": "2026-09-03T07:00:12.537722",
+    "created_by": null,
+    "entities": [
+      "BEFORE",
+      "CLI",
+      "DB",
+      "POST",
+      "ProjectService",
+      "SQLite",
+      "UUID"
+    ],
+    "expires_at": null,
+    "id": "276b6d82-df22-4c2e-b088-e9901d8f8043",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "assistant",
+    "status": "active",
+    "summary": "Each project has a project_uid (UUID) in the SQLite registry, written into",
+    "tags": [
+      "identity",
+      "sync",
+      "registry"
+    ],
+    "title": "Project identity is the project_uid in the committed manifest, not the path",
+    "updated_at": "2026-09-03T07:00:12.537722"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "architecture",
+    "content": "Each project has a project_uid (UUID) in the SQLite registry, written into .claude-memory/manifest.json as `project_id`. Because that file is committed, moving or renaming a project folder re-binds the existing project instead of registering a duplicate, and a teammate's clone resolves to the same project. Resolution order in ProjectService.claim_folder: uid match (matched/rebound) -> same-slug project bound to this same folder or with no uid (adopted) -> otherwise a new project on a free slug (created). detect_project_from_cwd checks the manifest uid first, then falls back to portable DB / bound path / folder name. The sync CLI calls POST /api/hook/claim before import or export, and session-start.sh runs `sync import` BEFORE auto-register so auto-register can never create the duplicate first.",
+    "created_at": "2026-09-03T07:00:03.341941",
+    "created_by": null,
+    "entities": [
+      "BEFORE",
+      "CLI",
+      "DB",
+      "POST",
+      "ProjectService",
+      "SQLite",
+      "UUID"
+    ],
+    "expires_at": null,
+    "id": "6c4ccfd5-d341-4f3f-b972-03023a26bd54",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "assistant",
+    "status": "active",
+    "summary": "Each project has a project_uid (UUID) in the SQLite registry, written into",
+    "tags": [
+      "identity",
+      "sync",
+      "registry"
+    ],
+    "title": "Project identity is the project_uid in the committed manifest, not the path",
+    "updated_at": "2026-09-03T07:00:03.341941"
+  }
+]

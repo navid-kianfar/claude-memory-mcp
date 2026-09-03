@@ -594,3 +594,106 @@ class TaskRepository:
                 [task_id],
             ).fetchone()
         return int(row[0]) if row and row[0] is not None else 0
+
+
+class OutboxRepository:
+    """The bridge's durable half: what changed locally and has not been mirrored.
+
+    Deliberately separate from TaskRepository and deliberately ignorant of asoode:
+    it records that a task changed, never where it should go. The bridge resolves
+    the board at flush time, so a task mutation cannot depend on the registry, a
+    network, or a credential being present.
+    """
+
+    def enqueue(self, project: str, task_id: str, op: str, payload: dict | None = None) -> str:
+        """Record a mutation to mirror. Returns the outbox row id.
+
+        Never raises into a caller's transaction: failing to record a mirror must
+        not fail the local edit that is the actual source of truth.
+        """
+        import json
+        import uuid
+
+        row_id = str(uuid.uuid4())
+        try:
+            with connect(project) as conn:
+                conn.execute(
+                    "INSERT INTO task_outbox (id, task_id, op, payload) VALUES (?, ?, ?, ?)",
+                    [row_id, task_id, op, json.dumps(payload or {})],
+                )
+        except Exception:
+            return ""
+        return row_id
+
+    def pending(self, project: str, limit: int = 200) -> list[dict]:
+        """Un-mirrored mutations, oldest first - order matters per task."""
+        import json
+
+        try:
+            with connect(project) as conn:
+                rows = conn.execute(
+                    "SELECT id, task_id, op, payload, attempts, last_error "
+                    "FROM task_outbox ORDER BY created_at ASC, rowid ASC LIMIT ?",
+                    [limit],
+                ).fetchall()
+        except Exception:
+            return []
+        return [
+            {
+                "id": r[0], "task_id": r[1], "op": r[2],
+                "payload": json.loads(r[3]) if r[3] else {},
+                "attempts": r[4], "last_error": r[5],
+            }
+            for r in rows
+        ]
+
+    def resolve(self, project: str, row_id: str) -> None:
+        """Mirrored successfully - drop the row."""
+        with connect(project) as conn:
+            conn.execute("DELETE FROM task_outbox WHERE id = ?", [row_id])
+
+    def fail(self, project: str, row_id: str, error: str) -> None:
+        """Mirroring failed. The row STAYS so the next flush retries it."""
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE task_outbox SET attempts = attempts + 1, last_error = ? "
+                "WHERE id = ?",
+                [error[:500], row_id],
+            )
+
+    def depth(self, project: str) -> int:
+        try:
+            with connect(project) as conn:
+                return conn.execute("SELECT count(*) FROM task_outbox").fetchone()[0]
+        except Exception:
+            return 0
+
+    # ---------- the local task -> remote task map ----------
+
+    def remote_id(self, project: str, task_id: str, link_id: int) -> str | None:
+        try:
+            with connect(project) as conn:
+                row = conn.execute(
+                    "SELECT remote_task_id FROM task_sync WHERE task_id = ? AND link_id = ?",
+                    [task_id, link_id],
+                ).fetchone()
+        except Exception:
+            return None
+        return row[0] if row else None
+
+    def remember(
+        self, project: str, task_id: str, link_id: int, remote_task_id: str,
+        last_pushed_state: str | None = None,
+    ) -> None:
+        """Remember which remote task a local one became, so mirroring an edit
+        never has to re-POST a create just to recover the id."""
+        with connect(project) as conn:
+            conn.execute(
+                "INSERT INTO task_sync (task_id, link_id, remote_task_id, "
+                "last_pushed_state, updated_at) VALUES (?, ?, ?, ?, current_timestamp) "
+                "ON CONFLICT (task_id, link_id) DO UPDATE SET "
+                "remote_task_id = excluded.remote_task_id, "
+                "last_pushed_state = excluded.last_pushed_state, "
+                "updated_at = current_timestamp",
+                [task_id, link_id, remote_task_id, last_pushed_state],
+            )

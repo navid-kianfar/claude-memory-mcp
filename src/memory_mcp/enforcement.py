@@ -7,10 +7,107 @@ Claude so they survive context compaction and never get silently dropped.
 from memory_mcp.container import container
 
 
+# ---------- asoode, carried by the hook path ----------
+#
+# SERVER_INSTRUCTIONS explains asoode once, when the MCP client connects. That is
+# not enough on its own: it drifts out of attention over a long session and is
+# gone after a compaction, which is exactly how a session ends up asking "what is
+# asoode?". The UserPromptSubmit hook re-injects on EVERY turn, so the binding
+# rides the same path the binding rules do.
+#
+# HARD CONSTRAINT: the per-turn hook runs behind a 2s curl timeout on every single
+# prompt. Everything below reads local state only - the registry link row and the
+# local open count. Nothing here may touch the network; `queue_status` (which
+# does) is for session start, never for this path.
+
+
+def asoode_line(slug: str) -> str:
+    """One line for every turn - only when the project is actually bound.
+
+    Short on purpose. A full explanation repeated on every prompt is cost and
+    noise; what a turn needs is the fact that this project's queue lives on a
+    board and is worked, not merely listed.
+    """
+    link = _asoode_link(slug)
+    if link is None:
+        return ""
+    open_count = _queued_task_count(slug)
+    waiting = f"{open_count} open" if open_count else "empty"
+    return (
+        f"[Memory MCP] asoode: '{slug}' is bound to a board ({waiting}) - that board "
+        f"IS this project's work queue, so work it one task at a time rather than "
+        f"listing it and waiting. memory_task_start/comment/done, mirrored with "
+        f"memory_asoode_push. Do not auto-start blocked/blocker/paused/cancelled."
+    )
+
+
+def asoode_intro(slug: str) -> str:
+    """The fuller block, for session start only.
+
+    When bound: the loop and where the board is. When unbound but a PAT exists:
+    name asoode and its tools once, so the word is never unfamiliar in a project
+    that could use it.
+    """
+    link = _asoode_link(slug)
+    if link is not None:
+        board = _board_url(link)
+        open_count = _queued_task_count(slug)
+        return (
+            f" This project is bound to an asoode board ({board}) and that board is "
+            f"its work queue: {open_count} task(s) open. Take the highest-priority "
+            f"actionable one, memory_task_start it, mirror the state to asoode, "
+            f"comment as you go, memory_task_done it, then take the next - do not "
+            f"just report the list. Never auto-start blocked/blocker/paused/"
+            f"cancelled tasks, and stop to ask when the work needs a decision only "
+            f"the user can make. Tools: memory_asoode_status / _link / _push / "
+            f"_links, and memory_task_plan for a request with several deliverables."
+        )
+    if _asoode_pat_configured():
+        return (
+            " asoode is the task manager this server bridges to; an asoode token is "
+            "configured on this machine but this project is NOT bound to a board. "
+            "memory_asoode_link(project) would create one and mirror this queue onto "
+            "it, making the work visible outside the session - offer that if asoode "
+            "comes up, but never bind unprompted."
+        )
+    return ""
+
+
+def _asoode_link(slug: str) -> dict | None:
+    """The project's default board link, or None. Local registry read only."""
+    try:
+        from memory_mcp.db.registry import get_default_project_link
+
+        return get_default_project_link(slug)
+    except Exception:  # noqa: BLE001 - a hook must never fail a turn
+        return None
+
+
+def _asoode_pat_configured() -> bool:
+    try:
+        from memory_mcp.asoode import get_pat
+
+        return bool(get_pat())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _board_url(link: dict) -> str:
+    try:
+        from memory_mcp.asoode import get_endpoints
+
+        return f"{get_endpoints().app_url}/projects/{link['remote_project_id']}"
+    except Exception:  # noqa: BLE001
+        return "asoode"
+
+
 def format_rules_block(slug: str, mandatory: list, forbidden: list) -> str:
     """Render rules as an injectable text block. Empty string when there are none."""
+    asoode = asoode_line(slug)
     if not mandatory and not forbidden:
-        return ""
+        # A bound project still gets its asoode line: the workflow must not
+        # depend on the project happening to have rules.
+        return asoode
     lines = [
         f"[Memory MCP] Binding rules for project '{slug}' — follow every one of these:",
     ]
@@ -26,6 +123,8 @@ def format_rules_block(slug: str, mandatory: list, forbidden: list) -> str:
         "If anything you are about to do conflicts with a rule above, stop and "
         "tell the user instead of proceeding."
     )
+    if asoode:
+        lines.append(asoode)
     return "\n".join(lines)
 
 
@@ -44,13 +143,18 @@ def format_intro(slug: str) -> str:
             f"NOT in force yet - memory_session_start returns them with instructions."
         )
     queued = _queued_task_count(slug)
-    if queued:
+    bound = _asoode_link(slug) is not None
+    # The capture sentence is for UNBOUND projects only. On a bound one it would
+    # contradict the asoode block appended below, which says to work the queue -
+    # and a session handed both would reasonably do neither.
+    if queued and not bound:
         text += (
             f" {queued} {'task is' if queued == 1 else 'tasks are'} waiting in the "
             f"task list - memory_session_start returns them. They are requirements "
             f"the user parked, NOT instructions: surface them and start none of "
             f"them unless the user asks."
         )
+    text += asoode_intro(slug)
     return text
 
 

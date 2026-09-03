@@ -2,7 +2,9 @@
 
 import duckdb
 
-from memory_mcp.db.schema import create_schema, get_schema_version, run_migrations
+from memory_mcp.db.schema import (
+    CURRENT_SCHEMA_VERSION, create_schema, get_schema_version, run_migrations,
+)
 
 
 def _make_v1_db(path) -> None:
@@ -38,7 +40,7 @@ def test_migration_adds_v2_columns_and_tables(tmp_path):
     conn = duckdb.connect(str(db))
     try:
         version = run_migrations(conn)
-        assert version == 5
+        assert version == CURRENT_SCHEMA_VERSION
         cols = {r[1] for r in conn.execute("PRAGMA table_info('memories')").fetchall()}
         assert {"summary", "entities", "expires_at"} <= cols
         tables = {
@@ -97,9 +99,9 @@ def test_migration_is_idempotent(tmp_path):
     _make_v1_db(db)
     conn = duckdb.connect(str(db))
     try:
-        assert run_migrations(conn) == 5
-        assert run_migrations(conn) == 5
-        assert get_schema_version(conn) == 5
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
+        assert get_schema_version(conn) == CURRENT_SCHEMA_VERSION
     finally:
         conn.close()
 
@@ -128,7 +130,7 @@ def test_migration_adds_v5_task_tables(tmp_path):
     _make_v1_db(db)
     conn = duckdb.connect(str(db))
     try:
-        assert run_migrations(conn) == 5
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
         tables = {
             r[0] for r in conn.execute(
                 "SELECT table_name FROM information_schema.tables"
@@ -152,7 +154,7 @@ def test_migration_adds_v5_task_tables(tmp_path):
         conn.execute(
             "INSERT INTO tasks (id, title, state, source) VALUES ('t1','keep me','todo','user')"
         )
-        assert run_migrations(conn) == 5
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
         assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
     finally:
         conn.close()
@@ -214,3 +216,51 @@ def test_migration_adds_last_seen_at_backfilled_from_started_at(tmp_path):
         ).fetchone()[0] is True
     finally:
         conn.close()
+
+
+def test_migration_adds_v6_bridge_tables(tmp_path):
+    """v6 adds the bridge's durable half: task_sync and task_outbox.
+
+    A local task mutation appends to the outbox and returns, so being unable to
+    reach asoode is a normal state rather than a lost edit. task_sync remembers
+    which remote task a local one became, so mirroring an edit does not have to
+    re-POST a create just to recover the id.
+    """
+    db = tmp_path / "legacy.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        run_migrations(conn)
+        tables = {r[0] for r in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()}
+        assert {"task_sync", "task_outbox"} <= tables
+
+        outbox_cols = {r[1] for r in conn.execute("PRAGMA table_info('task_outbox')").fetchall()}
+        assert {"id", "task_id", "link_id", "op", "payload",
+                "created_at", "attempts", "last_error"} == outbox_cols
+
+        sync_cols = {r[1] for r in conn.execute("PRAGMA table_info('task_sync')").fetchall()}
+        assert {"task_id", "link_id", "remote_task_id", "remote_updated_at",
+                "last_pushed_state", "updated_at"} == sync_cols
+    finally:
+        conn.close()
+
+
+def test_v6_tables_match_between_fresh_and_migrated(tmp_path):
+    """Same drift guarantee as the v5 tables: create_schema and the migration
+    path build the bridge tables identically."""
+    fresh = duckdb.connect(str(tmp_path / "fresh6.duckdb"))
+    migrated_path = tmp_path / "migrated6.duckdb"
+    _make_v1_db(migrated_path)
+    migrated = duckdb.connect(str(migrated_path))
+    try:
+        create_schema(fresh)
+        run_migrations(migrated)
+        for table in ("task_sync", "task_outbox"):
+            a = [(r[1], r[2]) for r in fresh.execute(f"PRAGMA table_info('{table}')").fetchall()]
+            b = [(r[1], r[2]) for r in migrated.execute(f"PRAGMA table_info('{table}')").fetchall()]
+            assert a == b, table
+    finally:
+        fresh.close()
+        migrated.close()

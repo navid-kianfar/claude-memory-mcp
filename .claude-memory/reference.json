@@ -4,6 +4,35 @@
     "approved_at": null,
     "approved_by": null,
     "category": "reference",
+    "content": "A session opened on /Users/aslan_nejad/Desktop/DEV/smg/visitor-analytics/VisitorAnalytics1.0 does NOT talk to this server. ~/.claude.json has a project-scoped mcpServers override for that path pointing `memory` at a stdio process from a different repo \u2014 github.com/serkansmg/smg-claude-memory-mcp, checked out at ~/Desktop/DEV/smg/smg-claude-memory-mcp \u2014 with MEMORY_MCP_DATA_DIR=~/.memory-mcp. That fork is at v0.5.0 and contains zero asoode code and no task module, so a session there sees no asoode tools and no bound-board brief, no matter what ships here.\n\nEvery other project resolves `memory` from the top-level ~/.claude.json entry: http://127.0.0.1:8765/mcp, the launchd daemon (com.claude-memory-mcp.daemon) running ~/.claude-memory-mcp/runtime, v0.6.0, data dir ~/.claude-memory-mcp.\n\nThe two registries are separate stores. ~/.memory-mcp/registry.duckdb knows only va1-panel and visitoranalytics10, and points the latter at VisitorAnalytics1.0/.memory-mcp.duckdb (in-repo, 271 memories). The daemon's registry has its own visitoranalytics10.duckdb with 0 memories. So dropping the override without migrating that file would hand the project an empty memory.\n\nConsequence for diagnosis: when a session reports that asoode/tasks are missing, check which server it is actually bound to before suspecting this code. Commit 7e8ee77 (\"Teach every session what asoode is\") cannot reach a session on the fork \u2014 the fix ships in this server's SERVER_INSTRUCTIONS, which that session never loads.",
+    "created_at": "2026-09-04T00:30:09.892847",
+    "created_by": null,
+    "entities": [
+      "DEV",
+      "SMG"
+    ],
+    "expires_at": null,
+    "id": "18eadda2-cdb8-4949-bb6f-328869c08e62",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "assistant",
+    "status": "active",
+    "summary": "A session opened on /Users/aslan_nejad/Desktop/DEV/smg/visitor-analytics/VisitorAnalytics1",
+    "tags": [
+      "asoode",
+      "mcp-config",
+      "smg",
+      "diagnosis"
+    ],
+    "title": "One machine, two memory servers: the SMG fork shadows this one for VisitorAnalytics1.0",
+    "updated_at": "2026-09-04T00:30:09.892847"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "reference",
     "content": "Three Opus agents audited both codebases on 2026-09-03 and the findings are written down so neither repo needs re-reading.\n\nIn claude-memory-mcp:\n- docs/bridge/README.md \u2014 index + the short version\n- docs/bridge/01-asoode-analysis.md \u2014 asoode: the 20 existing MCP tools, Prisma data model (Group>Project>WorkPackage>WorkPackageList>WorkPackageTask, all uuid PKs), every task endpoint, the RabbitMQ->Socket.IO event pipeline with payloads, PAT auth, ports, verified gap list\n- docs/bridge/02-memory-mcp-analysis.md \u2014 this repo: layering, DuckDB+SQLite schemas, migration contract, project identity, the pending/adaptation subsystem, all three sync mechanisms, the remote gateway, daemon/UI, extension seams\n- docs/bridge/03-claude-ui-surfaces.md \u2014 Browser pane + .claude/launch.json is how you show asoode inside Claude; plugins have NO UI extension point; MCP Apps/ui:// unsupported in Claude Code\n- docs/bridge/04-design-decisions.md \u2014 the agreed design\n\nIn asoode (/Users/aslan_nejad/Desktop/DEV/achasoft/asoode):\n- docs/claude-bridge-backlog.md \u2014 prioritised asoode changes with file:line change sites (P0 blockers through P3 MCP tool coverage)\n- docs/claude-bridge-prompt.md \u2014 the session-opening prompt for the asoode work\n\nLine numbers are from 2026-09-03 working trees. Where a doc and the code disagree, the code wins \u2014 correct the doc.",
     "created_at": "2026-09-03T07:46:27.976828",
     "created_by": null,
@@ -37,6 +66,35 @@
     ],
     "title": "Bridge audit docs \u2014 read these instead of re-reading either repo",
     "updated_at": "2026-09-03T07:46:27.976828"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "reference",
+    "content": "A session opened on /Users/aslan_nejad/Desktop/DEV/smg/visitor-analytics/VisitorAnalytics1.0 does NOT talk to this server. ~/.claude.json has a project-scoped mcpServers override for that path pointing `memory` at a stdio process from a different repo - github.com/serkansmg/smg-claude-memory-mcp, checked out at ~/Desktop/DEV/smg/smg-claude-memory-mcp - with MEMORY_MCP_DATA_DIR=~/.memory-mcp. That fork is at v0.5.0 and contains zero asoode code and no task module, so a session there sees no asoode tools and no bound-board brief, no matter what ships here.\n\nEvery other project resolves `memory` from the top-level ~/.claude.json entry: http://127.0.0.1:8765/mcp, the launchd daemon (com.claude-memory-mcp.daemon) running ~/.claude-memory-mcp/runtime, v0.6.0, data dir ~/.claude-memory-mcp.\n\nThe two registries are separate stores. ~/.memory-mcp/registry.duckdb knows only va1-panel and visitoranalytics10, and points the latter at VisitorAnalytics1.0/.memory-mcp.duckdb (in-repo, 271 memories). The daemon's registry has its own visitoranalytics10.duckdb with 0 memories. So dropping the override without migrating that file would hand the project an empty memory.\n\nConsequence for diagnosis: when a session reports that asoode or tasks are missing, check which server it is actually bound to before suspecting this code. Commit 7e8ee77 (\"Teach every session what asoode is\") cannot reach a session on the fork - the fix ships in this server's SERVER_INSTRUCTIONS, which that session never loads.",
+    "created_at": "2026-09-04T00:30:19.108320",
+    "created_by": null,
+    "entities": [
+      "DEV",
+      "SMG"
+    ],
+    "expires_at": null,
+    "id": "ab5afb7a-f762-4fe8-b94f-2208f62ec805",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "assistant",
+    "status": "active",
+    "summary": "A session opened on /Users/aslan_nejad/Desktop/DEV/smg/visitor-analytics/VisitorAnalytics1",
+    "tags": [
+      "asoode",
+      "mcp-config",
+      "smg",
+      "diagnosis"
+    ],
+    "title": "One machine, two memory servers: the SMG fork shadows this one for VisitorAnalytics1.0",
+    "updated_at": "2026-09-04T00:30:19.108320"
   },
   {
     "approval_status": "approved",

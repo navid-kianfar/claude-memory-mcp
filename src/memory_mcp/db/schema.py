@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -21,11 +21,11 @@ def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
 # daemon, many Claude sessions, and a task that must be picked up by exactly one
 # of them. See TaskService.claim_next.
 #
-# Phase 2 (the asoode bridge) adds two more tables here - `task_sync`
-# (task_id, link_id, remote_task_id, last_pushed_hash, remote_updated_at,
-# sync_state) and `task_outbox` (id, task_id, link_id, op, payload, created_at,
-# attempts, last_error) - so a local mutation returns immediately and a flusher
-# drains the outbox whenever the remote is reachable. Neither exists yet.
+# `task_sync` and `task_outbox` below are the asoode bridge's durable half: a
+# local mutation appends an outbox row and returns immediately, and a flusher
+# drains it whenever the remote is reachable. Being unable to reach asoode is a
+# normal state, not an error - the local store is always the source of truth and
+# never waits on a network call.
 _TASK_DDL = (
     """
     CREATE TABLE IF NOT EXISTS tasks (
@@ -86,10 +86,42 @@ _TASK_DDL = (
 )
 
 
+_SYNC_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS task_sync (
+        task_id           VARCHAR NOT NULL,
+        link_id           INTEGER NOT NULL,
+        remote_task_id    VARCHAR,
+        remote_updated_at TIMESTAMP,
+        last_pushed_state VARCHAR,
+        updated_at        TIMESTAMP DEFAULT current_timestamp,
+        PRIMARY KEY (task_id, link_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS task_outbox (
+        id         VARCHAR PRIMARY KEY,
+        task_id    VARCHAR NOT NULL,
+        -- Null until a flush resolves which board the task routes to. The local
+        -- store must not have to know about links to record that something
+        -- changed, or every task mutation would depend on the registry.
+        link_id    INTEGER,
+        op         VARCHAR NOT NULL,
+        payload    VARCHAR,
+        created_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+        attempts   INTEGER NOT NULL DEFAULT 0,
+        last_error VARCHAR
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_outbox_task ON task_outbox(task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_outbox_created ON task_outbox(created_at)",
+)
+
+
 def create_task_tables(conn: duckdb.DuckDBPyConnection) -> None:
-    """Create the task store. Shared by create_schema and migrate_v4_to_v5 so a
+    """Create the task store. Shared by create_schema and the migrations so a
     fresh DB and a migrated one can never drift apart."""
-    for ddl in _TASK_DDL:
+    for ddl in (*_TASK_DDL, *_SYNC_DDL):
         try:
             conn.execute(ddl)
         except Exception:
@@ -296,6 +328,23 @@ def migrate_v4_to_v5(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (5)")
 
 
+def migrate_v5_to_v6(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v5 -> v6: the bridge's outbox and remote-id map.
+
+    `task_sync` remembers which remote task a local one became, so mirroring an
+    edit does not have to re-POST a create just to recover the id. `task_outbox`
+    holds mutations not yet mirrored, so a task edited while asoode is unreachable
+    is mirrored later rather than lost.
+
+    Both are created by create_task_tables, so a fresh v6 DB and a migrated v5 one
+    are identical. Existing tasks get no task_sync rows: the first flush after
+    this creates them, and a create with the task's externalRef returns whatever
+    already exists rather than duplicating it.
+    """
+    create_task_tables(conn)
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (6)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -333,6 +382,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 5:
         migrate_v4_to_v5(conn)
         version = 5
+    if version < 6:
+        migrate_v5_to_v6(conn)
+        version = 6
     return version
 
 

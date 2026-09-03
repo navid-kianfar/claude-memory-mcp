@@ -221,7 +221,7 @@ A React single-page app served by the daemon at `/`:
 
 ## MCP tools
 
-All 60 tools:
+All 63 tools:
 
 | Area | Tools |
 |------|-------|
@@ -238,7 +238,7 @@ All 60 tools:
 | Portability | `memory_attach_project`, `memory_make_portable`, `memory_sync` |
 | Import/Export | `memory_export`, `memory_import`, `memory_import_claude_md` |
 | Model | `memory_model_info`, `memory_set_model`, `memory_reembed` |
-| asoode bridge | `memory_asoode_status`, `memory_asoode_link`, `memory_asoode_push`, `memory_asoode_links` |
+| asoode bridge | `memory_asoode_status`, `memory_asoode_boards`, `memory_asoode_attach`, `memory_asoode_link`, `memory_asoode_import`, `memory_asoode_push`, `memory_asoode_links` |
 | Misc | `memory_provenance`, `memory_version`, `memory_check_update` |
 
 ## Configuration
@@ -265,12 +265,46 @@ The access token is stored **once per machine**, not per project — every proje
 that talks to the same asoode reuses it:
 
 ```bash
-memory-mcp asoode set-pat          # prompts; the input is not echoed
-memory-mcp asoode check            # prove it reaches the server
-memory-mcp asoode link <slug>      # create/find the project + board
-memory-mcp asoode push <slug>      # mirror the task list onto it
-memory-mcp asoode open <slug>      # open that board already signed in
+memory-mcp asoode set-pat                     # prompts; the input is not echoed
+memory-mcp asoode check                       # prove it reaches the server
+memory-mcp asoode boards                      # list boards you can attach to
+memory-mcp asoode attach <slug> --ref <ref>   # link an EXISTING board
+memory-mcp asoode link <slug>                 # CREATE a project + board
+memory-mcp asoode import <slug>               # pull board tasks into the local list
+memory-mcp asoode push <slug>                 # full reconciliation (rarely needed)
+memory-mcp asoode open <slug>                 # open that board already signed in
 ```
+
+### One project, many boards
+
+**A project links to work packages, never to an asoode project.** asoode has no
+route attaching a task to a project — `project → work package → list → task` is
+the only path — so a monorepo links to *one board per app*:
+
+```bash
+memory-mcp asoode attach myrepo --ref myrepo:backend                 # the default
+memory-mcp asoode attach myrepo --ref myrepo:frontend --not-default
+```
+
+`memory_task_add(title=..., target="myrepo:frontend")` names the board a task
+belongs to; a task with no `target` routes to the **default** link. A wrong name
+fails the create rather than landing on the wrong board.
+
+Use `attach` when the boards already exist, which is the normal case — `link`
+*creates* one, so running it on a set-up workspace adds a duplicate beside the
+real boards.
+
+### Mirroring is automatic
+
+Every task create, update, completion and comment queues to an outbox and flushes
+**off-thread**, so a local write never waits on the network. If asoode is
+unreachable the write still succeeds and the row is retried on the next flush —
+an unreachable server is a delay, not a lost edit.
+
+`import` is the other direction, for tasks created in asoode by a person. It is
+**import-only**: a remote change overwrites the local title and state, and local
+edits are not merged back. The two sides are never "in sync" — don't describe
+them that way.
 
 `open` uses asoode's `/auth/token` deep link, which carries the token in the URL
 **fragment** — never sent to the server, never in an access log, never leaked

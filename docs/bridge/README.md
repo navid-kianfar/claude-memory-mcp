@@ -10,11 +10,18 @@ work on this. **Where a doc and the code disagree, the code wins** — correct t
 | [`03-claude-ui-surfaces.md`](03-claude-ui-surfaces.md) | Whether asoode can be shown inside Claude. Answer: the Browser pane + `.claude/launch.json`; **plugins have no UI extension point** |
 | [`04-design-decisions.md`](04-design-decisions.md) | What we decided and why — local-first tasks, optional configurable asoode, offline outbox, live socket inbound, and the DuckDB-vs-JSON answer |
 | [`05-session-prompt.md`](05-session-prompt.md) | The session-opening prompt for **this** repo's work (Phase 1: the standalone task store) |
+| [`06-agent-team.md`](06-agent-team.md) | **Phase 3** — a standing team of specialised agents (pm / design / frontend / backend / e2e) sharing the memory and the task board |
 
 The asoode-side work lives in that repo:
 
 - `../../../asoode/docs/claude-bridge-backlog.md` — prioritised changes with file:line change sites
 - `../../../asoode/docs/claude-bridge-prompt.md` — the session-opening prompt
+
+## Sequence
+
+**Phase 1** — the standalone task store in memory-mcp, working with no asoode at all.
+**Phase 2** — the optional asoode bridge (outbox out, live socket in). Gated on asoode's P0 items.
+**Phase 3** — the agent team, which depends on Phase 1 for shared state and handoffs.
 
 ## The short version
 

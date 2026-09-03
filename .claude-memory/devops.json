@@ -1,0 +1,31 @@
+[
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "devops",
+    "content": "A DuckDB file has a ~5 MB floor even with one row, and the suite creates a project per test - so pytest's default retention of the last few tmp_path runs left ~2 GB behind per run and filled the disk mid-session. tests/conftest.py's autouse temp_data_dir fixture now shutil.rmtree's the data dir on teardown: 2 GB -> 28 MB per run.",
+    "created_at": "2026-09-03T20:35:50.039105",
+    "created_by": null,
+    "entities": [
+      "DuckDB",
+      "GB",
+      "MB"
+    ],
+    "expires_at": null,
+    "id": "b03b8050-3d67-4a22-bff2-729a0a8d4441",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "user",
+    "status": "active",
+    "summary": "A DuckDB file has a ~5 MB floor even with one row, and the suite creates a project per test...",
+    "tags": [
+      "tests",
+      "duckdb",
+      "disk"
+    ],
+    "title": "Test suite must delete its DuckDB files, not just its tmp_path",
+    "updated_at": "2026-09-03T20:35:50.039105"
+  }
+]

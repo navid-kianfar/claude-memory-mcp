@@ -1,5 +1,11 @@
 # Session prompt — memory-mcp side (tasks module)
 
+> **Phase 1 is done.** This prompt is kept as the record of what was asked for;
+> `02-memory-mcp-analysis.md` §8 records what actually landed, including the parts
+> that grew in the building (asoode-style list mode and task dialog, sub-tasks,
+> manual reordering, convert/delete). Phase 2 — the asoode bridge itself — is
+> still unbuilt, and its seams are marked in the code.
+
 Paste this to open the memory-mcp work session.
 
 ---
@@ -32,7 +38,7 @@ tasks(id, title, description, state, priority, assignee, labels[],
       claimed_by, claimed_at, lease_expires_at,
       created_at, updated_at, done_at, archived_at)
 task_comments(id, task_id, body, kind, author, created_at)
-task_time_entries(id, task_id, begin, end, manual)
+task_time_entries(id, task_id, begin_at, end_at, manual)   -- `end` is a DuckDB reserved word
 ```
 
 - `state` vocabulary is **asoode's, verbatim**, so the later mapping is lossless:
@@ -52,7 +58,7 @@ automatically from the category enum (`constants.py:24`), so a new category woul
 writing tasks into the committed `.claude-memory/*.json` snapshot. Keeping tasks out of the snapshot is
 the whole reason the "JSON grows to 100MB" problem can't happen.
 
-Follow the migration contract exactly (`db/schema.py:159-177` is the model): bump
+Follow the migration contract exactly (`migrate_v3_to_v4`, `db/schema.py:240-258`, is the model): bump
 `CURRENT_SCHEMA_VERSION`, add `migrate_v4_to_v5`, chain it in `run_migrations`, add the tables to
 `create_schema` too, wrap each DDL in `try/except` (DuckDB has no `ADD COLUMN IF NOT EXISTS`), and
 never rely on a column DEFAULT for backfill. Add a test in the shape of
@@ -120,7 +126,7 @@ server-side in asoode (assign to a bot member, or a `claimed:<host>` label). Tha
 
 Follow the contract in `server.py:1-8` — resolve project, build request model, call service, return a
 dict; body in a nested `def _run():` returning `_safe(_run)`. Model them on `memory_pending_*`
-(`server.py:692-743`).
+(`server.py:706-762`).
 
 `memory_task_add`, `memory_task_list`, `memory_task_get`, `memory_task_update` (title/description/
 state/priority/assignee/dates/estimate), `memory_task_comment`, `memory_task_start`, `memory_task_stop`
@@ -136,7 +142,7 @@ ask. That prompt-contract is the entire feature; get the wording right.
 
 Extend `SessionService.start()` to include queued tasks in `SessionContext`, alongside the existing
 `pending_adaptations`. Add a task brief the way `services/adaptation.py:36-44` does — a pure function
-of `(project, tasks)`. Update the session-start hook text in `enforcement.py:39-45` to carry the count.
+of `(project, tasks)`. Update the session-start hook text in `enforcement.py:32-54` to carry the count.
 
 ### 5 · Web API + UI
 
@@ -166,10 +172,10 @@ Leave these obviously-shaped for Phase 2, but empty:
   `remote_work_package_id`, `state_list_map`, and a `match_paths` JSON column that routes a monorepo's
   subpaths to different boards.
 - Credentials will reuse `registry.get_credential/set_credential`
-  (`app_settings['cred:<url>']`, `registry.py:238-252`) — URL-keyed, never in the committed snapshot.
+  (`app_settings['cred:<url>']`, `registry.py:264-281`) — URL-keyed, never in the committed snapshot.
 - `task_sync` and `task_outbox` tables (outbox-based offline mirroring).
 - Phase 2's inbound is a **live Socket.IO subscription** in an asyncio task in `daemon.build_app()`'s
-  lifespan (`daemon.py:22-24`). ⚠️ **No background-task mechanism exists anywhere in `src/` today** —
+  lifespan (`daemon.py:20-42`). ⚠️ **No background-task mechanism exists anywhere in `src/` today** —
   that is net-new, and it will need a socket client dependency (`httpx` is already a dep; a Socket.IO
   client is not).
 
@@ -183,7 +189,7 @@ Leave these obviously-shaped for Phase 2, but empty:
 - **Failures in hook-facing paths must be swallowed and logged, never surfaced** (`sync_cli.py:174-189`
   — a silent circular import once "killed every export and import for weeks without a trace").
 - `create_hnsw_index()` is only called on fresh DB creation, **not after migrations**
-  (`db/connection.py:75-76`) — don't assume the index exists.
+  (`db/connection.py:74-78`) — don't assume the index exists.
 - **Mandatory project rule:** after any bug fix, rebuild the frontend if it changed
   (`cd frontend && npm run build`), run `uv run memory-mcp-setup` to reinstall the runtime/UI and reload
   the launchd daemon, and verify it's healthy. A fix isn't done until the local install is updated.

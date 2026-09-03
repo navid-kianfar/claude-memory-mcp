@@ -1,6 +1,7 @@
 # Tasks + asoode bridge — design decisions
 
-> Status: **brainstorm, agreed direction.** Nothing implemented yet.
+> Status: **Phase 1 implemented** (the standalone task store, including D5's claim); the asoode
+> bridge itself is still unbuilt. See `02-memory-mcp-analysis.md` §8 for exactly what landed.
 > Read `01-asoode-analysis.md`, `02-memory-mcp-analysis.md`, `03-claude-ui-surfaces.md` for the
 > underlying facts. This file records what we decided and why.
 
@@ -14,8 +15,8 @@ Two needs that look like one:
 - **Management** — create tasks with descriptions and assignees, change status while working, add
   comments (a rule, decision, reminder), track time start/stop. Shared, rich, visible off this Mac.
 
-asoode already does the second one completely. memory-mcp does neither today — it has **no task concept
-at all**.
+asoode already does the second one completely. memory-mcp had **no task concept at all** when this was
+written; Phase 1 has since built the first need in full and the local half of the second.
 
 ## 2. Decisions
 
@@ -35,7 +36,7 @@ per-link configuration. Nothing is hardcoded to `localhost:3000`.
 **Copy the gateway's rule verbatim** (`project_service.py:66-67`): a project is **never auto-bound**.
 Linking is always an explicit action, so a private project can't leak to someone's server.
 
-**Copy the credential storage verbatim** (`registry.py:238-252`): the PAT goes in
+**Copy the credential storage verbatim** (`registry.py:264-281`): the PAT goes in
 `app_settings['cred:<base_url>']`, keyed by URL not by project, and **never** enters the committable
 `.claude-memory/` snapshot.
 
@@ -51,7 +52,7 @@ Chosen over polling. **This makes asoode's socket auth a hard blocker, not a nic
 gateway trusts an unverified `?userId=` query param (`01-asoode-analysis.md` §4.3), and it mis-targets
 recipients so project-level members receive nothing (§4.2).
 
-The subscription lives in an **asyncio task in `daemon.build_app()`'s lifespan** (`daemon.py:22-24`) —
+The subscription lives in an **asyncio task in `daemon.build_app()`'s lifespan** (`daemon.py:20-42`, whose docstring records the shape) —
 no such mechanism exists today, it must be built. It only talks HTTP/WS, so the macOS TCC constraint
 that forces `sync_cli` into Claude's process does **not** apply to it.
 
@@ -140,7 +141,9 @@ tasks(
   created_at, updated_at, done_at, archived_at
 )
 task_comments(id, task_id, body, kind, author, created_at, remote_id)
-task_time_entries(id, task_id, begin, end, manual, remote_id)
+task_time_entries(id, task_id, begin_at, end_at, manual, remote_id)
+  -- NB: begin_at/end_at, not begin/end - `end` is a DuckDB reserved word and
+  -- cannot be used as a column name even in a plain SELECT.
 task_sync(task_id, link_id, remote_task_id, last_pushed_hash, remote_updated_at, sync_state)
 task_outbox(id, task_id, link_id, op, payload, created_at, attempts, last_error)
 
@@ -182,7 +185,7 @@ Credentials are **not** in this table — they stay in `app_settings['cred:<base
 | Service | `task_service.py`, `bridge_service.py` (outbox + reconcile), `asoode_client.py` | `remote_backend.py:20-114` for the HTTP client |
 | MCP tools | `memory_task_add/list/update/comment/start/stop/link_target/...` | `memory_pending_*` (`server.py:692-743`) |
 | HTTP | `/api/projects/{slug}/tasks[...]`, `/links[...]` | `_api(fn)`, `build_routes()` |
-| UI | a **Tasks** tab | `PendingTab.tsx`; target picker modelled on `ImportRulesPanel.tsx` |
+| UI | a **Tasks** tab | **built**: `TaskListView.tsx` + `TaskDialog.tsx`, ported from asoode's `WpListView.tsx` / `TaskModal*.tsx`. A Phase 2 target picker can still follow `ImportRulesPanel.tsx` |
 | Background | socket subscriber + outbox flusher | ⚠️ **new** — asyncio task in `daemon.py` lifespan |
 | Session | `SessionContext.queued_tasks` + a task brief | `pending_adaptations` + `services/adaptation.py:36-44` |
 

@@ -32,6 +32,25 @@ When this MCP is active and a project session is running, Claude should AUTOMATI
   `memory_adapt_pending(memory_id, title, content)`. Use
   `memory_discard_pending(memory_id, reason)` for rules that do not belong here.
 
+### Tasks (a separate store, not memories)
+
+`tasks` / `task_comments` / `task_time_entries` live in their own DuckDB tables — deliberately **not**
+a `MemoryCategory`, so they never enter the committed `.claude-memory/*.json` snapshot.
+
+- **A queued task is a requirement, not an instruction.** `memory_session_start` returns
+  `queued_tasks`; surface what is waiting and then leave it alone. Do not start a task because it is
+  in the list — the user decides what gets picked up and when.
+- "Add a task to do X" means `memory_task_add(title="X")` **and nothing else** — keep doing what you
+  were doing. Being able to record a requirement without derailing the session is the entire feature.
+- Out-of-scope work you notice → `memory_task_add(..., source="claude")`. Queue it and say so.
+- Working one: `memory_task_start` → `memory_task_done`. `memory_task_stop` only stops the clock and
+  leaves the state alone; say what happened with `memory_task_update(task_id, state=...)`.
+- Notes on a task → `memory_task_comment(task_id, body, kind="note"|"rule"|"decision"|"reminder")`.
+  Anything that outlives the task still belongs in `memory_add_rule` / `memory_store`.
+- **Several sessions may share a project.** Take a task with `memory_task_claim_next(session_id)`
+  ONLY when you have finished what you were doing — never mid-task, and never just because the list
+  is non-empty. `memory_session_end` releases whatever you held.
+
 ### Session Lifecycle
 - At conversation start → `memory_session_start()`
 - At conversation end → `memory_session_end(session_id, summary)`

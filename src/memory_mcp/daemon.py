@@ -18,7 +18,18 @@ from memory_mcp.web import build_routes
 
 
 def build_app() -> Starlette:
-    """Compose the UI routes and the MCP streamable-http app into one ASGI app."""
+    """Compose the UI routes and the MCP streamable-http app into one ASGI app.
+
+    Phase 2 seam - the asoode bridge's inbound half belongs here, and nowhere
+    else. There is no scheduler, background runner or webhook receiver anywhere
+    in this codebase today: the only periodic triggers are the Claude Code shell
+    hooks and launchd's KeepAlive. A live task subscription therefore has to be
+    a new asyncio task wrapped around this lifespan (plus an outbox flusher for
+    the outbound half). It only ever talks HTTP/WebSocket, so unlike the project
+    folder I/O in sync_cli.py it is NOT blocked by the launchd daemon's macOS
+    TCC sandbox and can live in this process. It needs a Socket.IO client, which
+    is not currently a dependency - httpx is, but it does not speak Socket.IO.
+    """
     mcp_app = mcp.http_app(path="/mcp")
     routes = [*build_routes(), Mount("/", app=mcp_app)]
     return Starlette(routes=routes, lifespan=mcp_app.lifespan)

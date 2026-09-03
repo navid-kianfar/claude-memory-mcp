@@ -25,6 +25,10 @@ class MemoryNotFoundError(MemoryMCPError):
     """Raised when a memory with the given ID or title does not exist."""
 
 
+class TaskNotFoundError(MemoryMCPError):
+    """Raised when a task with the given ID does not exist."""
+
+
 class InvalidCategoryError(MemoryMCPError):
     """Raised when an unknown memory category is provided."""
 

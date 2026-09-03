@@ -1,0 +1,30 @@
+[
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "feedback",
+    "content": "The first Tasks tab had a 'Queue a requirement' capture bar above a list whose every group already had an inline '+ Add task' row. The user asked what it was for - it was a leftover from the pre-asoode version and did exactly what the To Do group's add row did. Removed it. Note the follow-on: deleting it created a dead end when the list was empty, so the list view is now always rendered (it forces a To Do group) rather than being replaced by an empty-state card.",
+    "created_at": "2026-09-03T20:35:49.937531",
+    "created_by": null,
+    "entities": [
+      "+ Add task",
+      "Queue a requirement"
+    ],
+    "expires_at": null,
+    "id": "22a47ebe-d00e-48e0-b5d3-bdf12fd6780b",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "user",
+    "status": "active",
+    "summary": "The first Tasks tab had a 'Queue a requirement' capture bar above a list whose every group already had an...",
+    "tags": [
+      "ui",
+      "feedback",
+      "tasks"
+    ],
+    "title": "Don't ship two doors to the same action",
+    "updated_at": "2026-09-03T20:35:49.937531"
+  }
+]

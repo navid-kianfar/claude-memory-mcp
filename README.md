@@ -35,6 +35,11 @@ meaning, and automatically loaded every time you start a session.
   re-typing them. New projects can also import selected rules from any
   existing project — those arrive **pending**, and are rewritten for the
   project they land in before they take effect.
+- **A task list** — drop a requirement into the project's list at any moment
+  without interrupting whatever Claude is doing. Claude surfaces what is waiting
+  at the start of a session and starts nothing unless you ask. Tasks have
+  states, priorities, labels, due dates, sub-tasks, comments and a stopwatch,
+  and live in their own tables — never in the committed memory snapshot.
 - **CLAUDE.md import** — convert an existing `CLAUDE.md` into structured memory.
 - **Portable & team-shareable** — move a project's database into the repo,
   commit it, and teammates get the same memory after `git pull`. A project's
@@ -165,6 +170,32 @@ Rules imported from another project are the one exception: they are **not**
 enforced until they have been adapted to the project they were imported into
 (see [Importing rules from another project](#importing-rules-from-another-project)).
 
+### Tasks
+
+A task is a **queued requirement, not an instruction**. That is the whole point:
+you can record something mid-session without derailing the work in progress.
+
+```text
+memory_task_add("Rewrite the CSV exporter")   # queued; Claude keeps doing what it was doing
+memory_task_list()                            # what is waiting, open work first
+memory_task_start(task_id)                    # clock on, moves it to in_progress
+memory_task_done(task_id, note="shipped")     # closes it and stops the clock
+```
+
+`memory_session_start` returns the open tasks together with a brief telling
+Claude to **report them and start none of them** unless you ask. Work Claude
+notices but is not doing goes in with `source="claude"`.
+
+When several Claude sessions share one project, a task is taken by claiming it:
+`memory_task_claim_next(session_id)` — which a session calls only when it has
+finished what it was doing, never mid-task. The claim is a conditional UPDATE
+whose rowcount decides the winner, held on a 30-minute lease that renews as the
+task is worked on, and released by `memory_session_end`.
+
+The **Tasks** tab in the management UI is a full list view: tasks grouped by
+state, drag to reorder, inline add per group, and a task dialog with in-place
+editing, sub-tasks, comments, an activity trail and time tracking.
+
 ### Importing an existing CLAUDE.md
 
 ```text
@@ -182,13 +213,15 @@ A React single-page app served by the daemon at `/`:
 
 - Browse, search, create, edit, and archive memories in every category
 - Manage mandatory/forbidden rules
+- Work the task list: grouped by state, drag to reorder, and a task dialog with
+  sub-tasks, comments, activity and a stopwatch
 - Inspect sessions and per-memory provenance/history
 - Switch and set the active project
 - `Cmd+K` command palette for fast navigation and actions
 
 ## MCP tools
 
-All 42 tools:
+All 55 tools:
 
 | Area | Tools |
 |------|-------|
@@ -198,6 +231,8 @@ All 42 tools:
 | Governance (server mode) | `memory_approve_rule`, `memory_revoke_rule` |
 | Templates | `memory_list_templates`, `memory_create_template`, `memory_add_template_rule`, `memory_apply_template`, `memory_import_rules` |
 | Imported rules | `memory_pending_list`, `memory_adapt_pending`, `memory_discard_pending` |
+| Tasks | `memory_task_add`, `memory_task_list`, `memory_task_get`, `memory_task_update`, `memory_task_comment`, `memory_task_start`, `memory_task_stop`, `memory_task_done`, `memory_task_archive`, `memory_task_convert`, `memory_task_delete` |
+| Task claims (multi-session) | `memory_task_claim_next`, `memory_task_release` |
 | Sessions | `memory_session_start`, `memory_session_end` |
 | Portability | `memory_attach_project`, `memory_make_portable`, `memory_sync` |
 | Import/Export | `memory_export`, `memory_import`, `memory_import_claude_md` |
@@ -281,6 +316,10 @@ Pass `pending=False` to import text you already know is project-neutral.
 - **Layered design** — repositories → services → container → tool/HTTP layer
 - **React + Vite + Tailwind** — the management UI, with hand-built
   shadcn-style components
+
+Tasks live in their own DuckDB tables (`tasks`, `task_comments`,
+`task_time_entries`) rather than as a memory category — which is what keeps them
+out of the git-committed `.claude-memory/` snapshot however long the list grows.
 
 Existing databases are migrated automatically on open, so older project
 databases keep working after upgrades.

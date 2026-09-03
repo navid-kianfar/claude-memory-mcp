@@ -2,7 +2,7 @@
 
 import duckdb
 
-from memory_mcp.db.schema import get_schema_version, run_migrations
+from memory_mcp.db.schema import create_schema, get_schema_version, run_migrations
 
 
 def _make_v1_db(path) -> None:
@@ -38,7 +38,7 @@ def test_migration_adds_v2_columns_and_tables(tmp_path):
     conn = duckdb.connect(str(db))
     try:
         version = run_migrations(conn)
-        assert version == 4
+        assert version == 5
         cols = {r[1] for r in conn.execute("PRAGMA table_info('memories')").fetchall()}
         assert {"summary", "entities", "expires_at"} <= cols
         tables = {
@@ -97,9 +97,9 @@ def test_migration_is_idempotent(tmp_path):
     _make_v1_db(db)
     conn = duckdb.connect(str(db))
     try:
-        assert run_migrations(conn) == 4
-        assert run_migrations(conn) == 4
-        assert get_schema_version(conn) == 4
+        assert run_migrations(conn) == 5
+        assert run_migrations(conn) == 5
+        assert get_schema_version(conn) == 5
     finally:
         conn.close()
 
@@ -116,5 +116,101 @@ def test_migration_adds_v4_pending_column_defaulting_to_false(tmp_path):
         assert "pending" in cols
         pending = conn.execute("SELECT pending FROM memories WHERE id = 'm1'").fetchone()
         assert pending[0] is False
+    finally:
+        conn.close()
+
+
+def test_migration_adds_v5_task_tables(tmp_path):
+    """The task store appears on an existing DB, memories are untouched, and a
+    second run changes nothing - tasks live in their own tables so they never
+    reach the committed .claude-memory snapshot."""
+    db = tmp_path / "legacy.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        assert run_migrations(conn) == 5
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT table_name FROM information_schema.tables"
+            ).fetchall()
+        }
+        assert {"tasks", "task_comments", "task_time_entries"} <= tables
+
+        cols = {r[1] for r in conn.execute("PRAGMA table_info('tasks')").fetchall()}
+        assert {
+            "id", "title", "description", "state", "priority", "assignee", "labels",
+            "due_at", "begin_at", "end_at", "estimated_minutes", "parent_id",
+            "position", "source", "triage", "claimed_by", "claimed_at",
+            "lease_expires_at", "created_at", "updated_at", "done_at",
+            "archived_at",
+        } == cols
+
+        # The pre-existing memory survived the upgrade untouched.
+        assert conn.execute("SELECT id, title FROM memories").fetchone() == ("m1", "t")
+
+        # Idempotent: re-running keeps the version and does not drop the rows.
+        conn.execute(
+            "INSERT INTO tasks (id, title, state, source) VALUES ('t1','keep me','todo','user')"
+        )
+        assert run_migrations(conn) == 5
+        assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_fresh_schema_matches_migrated_schema(tmp_path):
+    """create_schema and the migration path must produce the same task tables -
+    a fresh install and an upgraded one cannot be allowed to drift."""
+    fresh = duckdb.connect(str(tmp_path / "fresh.duckdb"))
+    migrated_path = tmp_path / "migrated.duckdb"
+    _make_v1_db(migrated_path)
+    migrated = duckdb.connect(str(migrated_path))
+    try:
+        create_schema(fresh)
+        run_migrations(migrated)
+        for table in ("tasks", "task_comments", "task_time_entries"):
+            a = [(r[1], r[2]) for r in fresh.execute(f"PRAGMA table_info('{table}')").fetchall()]
+            b = [(r[1], r[2]) for r in migrated.execute(f"PRAGMA table_info('{table}')").fetchall()]
+            assert a == b, table
+    finally:
+        fresh.close()
+        migrated.close()
+
+
+def test_migration_adds_last_seen_at_backfilled_from_started_at(tmp_path):
+    """v5 alters the existing sessions table. A session with no timestamp at all
+    would look infinitely stale to the claim's lease check, so the backfill is
+    explicit rather than left to the column DEFAULT."""
+    db = tmp_path / "legacy.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        conn.execute("""
+            CREATE TABLE sessions (
+                id VARCHAR PRIMARY KEY, started_at TIMESTAMP NOT NULL,
+                ended_at TIMESTAMP, summary VARCHAR,
+                memories_created INTEGER, memories_accessed INTEGER, metadata JSON
+            )
+        """)
+        conn.execute(
+            "INSERT INTO sessions (id, started_at) VALUES ('s1', current_timestamp)"
+        )
+        run_migrations(conn)
+
+        cols = {r[1] for r in conn.execute("PRAGMA table_info('sessions')").fetchall()}
+        assert "last_seen_at" in cols
+        started, last_seen = conn.execute(
+            "SELECT started_at, last_seen_at FROM sessions WHERE id = 's1'"
+        ).fetchone()
+        assert last_seen == started
+
+        # Idempotent, and a re-run must not stomp a fresher heartbeat.
+        conn.execute(
+            "UPDATE sessions SET last_seen_at = last_seen_at + INTERVAL 5 MINUTE"
+        )
+        run_migrations(conn)
+        assert conn.execute(
+            "SELECT last_seen_at > started_at FROM sessions WHERE id = 's1'"
+        ).fetchone()[0] is True
     finally:
         conn.close()

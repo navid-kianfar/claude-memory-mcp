@@ -27,6 +27,12 @@ import type {
   RotateTokenResult,
   RulesResponse,
   Session,
+  Task,
+  TaskActivityEntry,
+  TaskDetail,
+  TaskInput,
+  TaskListResponse,
+  TaskUpdate,
   Template,
   TemplateInput,
   TemplateItem,
@@ -421,6 +427,128 @@ export const api = {
   rotateUserToken(id: string): Promise<RotateTokenResult> {
     return request<RotateTokenResult>(
       `/api/users/${encodeURIComponent(id)}/rotate-token`,
+      { method: "POST" }
+    );
+  },
+
+  // ---------- tasks ----------
+
+  listTasks(
+    slug: string,
+    opts: {
+      includeDone?: boolean;
+      includeArchived?: boolean;
+      parentId?: string;
+      state?: string;
+      source?: string;
+    } = {}
+  ): Promise<TaskListResponse> {
+    const q = new URLSearchParams();
+    if (opts.includeDone) q.set("include_done", "true");
+    if (opts.includeArchived) q.set("include_archived", "true");
+    if (opts.parentId) q.set("parent_id", opts.parentId);
+    if (opts.state) q.set("state", opts.state);
+    if (opts.source) q.set("source", opts.source);
+    q.set("limit", "500");
+    const qs = q.toString();
+    return request<TaskListResponse>(
+      `/api/projects/${encodeURIComponent(slug)}/tasks${qs ? `?${qs}` : ""}`
+    );
+  },
+
+  createTask(slug: string, input: TaskInput): Promise<{ status: string; task: Task }> {
+    return request(`/api/projects/${encodeURIComponent(slug)}/tasks`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  getTask(slug: string, tid: string): Promise<TaskDetail> {
+    return request<TaskDetail>(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}`
+    );
+  },
+
+  updateTask(
+    slug: string,
+    tid: string,
+    input: TaskUpdate
+  ): Promise<{ status: string; task: Task; changed: string[] }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}`,
+      { method: "PUT", body: JSON.stringify(input) }
+    );
+  },
+
+  commentTask(
+    slug: string,
+    tid: string,
+    input: { body: string; kind?: string; author?: string }
+  ): Promise<{ status: string }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}/comments`,
+      { method: "POST", body: JSON.stringify(input) }
+    );
+  },
+
+  startTask(slug: string, tid: string): Promise<TaskDetail> {
+    return request<TaskDetail>(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}/start`,
+      { method: "POST" }
+    );
+  },
+
+  stopTask(slug: string, tid: string): Promise<TaskDetail> {
+    return request<TaskDetail>(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}/stop`,
+      { method: "POST" }
+    );
+  },
+
+  doneTask(slug: string, tid: string, note?: string): Promise<TaskDetail> {
+    return request<TaskDetail>(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}/done`,
+      { method: "POST", body: JSON.stringify({ note: note ?? null }) }
+    );
+  },
+
+  convertTaskToTop(slug: string, tid: string): Promise<{ status: string; task: Task }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}/convert`,
+      { method: "POST" }
+    );
+  },
+
+  deleteTask(slug: string, tid: string): Promise<{ status: string; deleted: string }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}`,
+      { method: "DELETE" }
+    );
+  },
+
+  reorderTasks(slug: string, ids: string[]): Promise<{ status: string; reordered: number }> {
+    return request(`/api/projects/${encodeURIComponent(slug)}/tasks/reorder`, {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+  },
+
+  taskActivity(slug: string, tid: string): Promise<{ activity: TaskActivityEntry[] }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}/activity`
+    );
+  },
+
+  releaseTask(slug: string, tid: string): Promise<{ status: string; task: Task }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}/release`,
+      { method: "POST" }
+    );
+  },
+
+  archiveTask(slug: string, tid: string): Promise<{ status: string; task: Task }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}/archive`,
       { method: "POST" }
     );
   },

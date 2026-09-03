@@ -10,6 +10,7 @@ from memory_mcp.services.export_import_service import ExportImportService
 from memory_mcp.services.model_service import ModelService
 from memory_mcp.services.update_service import UpdateService
 from memory_mcp.services.claude_md_service import ClaudeMdService
+from memory_mcp.services.task_service import TaskService
 from memory_mcp.services.template_service import TemplateService
 from memory_mcp.services.sync_service import SyncService
 
@@ -25,6 +26,7 @@ __all__ = [
     "ModelService",
     "UpdateService",
     "ClaudeMdService",
+    "TaskService",
     "TemplateService",
     "SyncService",
 ]

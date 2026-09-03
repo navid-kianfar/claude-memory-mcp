@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -10,6 +10,90 @@ def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSTALL vss;")
     conn.execute("LOAD vss;")
     conn.execute("SET hnsw_enable_experimental_persistence = true;")
+
+
+# Task tables (v5). Deliberately NOT a MemoryCategory: SYNC_CATEGORIES is derived
+# automatically from the category enum (constants.py), so a task category would
+# immediately start writing every task into the committed .claude-memory/ JSON
+# snapshot. Keeping tasks in their own tables is what keeps that snapshot small.
+#
+# claimed_by/claimed_at/lease_expires_at implement the multi-session claim: one
+# daemon, many Claude sessions, and a task that must be picked up by exactly one
+# of them. See TaskService.claim_next.
+#
+# Phase 2 (the asoode bridge) adds two more tables here - `task_sync`
+# (task_id, link_id, remote_task_id, last_pushed_hash, remote_updated_at,
+# sync_state) and `task_outbox` (id, task_id, link_id, op, payload, created_at,
+# attempts, last_error) - so a local mutation returns immediately and a flusher
+# drains the outbox whenever the remote is reachable. Neither exists yet.
+_TASK_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS tasks (
+        id                VARCHAR PRIMARY KEY,
+        title             VARCHAR NOT NULL,
+        description       VARCHAR,
+        state             VARCHAR NOT NULL DEFAULT 'todo',
+        priority          INTEGER DEFAULT 0,
+        assignee          VARCHAR,
+        labels            VARCHAR[],
+        due_at            TIMESTAMP,
+        begin_at          TIMESTAMP,
+        end_at            TIMESTAMP,
+        estimated_minutes INTEGER,
+        parent_id         VARCHAR,
+        position          INTEGER DEFAULT 0,
+        source            VARCHAR NOT NULL DEFAULT 'user',
+        triage            BOOLEAN DEFAULT FALSE,
+        claimed_by        VARCHAR,
+        claimed_at        TIMESTAMP,
+        lease_expires_at  TIMESTAMP,
+        created_at        TIMESTAMP DEFAULT current_timestamp,
+        updated_at        TIMESTAMP DEFAULT current_timestamp,
+        done_at           TIMESTAMP,
+        archived_at       TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS task_comments (
+        id         VARCHAR PRIMARY KEY,
+        task_id    VARCHAR NOT NULL,
+        body       VARCHAR NOT NULL,
+        kind       VARCHAR NOT NULL DEFAULT 'note',
+        author     VARCHAR,
+        created_at TIMESTAMP DEFAULT current_timestamp
+    )
+    """,
+    # `end` is a DuckDB reserved word and cannot be used as a column name even
+    # quoted-free in a SELECT, so the clock columns are begin_at/end_at - also
+    # matching the date columns on `tasks`. end_at IS NULL means "running".
+    """
+    CREATE TABLE IF NOT EXISTS task_time_entries (
+        id       VARCHAR PRIMARY KEY,
+        task_id  VARCHAR NOT NULL,
+        begin_at TIMESTAMP NOT NULL,
+        end_at   TIMESTAMP,
+        manual   BOOLEAN DEFAULT FALSE
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks (state)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks (source)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_triage ON tasks (triage)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks (parent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_claimed ON tasks (claimed_by)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks (created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_task_comments_task ON task_comments (task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_task_time_task ON task_time_entries (task_id)",
+)
+
+
+def create_task_tables(conn: duckdb.DuckDBPyConnection) -> None:
+    """Create the task store. Shared by create_schema and migrate_v4_to_v5 so a
+    fresh DB and a migrated one can never drift apart."""
+    for ddl in _TASK_DDL:
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass
 
 
 def create_schema(conn: duckdb.DuckDBPyConnection) -> None:
@@ -65,7 +149,8 @@ def create_schema(conn: duckdb.DuckDBPyConnection) -> None:
             summary           VARCHAR,
             memories_created  INTEGER DEFAULT 0,
             memories_accessed INTEGER DEFAULT 0,
-            metadata          JSON
+            metadata          JSON,
+            last_seen_at      TIMESTAMP
         )
     """)
 
@@ -85,6 +170,8 @@ def create_schema(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories (expires_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_provenance_memory ON provenance (memory_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_provenance_op ON provenance (operation)")
+
+    create_task_tables(conn)
 
     # Record schema version
     conn.execute(
@@ -180,6 +267,35 @@ def migrate_v3_to_v4(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (4)")
 
 
+def migrate_v4_to_v5(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v4 -> v5: the task store.
+
+    Three new tables plus one column on `sessions`. `memories` is untouched, so
+    every existing memory keeps behaving exactly as before. Tasks are queued
+    requirements with their own lifecycle (state, comments, time entries); they
+    are NOT memories and NOT a MemoryCategory, which is what keeps them out of
+    the committed .claude-memory/ snapshot.
+
+    `sessions.last_seen_at` is the free heartbeat behind the multi-session claim
+    - every tool call already reaches the daemon. Existing sessions are
+    backfilled explicitly from started_at rather than left to the column
+    DEFAULT, which is version-sensitive: a session with no timestamp at all
+    would look infinitely stale.
+    """
+    create_task_tables(conn)
+    try:
+        conn.execute("ALTER TABLE sessions ADD COLUMN last_seen_at TIMESTAMP")
+    except Exception:
+        pass
+    try:
+        conn.execute(
+            "UPDATE sessions SET last_seen_at = started_at WHERE last_seen_at IS NULL"
+        )
+    except Exception:
+        pass
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (5)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -214,6 +330,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 4:
         migrate_v3_to_v4(conn)
         version = 4
+    if version < 5:
+        migrate_v4_to_v5(conn)
+        version = 5
     return version
 
 

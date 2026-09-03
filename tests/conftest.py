@@ -1,5 +1,7 @@
 """Test fixtures for memory-mcp tests."""
 
+import shutil
+
 import pytest
 
 from memory_mcp.config import settings
@@ -22,6 +24,11 @@ def temp_data_dir(tmp_path):
     conn_mod._initialized_dbs.clear()
     conn_mod.invalidate_path_cache()
     settings.data_dir = original
+
+    # Delete the DuckDB files this test made. pytest keeps the last few runs of
+    # tmp_path, and a DuckDB file has a ~5 MB floor even with one row - a suite
+    # that creates a project per test otherwise leaves gigabytes behind.
+    shutil.rmtree(tmp_path / "memory-mcp", ignore_errors=True)
 
 
 @pytest.fixture

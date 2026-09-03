@@ -20,8 +20,9 @@ from memory_mcp.enforcement import rules_digest
 from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.exceptions import MemoryMCPError, MemoryNotFoundError
 from memory_mcp.models import (
-    MemoryCategory, StoreMemoryRequest, UpdateMemoryRequest, SearchRequest,
-    MemoryFilter, Pagination, RULE_CATEGORIES, rule_category,
+    CreateTaskRequest, MemoryCategory, StoreMemoryRequest, UpdateMemoryRequest,
+    SearchRequest, MemoryFilter, Pagination, RULE_CATEGORIES, TaskFilter,
+    TaskSource, TaskState, UpdateTaskRequest, rule_category,
 )
 
 # Load persisted state at startup
@@ -52,6 +53,21 @@ DURING the conversation:
     "active_rules" reminder - keep honoring it.
   - Use memory_search to recall prior context before answering questions about
     past decisions.
+
+TASKS are a separate thing from memories: a list of requirements the user has
+parked. memory_session_start returns them as `queued_tasks`.
+  - They are QUEUED, NOT INSTRUCTIONS. Surface what is waiting at the start of a
+    session, then leave it alone. Do not start a task because it is in the list -
+    the user decides what gets picked up and when.
+  - When the user asks for one: memory_task_start, then memory_task_done.
+    memory_task_stop only stops the clock and leaves the state alone.
+  - "Add a task to do X" means memory_task_add(title="X") and nothing else -
+    keep doing what you were doing. Recording a requirement is precisely how the
+    user avoids interrupting the work in progress.
+  - Out-of-scope work you noticed goes in with memory_task_add(source='claude').
+  - Several sessions may share a project, so a task is taken by claiming it:
+    memory_task_claim_next(session_id) ONLY when you have finished what you were
+    doing. A busy session must not claim. memory_session_end releases claims.
 
 AT THE END of the conversation, call memory_session_end with a summary so the
 next session has continuity.
@@ -740,6 +756,341 @@ def memory_discard_pending(
     def _run():
         slug = _resolve(project)
         return container.memory_service.discard_pending(slug, memory_id, reason)
+    return _safe(_run)
+
+
+# ---------- Tasks ----------
+#
+# The task list is how the user records a requirement WITHOUT interrupting a
+# session: they add it, it waits, and the next session start surfaces it. Every
+# tool below therefore treats a task as something QUEUED, never as an
+# instruction - see services/task_brief.py for the brief that says so.
+#
+# Tasks are local-only in Phase 1: unlike memories, they have no counterpart on
+# an org server, so these tools do not take the `_remote(slug)` gateway branch.
+# When the asoode bridge lands, mirroring happens through an outbox below the
+# service, not by routing the tool elsewhere.
+
+
+@mcp.tool()
+def memory_task_add(
+    title: str,
+    description: str | None = None,
+    priority: int = 0,
+    labels: list[str] | None = None,
+    assignee: str | None = None,
+    due_at: str | None = None,
+    estimated_minutes: int | None = None,
+    parent_id: str | None = None,
+    source: str = "user",
+    project: str | None = None,
+) -> dict:
+    """Queue a requirement in this project's task list.
+
+    THIS QUEUES WORK - IT DOES NOT START IT. A task added here is a requirement
+    parked for later, not an instruction and not permission to begin. When the
+    user says "add a task to do X", add it and carry on with what you were
+    doing; do not start X unless they ask you to in the same breath. That is the
+    entire point of the list: the user can record something mid-session without
+    derailing the work in progress.
+
+    source='user' (default) means the user asked for it - use this whenever the
+    requirement came from them. source='claude' means you queued it yourself:
+    out-of-scope work you noticed and are deliberately not doing now. Say that
+    you queued it rather than acting on it.
+
+    Dates are ISO 8601 strings. priority is 0-3.
+    """
+    def _run():
+        slug = _resolve(project)
+        req = CreateTaskRequest(
+            project=slug,
+            title=title,
+            description=description,
+            priority=priority,
+            labels=labels or [],
+            assignee=assignee,
+            due_at=due_at,
+            estimated_minutes=estimated_minutes,
+            parent_id=parent_id,
+            source=TaskSource(source),
+        )
+        task = container.task_service.create(req)
+        return {
+            "status": "ok",
+            "task": task.model_dump(mode="json"),
+            "note": (
+                "Queued, not started. Continue with the current work unless the "
+                "user asks for this one."
+            ),
+        }
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_list(
+    state: str | None = None,
+    source: str | None = None,
+    parent_id: str | None = None,
+    include_subtasks: bool = False,
+    include_done: bool = False,
+    include_archived: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+    project: str | None = None,
+) -> dict:
+    """List this project's tasks, what is still open first.
+
+    Finished, cancelled and archived tasks are hidden unless asked for, and so
+    are sub-tasks - they belong to their parent. Pass parent_id to list one
+    task's sub-tasks, or include_subtasks=True for a flat list. `meta` carries per-task comment and
+    sub-task counts, minutes tracked, and whether a clock is running. These are
+    queued requirements: report them, do not start them.
+    """
+    def _run():
+        slug = _resolve(project)
+        filters = TaskFilter(
+            state=TaskState(state) if state else None,
+            source=source,
+            parent_id=parent_id,
+            include_subtasks=include_subtasks,
+            include_done=include_done,
+            include_archived=include_archived,
+        )
+        result = container.task_service.list_tasks(slug, filters, limit, offset)
+        return {
+            "project": slug,
+            "total": result.total,
+            "open": result.open_count,
+            "limit": limit,
+            "offset": offset,
+            "running": result.running_ids,
+            "meta": {tid: m.model_dump(mode="json") for tid, m in result.meta.items()},
+            "tasks": [t.model_dump(mode="json") for t in result.tasks],
+        }
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_get(task_id: str, project: str | None = None) -> dict:
+    """One task with its comments, time entries, and minutes spent so far."""
+    def _run():
+        slug = _resolve(project)
+        return container.task_service.detail(slug, task_id).model_dump(mode="json")
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_update(
+    task_id: str,
+    title: str | None = None,
+    description: str | None = None,
+    state: str | None = None,
+    priority: int | None = None,
+    assignee: str | None = None,
+    labels: list[str] | None = None,
+    due_at: str | None = None,
+    begin_at: str | None = None,
+    end_at: str | None = None,
+    estimated_minutes: int | None = None,
+    project: str | None = None,
+) -> dict:
+    """Change a task. Only the fields you pass are touched.
+
+    state is one of: todo, in_progress, done, paused, blocked, cancelled,
+    duplicate, incomplete, blocker. Setting it to done stamps done_at; moving it
+    back off done clears it. begin_at/end_at are the PLANNED window - actual
+    time comes from memory_task_start / memory_task_stop.
+    """
+    def _run():
+        slug = _resolve(project)
+        req = UpdateTaskRequest(
+            project=slug,
+            task_id=task_id,
+            title=title,
+            description=description,
+            state=TaskState(state) if state else None,
+            priority=priority,
+            assignee=assignee,
+            labels=labels,
+            due_at=due_at,
+            begin_at=begin_at,
+            end_at=end_at,
+            estimated_minutes=estimated_minutes,
+        )
+        task, changed = container.task_service.update(req)
+        return {
+            "status": "ok",
+            "task": task.model_dump(mode="json"),
+            "changed": changed,
+        }
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_comment(
+    task_id: str,
+    body: str,
+    kind: str = "note",
+    author: str | None = None,
+    project: str | None = None,
+) -> dict:
+    """Add a comment to a task.
+
+    kind says what the comment IS, so it is not read as chatter later:
+    'note' (default), 'rule', 'decision', or 'reminder'. Anything that outlives
+    the task - a project-wide rule, a decision that shapes future work - belongs
+    in memory_add_rule / memory_store as well.
+    """
+    def _run():
+        slug = _resolve(project)
+        comment = container.task_service.comment(slug, task_id, body, kind, author)
+        return {"status": "ok", "comment": comment.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_start(task_id: str, project: str | None = None) -> dict:
+    """Start the clock on a task and move it to in_progress.
+
+    Call this when the user has picked the task, not when you notice it. Safe to
+    repeat: an already-running task keeps its open time entry rather than
+    starting a second one. A finished task is reopened.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.task_service.start(slug, task_id).model_dump(mode="json")
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_stop(task_id: str, project: str | None = None) -> dict:
+    """Stop the clock on a task.
+
+    The state is deliberately left as it is - stopping the clock says nothing
+    about whether the work is paused, blocked or finished. Say which with
+    memory_task_update(task_id, state=...) or memory_task_done(task_id).
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.task_service.stop(slug, task_id).model_dump(mode="json")
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_done(
+    task_id: str, note: str | None = None, project: str | None = None,
+) -> dict:
+    """Mark a task done. Stops a running clock and stamps done_at.
+
+    An optional note is stored as a comment on the task - what was actually
+    done, or what is left over.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.task_service.done(slug, task_id, note).model_dump(mode="json")
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_archive(task_id: str, project: str | None = None) -> dict:
+    """Take a task out of the list without deleting it.
+
+    Archived tasks drop out of the default listing and out of the session brief,
+    but stay in the database and can still be listed with include_archived=True.
+    """
+    def _run():
+        slug = _resolve(project)
+        task = container.task_service.archive(slug, task_id)
+        return {"status": "ok", "task": task.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_convert(task_id: str, project: str | None = None) -> dict:
+    """Promote a sub-task to a task of its own.
+
+    It leaves its parent's progress and joins the top-level list, where the
+    session brief and the claim can see it.
+    """
+    def _run():
+        slug = _resolve(project)
+        task = container.task_service.convert_to_task(slug, task_id)
+        return {"status": "ok", "task": task.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_delete(task_id: str, project: str | None = None) -> dict:
+    """Delete a task permanently, with its comments and time entries.
+
+    This does NOT archive - the row is gone. Prefer memory_task_archive, which
+    takes a task out of the list but keeps it findable; use this only when the
+    user asks for the task to be removed for good. Any sub-tasks are promoted to
+    top-level rather than deleted along with it.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.task_service.delete(slug, task_id)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_claim_next(session_id: str, project: str | None = None) -> dict:
+    """Take the next available task in this project for this session.
+
+    CALL THIS WHEN YOU HAVE FINISHED WHAT YOU WERE DOING - NEVER IN THE MIDDLE
+    OF WORK. Several Claude sessions may be running against this project at
+    once, and a task must be picked up by exactly one of them. Nothing routes
+    work to you: you ask for it, and you only ask when you are idle. A busy
+    session that asks anyway takes work it cannot start, and blocks the session
+    that could have.
+
+    Also do not call it speculatively at session start just because the list is
+    non-empty - queued tasks are surfaced there to be reported to the user, not
+    collected. Claim when the user has pointed you at the list, or when you have
+    finished the thing you were asked to do and are picking up the next one.
+
+    Pass the session_id returned by memory_session_start. Returns the claimed
+    task, or claimed=false when nothing is available. The claim is held on a
+    30-minute lease that renews whenever you touch the task, and is dropped
+    automatically by memory_session_end.
+    """
+    def _run():
+        slug = _resolve(project)
+        task = container.task_service.claim_next(slug, session_id)
+        if task is None:
+            return {
+                "claimed": False,
+                "project": slug,
+                "message": "No unclaimed task is waiting.",
+            }
+        return {
+            "claimed": True,
+            "project": slug,
+            "task": task.model_dump(mode="json"),
+            "next_step": (
+                "Call memory_task_start to clock on, then memory_task_done when "
+                "it is finished. memory_task_release hands it back untouched."
+            ),
+        }
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_release(
+    task_id: str, session_id: str | None = None, project: str | None = None,
+) -> dict:
+    """Give a claimed task back so another session can pick it up.
+
+    Use this when you claimed something you are not going to do after all.
+    Passing session_id releases only your own claim, never another session's.
+    Finishing or archiving a task releases it for you.
+    """
+    def _run():
+        slug = _resolve(project)
+        task = container.task_service.release(slug, task_id, session_id)
+        return {"status": "ok", "task": task.model_dump(mode="json")}
     return _safe(_run)
 
 

@@ -4,8 +4,12 @@
   "slug": "claude-memory-mcp",
   "categories": [
     "decision",
+    "project_plan",
     "architecture",
-    "mandatory_rules"
+    "devops",
+    "mandatory_rules",
+    "feedback",
+    "reference"
   ],
-  "exported_at": "2026-09-03T04:05:43.424717+00:00"
+  "exported_at": "2026-09-03T17:35:58.169654+00:00"
 }

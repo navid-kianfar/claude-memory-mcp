@@ -9,6 +9,8 @@ from memory_mcp.repositories import (
     MemoryRepository, ProjectRepository, SessionRepository,
 )
 from memory_mcp.services.rules_service import RulesService
+from memory_mcp.services.task_brief import task_brief
+from memory_mcp.services.task_service import TaskService
 
 AUTO_CLOSE_SUMMARY = "[Auto-closed: session was not properly ended (context overflow or crash)]"
 
@@ -25,11 +27,13 @@ class SessionService:
         memory_repo: MemoryRepository,
         project_repo: ProjectRepository,
         rules_service: RulesService,
+        task_service: TaskService,
     ):
         self._session_repo = session_repo
         self._memory_repo = memory_repo
         self._project_repo = project_repo
         self._rules_service = rules_service
+        self._task_service = task_service
 
     def start(self, project: str) -> SessionContext:
         session_id = str(uuid.uuid4())
@@ -71,6 +75,11 @@ class SessionService:
             limit=None,
         )
 
+        # Requirements the user parked without interrupting a session. They are
+        # surfaced, never started: the brief below is what keeps a queued task
+        # from being read as an instruction.
+        queued_tasks = self._task_service.queued(project)
+
         return SessionContext(
             session_id=session_id,
             project=project,
@@ -82,6 +91,8 @@ class SessionService:
             orphaned_sessions_closed=len(orphans),
             pending_adaptations=pending,
             pending_instructions=adaptation_brief(project, pending),
+            queued_tasks=queued_tasks,
+            task_instructions=task_brief(project, queued_tasks),
         )
 
     def end(
@@ -93,4 +104,12 @@ class SessionService:
         memories_accessed: int = 0,
     ) -> dict:
         self._session_repo.end(project, session_id, summary, memories_created, memories_accessed)
-        return {"status": "ok", "session_id": session_id, "summary": summary}
+        # Hand back whatever this session was holding, so its tasks are
+        # available immediately instead of waiting out the claim lease.
+        released = self._task_service.release_session(project, session_id)
+        return {
+            "status": "ok",
+            "session_id": session_id,
+            "summary": summary,
+            "tasks_released": released,
+        }

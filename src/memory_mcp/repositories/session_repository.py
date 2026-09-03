@@ -10,7 +10,17 @@ class SessionRepository:
     def insert(self, project: str, session_id: str) -> None:
         with connect(project) as conn:
             conn.execute(
-                "INSERT INTO sessions (id, started_at) VALUES (?, current_timestamp)",
+                "INSERT INTO sessions (id, started_at, last_seen_at) "
+                "VALUES (?, current_timestamp, current_timestamp)",
+                [session_id],
+            )
+
+    def touch(self, project: str, session_id: str) -> None:
+        """Stamp last_seen_at. The heartbeat behind the multi-session claim: it
+        costs nothing, because every tool call already reaches the daemon."""
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE sessions SET last_seen_at = current_timestamp WHERE id = ?",
                 [session_id],
             )
 

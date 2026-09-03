@@ -294,6 +294,127 @@ export interface PendingAdaptationsResponse {
   instructions: string | null;
 }
 
+/** asoode's task-state vocabulary, verbatim, so the bridge maps losslessly. */
+export type TaskState =
+  | "todo"
+  | "in_progress"
+  | "done"
+  | "paused"
+  | "blocked"
+  | "cancelled"
+  | "duplicate"
+  | "incomplete"
+  | "blocker";
+
+export type TaskCommentKind = "note" | "rule" | "decision" | "reminder";
+
+/** A queued requirement. Stored in its own tables, never in the git snapshot. */
+export interface Task {
+  id: string;
+  title: string;
+  description: string | null;
+  state: TaskState;
+  priority: number;
+  assignee: string | null;
+  labels: string[];
+  due_at: string | null;
+  begin_at: string | null;
+  end_at: string | null;
+  estimated_minutes: number | null;
+  parent_id: string | null;
+  position: number;
+  source: string;
+  triage: boolean;
+  /** Which session is holding this task; null means free. */
+  claimed_by: string | null;
+  claimed_at: string | null;
+  lease_expires_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  done_at: string | null;
+  archived_at: string | null;
+}
+
+export interface TaskComment {
+  id: string;
+  task_id: string;
+  body: string;
+  kind: string;
+  author: string | null;
+  created_at: string | null;
+}
+
+export interface TaskTimeEntry {
+  id: string;
+  task_id: string;
+  begin_at: string;
+  end_at: string | null;
+  manual: boolean;
+}
+
+export interface TaskDetail {
+  task: Task;
+  comments: TaskComment[];
+  time_entries: TaskTimeEntry[];
+  subtasks: Task[];
+  minutes_spent: number;
+  running: boolean;
+}
+
+/** What a list row shows beyond the task's own columns. */
+export interface TaskRowMeta {
+  comments: number;
+  subtasks_total: number;
+  subtasks_done: number;
+  minutes_spent: number;
+  running: boolean;
+}
+
+export interface TaskActivityEntry {
+  id: number;
+  memory_id: string;
+  operation: string;
+  details: Record<string, unknown> | null;
+  actor: string | null;
+  created_at: string | null;
+}
+
+export interface TaskListResponse {
+  tasks: Task[];
+  total: number;
+  /** How many of the matching tasks are still waiting. */
+  open: number;
+  /** Ids of tasks with a running clock - not derivable from `state`. */
+  running: string[];
+  /** Per-row counts, keyed by task id. */
+  meta: Record<string, TaskRowMeta>;
+}
+
+export interface TaskInput {
+  title: string;
+  description?: string | null;
+  priority?: number;
+  labels?: string[];
+  assignee?: string | null;
+  due_at?: string | null;
+  estimated_minutes?: number | null;
+  parent_id?: string | null;
+  source?: string;
+}
+
+export interface TaskUpdate {
+  title?: string;
+  description?: string | null;
+  state?: TaskState;
+  priority?: number;
+  assignee?: string | null;
+  labels?: string[];
+  due_at?: string | null;
+  begin_at?: string | null;
+  end_at?: string | null;
+  estimated_minutes?: number | null;
+}
+
 export type LoadFromFolderSource =
   | "existing_memory_db"
   | "claude_md"

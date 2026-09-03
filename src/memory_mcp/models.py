@@ -26,6 +26,52 @@ class MemoryCategory(str, Enum):
     REFERENCE = "reference"
 
 
+class TaskState(str, Enum):
+    """Task lifecycle states.
+
+    This vocabulary is asoode's WorkPackageTaskState, verbatim, so the Phase 2
+    bridge maps names to ordinals with nothing lost in translation:
+    todo 1, in_progress 2, done 3, paused 4, blocked 5, cancelled 6,
+    duplicate 7, incomplete 8, blocker 9.
+    """
+
+    TODO = "todo"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    PAUSED = "paused"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+    DUPLICATE = "duplicate"
+    INCOMPLETE = "incomplete"
+    BLOCKER = "blocker"
+
+
+# States that still want something from someone. Session start surfaces exactly
+# these, so a task can only leave the brief by being finished, withdrawn, or
+# archived - never by ageing out. `incomplete` counts as open: it means the work
+# did not get finished, which is precisely the thing worth resurfacing.
+OPEN_TASK_STATES = [
+    TaskState.TODO, TaskState.IN_PROGRESS, TaskState.PAUSED,
+    TaskState.BLOCKED, TaskState.BLOCKER, TaskState.INCOMPLETE,
+]
+
+
+class TaskSource(str, Enum):
+    """Who put the task in the list. Phase 2 adds `asoode` for inbound mirrors."""
+
+    USER = "user"
+    CLAUDE = "claude"
+
+
+class TaskCommentKind(str, Enum):
+    """What a comment IS, so a rule pinned to a task is not read as chatter."""
+
+    NOTE = "note"
+    RULE = "rule"
+    DECISION = "decision"
+    REMINDER = "reminder"
+
+
 RULE_CATEGORIES = {MemoryCategory.MANDATORY_RULES, MemoryCategory.FORBIDDEN_RULES}
 
 # Reserved project holding org-wide rules (server mode). Its approved rules are
@@ -139,6 +185,64 @@ class ProvenanceEntry(BaseModel):
     created_at: datetime | None = None
 
 
+class Task(BaseModel):
+    """A queued requirement with its own lifecycle.
+
+    Tasks are NOT memories and NOT a MemoryCategory: they live in their own
+    DuckDB tables, which is what keeps them out of the git-committed
+    .claude-memory/ snapshot no matter how many of them pile up.
+    """
+
+    id: str
+    title: str
+    description: str | None = None
+    state: TaskState = TaskState.TODO
+    priority: int = 0
+    assignee: str | None = None
+    labels: list[str] = Field(default_factory=list)
+    # Planned window; the actual clock lives in TaskTimeEntry.
+    due_at: datetime | None = None
+    begin_at: datetime | None = None
+    end_at: datetime | None = None
+    estimated_minutes: int | None = None
+    parent_id: str | None = None
+    position: int = 0
+    # Open string rather than an enum, matching Memory.source: a value written
+    # by a newer build (Phase 2 adds "asoode") must still read back here.
+    source: str = "user"
+    # Phase 2: inbound items awaiting a decision, mirroring memories.pending.
+    # Nothing sets it in Phase 1.
+    triage: bool = False
+    # The multi-session claim: which session is holding this task, and until
+    # when. NULL claimed_by means free. See TaskService.claim_next.
+    claimed_by: str | None = None
+    claimed_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    done_at: datetime | None = None
+    archived_at: datetime | None = None
+
+
+class TaskComment(BaseModel):
+    id: str
+    task_id: str
+    body: str
+    kind: str = "note"  # note | rule | decision | reminder
+    author: str | None = None
+    created_at: datetime | None = None
+
+
+class TaskTimeEntry(BaseModel):
+    """One stretch of work. `end_at is None` means the clock is still running."""
+
+    id: str
+    task_id: str
+    begin_at: datetime
+    end_at: datetime | None = None
+    manual: bool = False
+
+
 # --- Request Models ---
 
 
@@ -194,6 +298,51 @@ class Pagination(BaseModel):
     sort_order: Literal["asc", "desc"] = "desc"
 
 
+class CreateTaskRequest(BaseModel):
+    project: str
+    title: str = Field(min_length=1, max_length=500)
+    description: str | None = None
+    priority: int = Field(default=0, ge=0, le=3)
+    labels: list[str] = Field(default_factory=list)
+    assignee: str | None = None
+    due_at: datetime | None = None
+    begin_at: datetime | None = None
+    end_at: datetime | None = None
+    estimated_minutes: int | None = Field(default=None, ge=0)
+    parent_id: str | None = None
+    source: TaskSource = TaskSource.USER
+
+
+class UpdateTaskRequest(BaseModel):
+    project: str
+    task_id: str
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = None
+    state: TaskState | None = None
+    priority: int | None = Field(default=None, ge=0, le=3)
+    assignee: str | None = None
+    labels: list[str] | None = None
+    due_at: datetime | None = None
+    begin_at: datetime | None = None
+    end_at: datetime | None = None
+    estimated_minutes: int | None = Field(default=None, ge=0)
+    position: int | None = None
+
+
+class TaskFilter(BaseModel):
+    state: TaskState | None = None
+    source: str | None = None
+    parent_id: str | None = None
+    # Sub-tasks belong to their parent, so the top-level list hides them the way
+    # a board does; pass parent_id to list one task's children, or set this to
+    # see everything flat.
+    include_subtasks: bool = False
+    # Finished and withdrawn work is out of the way by default; archived tasks
+    # are hidden until explicitly asked for.
+    include_done: bool = False
+    include_archived: bool = False
+
+
 # --- Response Models ---
 
 
@@ -231,6 +380,37 @@ class RulesResponse(BaseModel):
     total: int
 
 
+class TaskRowMeta(BaseModel):
+    """What a list row shows beyond the task's own columns."""
+
+    comments: int = 0
+    subtasks_total: int = 0
+    subtasks_done: int = 0
+    minutes_spent: int = 0
+    running: bool = False
+
+
+class TaskDetail(BaseModel):
+    task: Task
+    comments: list[TaskComment] = Field(default_factory=list)
+    time_entries: list[TaskTimeEntry] = Field(default_factory=list)
+    subtasks: list[Task] = Field(default_factory=list)
+    minutes_spent: int = 0
+    running: bool = False
+
+
+class TaskListResponse(BaseModel):
+    tasks: list[Task]
+    total: int
+    # Open tasks matching the filter, i.e. what is still waiting.
+    open_count: int = 0
+    # Ids of tasks with a running clock. Not derivable from `state`: stopping
+    # the clock leaves the state alone, on purpose.
+    running_ids: list[str] = Field(default_factory=list)
+    # Per-row counts (comments, sub-tasks, tracked time), keyed by task id.
+    meta: dict[str, TaskRowMeta] = Field(default_factory=dict)
+
+
 class SessionContext(BaseModel):
     session_id: str
     project: str
@@ -244,3 +424,8 @@ class SessionContext(BaseModel):
     # They are NOT in mandatory_rules/forbidden_rules above and are not in force.
     pending_adaptations: list[Memory] = Field(default_factory=list)
     pending_instructions: str | None = None
+    # Requirements parked in the task list, open ones first. These are things
+    # WAITING, not instructions for this session: they are surfaced so the user
+    # can see the queue, and none of them is started unless the user asks.
+    queued_tasks: list[Task] = Field(default_factory=list)
+    task_instructions: str | None = None

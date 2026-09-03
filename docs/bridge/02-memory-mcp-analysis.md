@@ -3,6 +3,11 @@
 > Captured 2026-09-03 by an Opus analysis agent reading the source directly (working tree,
 > including then-uncommitted changes). **Purpose: so we never have to re-read this repo to design
 > the bridge.** Line numbers are a strong hint — re-verify before editing.
+>
+> **Updated after Phase 1 of the task module landed.** The audit below describes the repo *before*
+> the `tasks` / `task_comments` / `task_time_entries` tables existed; §8 records what changed, and
+> line numbers cited elsewhere have shifted in `db/schema.py`, `models.py`, `server.py`,
+> `web/routes.py`, `enforcement.py`, `session_service.py` and `App.tsx`. Verify before relying on one.
 
 ## 1. Layering
 
@@ -43,15 +48,15 @@ CLI (sync_cli, rules_cli,       │           │                    │
 
 | File | LOC | Role |
 |---|---|---|
-| `src/memory_mcp/server.py` | 917 | FastMCP app; **42** registered tools. Auth wiring `:60-70` |
+| `src/memory_mcp/server.py` | 1147 | FastMCP app; **53** registered tools (11 of them `memory_task_*`). Auth wiring `:60-70` |
 | `src/memory_mcp/context.py` | 270 | Active-project resolution + per-request user identity |
 | `src/memory_mcp/enforcement.py` | 89 | Renders rule blocks for hooks; `rules_digest()` injected into tool responses |
-| `src/memory_mcp/models.py` | 246 | All Pydantic models + `MemoryCategory` enum |
+| `src/memory_mcp/models.py` | 380 | All Pydantic models + `MemoryCategory` / `TaskState` / `TaskSource` / `TaskCommentKind` enums |
 | `src/memory_mcp/constants.py` | 24 | `PORTABLE_DB_NAME`, `SNAPSHOT_DIRNAME`, `MANIFEST_NAME`, `SYNC_CATEGORIES` |
-| `src/memory_mcp/db/schema.py` | 242 | DuckDB per-project schema + migrations + HNSW |
+| `src/memory_mcp/db/schema.py` | 348 | DuckDB per-project schema + migrations + HNSW |
 | `src/memory_mcp/db/registry.py` | 437 | **SQLite** global registry: projects, app_settings, templates, users |
 | `src/memory_mcp/db/connection.py` | 133 | Connection-per-operation, path cache, lazy init/migrate |
-| `src/memory_mcp/web/routes.py` | 1082 | Starlette JSON API + SPA + gateway proxy |
+| `src/memory_mcp/web/routes.py` | 1218 | Starlette JSON API + SPA + gateway proxy |
 | `src/memory_mcp/sync_cli.py` | 203 | `memory-mcp sync export\|import` — the only file I/O for snapshots |
 | `src/memory_mcp/remote_backend.py` | 119 | HTTP client to an org server |
 | `src/memory_mcp/daemon.py` | 57 | Starlette app = UI routes + `Mount("/", mcp.http_app("/mcp"))` |
@@ -84,7 +89,7 @@ Schema applied via `executescript(_SCHEMA)` on **every** connection open, plus `
 post-hoc `ALTER TABLE`s (`:92-94, :101-125`). **This is the pattern a new registry table must follow.**
 `PRAGMA foreign_keys = ON` (`:90`).
 
-### 2.2 DuckDB schema (v4, `db/schema.py`)
+### 2.2 DuckDB schema (v5, `db/schema.py`)
 
 **`memories`** (`:19-43`) — PK `id VARCHAR`. Column order is load-bearing (`memory_repository.py:14-22`):
 
@@ -98,10 +103,13 @@ approval_status('approved'), approved_by, approved_at, pending BOOLEAN FALSE
 **`provenance`** (`:48-57`) — `id INTEGER PK DEFAULT nextval('seq_provenance_id')`, `memory_id`,
 `operation`, `details JSON`, `actor`, `created_at`. **No FK** to `memories`.
 
-**`sessions`** (`:59-68`) — `id PK`, `started_at`, `ended_at`, `summary`, `memories_created`,
-`memories_accessed`, `metadata JSON`.
+**`sessions`** (`:136-147`) — `id PK`, `started_at`, `ended_at`, `summary`, `memories_created`,
+`memories_accessed`, `metadata JSON`, `last_seen_at` (v5: the claim's heartbeat).
 
-**`schema_version`** (`:70-75`) — `version INTEGER PK`, `applied_at`.
+**`schema_version`** (`:148-153`) — `version INTEGER PK`, `applied_at`.
+
+**`tasks` / `task_comments` / `task_time_entries`** (v5, `_TASK_DDL` + `create_task_tables()`,
+`:15-89`) — the task store. See §8.
 
 **Indexes** (`:77-85`): `idx_memories_{category,status,approval,pending,created,expires}`,
 `idx_provenance_{memory,op}`. **No foreign keys anywhere in the DuckDB schema.**
@@ -120,11 +128,11 @@ approval_status('approved'), approved_by, approved_at, pending BOOLEAN FALSE
 
 ### 2.4 Migrations
 
-Hand-written, linear, idempotent Python functions — no framework. `CURRENT_SCHEMA_VERSION = 4` (`:5`).
-`migrate_v1_to_v2` (`:93`), `v2_to_v3` (`:126`), `v3_to_v4` (`:159`).
+Hand-written, linear, idempotent Python functions — no framework. `CURRENT_SCHEMA_VERSION = 5` (`:5`).
+`migrate_v1_to_v2` (`:174`), `v2_to_v3` (`:207`), `v3_to_v4` (`:240`), `v4_to_v5` (`:261`).
 
-`run_migrations(conn)` (`:181-208`): ensure `schema_version` exists, read `get_schema_version()`
-(missing table ⇒ **v1**, `:172-179`), apply each step in sequence, return the new version.
+`run_migrations(conn)` (`:285-322`): ensure `schema_version` exists, read `get_schema_version()`
+(missing table ⇒ **v1**, `:274-282`), apply each step in sequence, return the new version.
 
 **Every migration must:** wrap each `ALTER TABLE ADD COLUMN` in `try/except: pass` because *"DuckDB's
 ADD COLUMN cannot be guarded with IF NOT EXISTS"* (`:132-136`), and **never rely on the column DEFAULT
@@ -136,6 +144,10 @@ Applied automatically on first open per process by `_ensure_initialized` (`db/co
 **Test contract (`tests/test_migrations.py`)** — a new migration must add a test in this exact shape:
 build a v1-shaped DB (`:8-22`), assert version detection (`:25`), new columns/tables appear (`:35`),
 **existing rows preserved** (`:83`), **idempotent** (`:95`), new flags backfill to the safe value (`:107-120`).
+v5 follows it in `test_migration_adds_v5_task_tables` and
+`test_migration_adds_last_seen_at_backfilled_from_started_at`, plus
+`test_fresh_schema_matches_migrated_schema`, which asserts `create_schema` and the migration path
+produce identical task tables — the drift a two-place DDL invites.
 
 ### 2.5 ⚠️ Measured sizes — decisive for the "DuckDB file vs JSON" question
 
@@ -390,8 +402,8 @@ Auto-reinstall on source change: `.claude/hooks/auto-update-install.sh` → `mem
 Dev mode proxies `/api` and `/mcp` to `127.0.0.1:8765` (`frontend/vite.config.ts:13-18`).
 
 **React app** (React 18 + Tailwind + lucide, **no router**): `App.tsx` is a single stateful shell.
-Sidebar views `projects | templates | users | org-rules | moderation`; per project, 4 tabs:
-`memories | rules | pending | sessions` (`App.tsx:55, :603-614`, rendered `:778-840`).
+Sidebar views `projects | templates | users | org-rules | moderation`; per project, 5 tabs:
+`memories | rules | tasks | pending | sessions` (`App.tsx:57, :623-646`, rendered `:805-880`).
 **Adding a tab = 3 edits** (`TabValue`, `tabs[]`, render block).
 Dialogs: `NewProjectDialog`, `ImportRulesDialog`/`ImportRulesPanel` (checkbox picker over another
 project's or a template's items — **the closest analogue to a "pick asoode targets" picker**),
@@ -467,3 +479,62 @@ from `session-start.sh`, or an **asyncio task started in `daemon.build_app()`'s 
 - **Failures in hook-facing paths must be swallowed and logged, never surfaced** (`sync_cli.py:174-189`
   writes tracebacks to `~/.claude-memory-mcp/sync.log`; the comment records that a silent circular
   import *"killed every export and import for weeks without a trace"*).
+
+
+---
+
+## 8. Phase 1 of the task module (added after this audit)
+
+The audit above says memory-mcp has **no task concept**. That is no longer true; §7.2's "where a
+bridge plugs in" is now partly built. What exists, and what still does not:
+
+**Schema v5** (`db/schema.py`) — `tasks`, `task_comments`, `task_time_entries`, created by
+`create_task_tables()` which `create_schema` and `migrate_v4_to_v5` both call, plus an `ALTER` adding
+`sessions.last_seen_at` backfilled from `started_at`. Tasks are **separate tables, never a
+`MemoryCategory`**, so `SYNC_CATEGORIES` cannot pick them up and the `.claude-memory/` snapshot stays
+small — asserted by `TestTasksStayOutOfTheSnapshot` in `tests/services/test_task_service.py`.
+
+**Layers** — `repositories/task_repository.py` (all SQL), `services/task_service.py` (constructor-
+injected, wired in `container.py`), `services/task_brief.py` (a pure `(project, tasks) -> str | None`,
+sibling of `adaptation.py`), models in `models.py` under the existing Domain/Request/Response grouping.
+Every task mutation writes a `provenance` row (`task_create`, `task_update`, `task_comment`,
+`task_start`, `task_stop`, `task_done`, `task_archive`, `task_claim`, `task_release`) — the table has
+no FK and `memory_id` is just an entity id, so task rows live alongside memory rows.
+
+**MCP tools** — `memory_task_add/list/get/update/comment/start/stop/done/archive`, plus
+`memory_task_convert` (promote a sub-task), `memory_task_delete` (permanent, unlike archive) and
+`memory_task_claim_next` / `memory_task_release`. **Deliberately not `_remote()`-gated:** tasks have no
+counterpart on an org server, so a remote-bound project keeps its task list locally rather than
+proxying to a route that does not exist there.
+
+**HTTP** — `/api/projects/{slug}/tasks[...]` in `web/routes.py`, `_api`-wrapped and sync, **not**
+`remote_aware`, for the same reason. `TaskNotFoundError` is mapped to 404 alongside the others.
+Beyond CRUD: `/tasks/reorder` (manual order), `/tasks/{tid}/convert`, `/tasks/{tid}/activity`
+(the provenance trail), `/tasks/{tid}/release` (the operator escape hatch for a stuck claim).
+
+**Sub-tasks** — `parent_id` with one level of nesting in practice. The top-level list hides children
+(`TaskFilter.include_subtasks=False` by default) and shows their progress on the parent instead; the
+claim never offers a sub-task; deleting a parent **promotes** its children rather than cascading.
+
+**UI** — `TasksTab.tsx` composes `TaskListView.tsx` (asoode's list mode: a group per state with a
+colour-coded pill, the NAME/ASSIGNEE/DUE DATE/PRIORITY column grid, inline add per group, drag to
+reorder) and `TaskDialog.tsx` (asoode's task modal: breadcrumb header, quick-properties bar,
+in-place title/description editing, sub-tasks with a ⋯ menu for rename/convert/delete,
+comments + activity tabs, and a 280px sidebar carrying assignee, labels, priority, dates, the
+stopwatch and the claim). Shared presentation constants live in `lib/tasks.ts` - the state colours are
+asoode's, so the two apps read the same way side by side.
+
+**Session** — `SessionContext.queued_tasks` + `task_instructions`; `SessionService.end()` releases the
+ending session's claims; `enforcement.format_intro` carries the open count.
+
+**The multi-session claim** — `claimed_by` / `claimed_at` / `lease_expires_at` on `tasks`, taken by a
+conditional `UPDATE` whose **rowcount is the answer** (`TaskRepository.claim`), serialized by a
+per-project `threading.Lock` in `TaskService`. One daemon makes that lock sufficient; a multi-daemon
+server mode would have to move the claim to the SQLite registry. The lease is checked **lazily on the
+next claim**, so there is no sweeper thread.
+
+**Still not built, and still shaped as §7.2 describes:** `project_links` (shape recorded in a comment
+at the top of `db/registry.py`), `task_sync` / `task_outbox` (shape recorded above `_TASK_DDL` in
+`db/schema.py`), the asoode HTTP client, and the inbound socket subscription (shape recorded in
+`daemon.build_app`'s docstring). `triage` exists on `tasks` and nothing sets it. **§6's warning still
+holds: there is no background-task mechanism anywhere in `src/`.**

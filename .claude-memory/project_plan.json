@@ -1,0 +1,39 @@
+[
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "project_plan",
+    "content": "Agreed 2026-09-03. Build order is fixed:\n\nPhase 1 \u2014 the standalone task store in memory-mcp. Schema v5 (tasks, task_comments, task_time_entries in per-project DuckDB), repository + service + MCP tools + Tasks tab in the React UI + session brief integration. Must work with ZERO asoode. Prompt: docs/bridge/05-session-prompt.md.\n\nPhase 2 \u2014 the optional asoode bridge. Outbox out, live Socket.IO in from a new asyncio task in daemon.build_app()'s lifespan. Gated on asoode's P0 items landing (externalRef + unique index, socket auth via shared credential verification, recipient targeting fix, non-expiring machine tokens). Asoode backlog: asoode/docs/claude-bridge-backlog.md, prompt: asoode/docs/claude-bridge-prompt.md.\n\nPhase 3 \u2014 a standing agent team: pm, design, frontend, backend, e2e. Doc: docs/bridge/06-agent-team.md.\n\nWHY the agent team is last, not first: subagents are stateless per invocation and share no conversation \u2014 each gets a prompt, not the transcript. A team built before Phase 1 would be five agents that forget everything between invocations and re-derive the same conclusions in parallel. The dependency is durable shared state: memory MCP for what outlives a task, task comments for handoffs. The five agent definition files themselves are about an hour of work; the state they need is the actual project.\n\nKey facts recorded for Phase 3: subagents inherit the session's MCP servers (so every agent can call memory_* and asoode tools); isolation: worktree lets frontend and backend work the same repo in parallel; seven design skills already installed at ~/.claude/skills/; the main session must be the orchestrator, not a pm agent, because nesting loses information at every hop and subagent output is never shown to the user directly.",
+    "created_at": "2026-09-03T08:03:03.543223",
+    "created_by": null,
+    "entities": [
+      "DuckDB",
+      "IO",
+      "MCP",
+      "React",
+      "UI",
+      "WHY",
+      "ZERO",
+      "s lifespan. Gated on asoode"
+    ],
+    "expires_at": null,
+    "id": "f8f8e997-399e-4f24-ae3a-a81457c7a923",
+    "metadata": null,
+    "priority": 3,
+    "related_ids": [],
+    "source": "assistant",
+    "status": "active",
+    "summary": "Three-phase sequence: task module, then asoode bridge, then agent team: Agreed 2026-09-03",
+    "tags": [
+      "roadmap",
+      "phases",
+      "tasks",
+      "asoode",
+      "agents",
+      "bridge"
+    ],
+    "title": "Three-phase sequence: task module, then asoode bridge, then agent team",
+    "updated_at": "2026-09-03T08:03:03.543223"
+  }
+]

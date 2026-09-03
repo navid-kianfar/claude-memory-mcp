@@ -43,6 +43,14 @@ def format_intro(slug: str) -> str:
             f"waiting to be adapted to this project and {'is' if pending == 1 else 'are'} "
             f"NOT in force yet - memory_session_start returns them with instructions."
         )
+    queued = _queued_task_count(slug)
+    if queued:
+        text += (
+            f" {queued} {'task is' if queued == 1 else 'tasks are'} waiting in the "
+            f"task list - memory_session_start returns them. They are requirements "
+            f"the user parked, NOT instructions: surface them and start none of "
+            f"them unless the user asks."
+        )
     return text
 
 
@@ -50,6 +58,14 @@ def _pending_count(slug: str) -> int:
     """Un-adapted imports, or 0 when that cannot be determined."""
     try:
         return container.memory_service.count_pending(slug)
+    except Exception:  # noqa: BLE001 - the intro must never fail a session start
+        return 0
+
+
+def _queued_task_count(slug: str) -> int:
+    """Tasks still waiting, or 0 when that cannot be determined."""
+    try:
+        return container.task_service.count_open(slug)
     except Exception:  # noqa: BLE001 - the intro must never fail a session start
         return 0
 

@@ -6,6 +6,7 @@ import {
   FolderGit2,
   Link2,
   ListChecks,
+  ListTodo,
   Moon,
   Pencil,
   ShieldAlert,
@@ -37,6 +38,7 @@ import { Button } from "./components/ui/Button";
 import { CommandPalette } from "./components/ui/CommandPalette";
 import { MemoriesTab } from "./components/MemoriesTab";
 import { PendingTab } from "./components/PendingTab";
+import { TasksTab } from "./components/TasksTab";
 import { RulesTab } from "./components/RulesTab";
 import { SessionsTab } from "./components/SessionsTab";
 import {
@@ -52,7 +54,7 @@ import { TemplatesView } from "./components/TemplatesView";
 import { EditProjectDialog } from "./components/EditProjectDialog";
 import { BulkAddRuleDialog } from "./components/BulkAddRuleDialog";
 
-type TabValue = "memories" | "rules" | "pending" | "sessions";
+type TabValue = "memories" | "rules" | "tasks" | "pending" | "sessions";
 
 interface EditorState {
   open: boolean;
@@ -81,6 +83,7 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
   const [tab, setTab] = useState<TabValue>("memories");
   const [pendingCount, setPendingCount] = useState(0);
+  const [openTaskCount, setOpenTaskCount] = useState(0);
   const [view, setView] = useState<SidebarView>("projects");
   const isAdminView =
     view === "moderation" || view === "users" || view === "org-rules";
@@ -210,6 +213,19 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
     }
   }, [selectedSlug]);
 
+  const loadTaskCount = useCallback(async () => {
+    if (!selectedSlug) {
+      setOpenTaskCount(0);
+      return;
+    }
+    try {
+      const res = await api.listTasks(selectedSlug);
+      setOpenTaskCount(res.open);
+    } catch {
+      setOpenTaskCount(0); // a count is a hint, never a reason to break the view
+    }
+  }, [selectedSlug]);
+
   const loadPendingCount = useCallback(async () => {
     if (!selectedSlug) {
       setPendingCount(0);
@@ -257,6 +273,10 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
   useEffect(() => {
     void loadPendingCount();
   }, [loadPendingCount]);
+
+  useEffect(() => {
+    void loadTaskCount();
+  }, [loadTaskCount]);
 
   // ----- actions -----
   const refreshAll = useCallback(() => {
@@ -610,6 +630,13 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
       label: pendingCount > 0 ? `Pending (${pendingCount})` : "Pending",
       icon: <Sparkles />,
     },
+    {
+      value: "tasks",
+      // Same trick as Pending: the count is how a queued requirement announces
+      // itself without anyone having to open the tab.
+      label: openTaskCount > 0 ? `Tasks (${openTaskCount})` : "Tasks",
+      icon: <ListTodo />,
+    },
     { value: "sessions", label: "Sessions", icon: <ListChecks /> },
   ];
 
@@ -817,6 +844,13 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
                   isAdmin={isAdmin}
                   onApprove={approveRule}
                   onRevoke={revokeRule}
+                />
+              )}
+
+              {tab === "tasks" && (
+                <TasksTab
+                  projectSlug={selectedProject.slug}
+                  onChanged={() => void loadTaskCount()}
                 />
               )}
 

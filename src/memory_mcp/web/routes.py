@@ -26,14 +26,14 @@ from memory_mcp.context import (
 from memory_mcp.db.registry import get_credential
 from memory_mcp.exceptions import (
     AuthError, ForbiddenError, MemoryMCPError, MemoryNotFoundError,
-    ProjectNotFoundError,
+    ProjectNotFoundError, TaskNotFoundError,
 )
 from memory_mcp.repositories import TemplateNotFoundError
 from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.models import (
-    GLOBAL_PROJECT_SLUG, MemoryCategory, MemoryFilter, Pagination,
-    RULE_CATEGORIES, SearchRequest, StoreMemoryRequest, UpdateMemoryRequest,
-    rule_category,
+    CreateTaskRequest, GLOBAL_PROJECT_SLUG, MemoryCategory, MemoryFilter,
+    Pagination, RULE_CATEGORIES, SearchRequest, StoreMemoryRequest, TaskFilter,
+    TaskSource, TaskState, UpdateMemoryRequest, UpdateTaskRequest, rule_category,
 )
 
 def _dist_dir() -> Path:
@@ -55,6 +55,11 @@ _PLACEHOLDER = """<!doctype html>
 <p>Or run the Docker image, which builds the UI automatically.</p>
 <p>The MCP server and JSON API are unaffected by this.</p>
 </body></html>"""
+
+
+def _flag(value: str | None) -> bool:
+    """Parse a boolean query parameter the way the rest of this module does."""
+    return (value or "").lower() in ("1", "true", "yes")
 
 
 def _mem(memory) -> dict:
@@ -214,7 +219,10 @@ def _api(fn, *, public: bool = False, admin: bool = False, remote_aware: bool = 
         token = set_request_user(bound)
         try:
             result = await to_thread.run_sync(lambda: fn(params, body, query))
-        except (ProjectNotFoundError, MemoryNotFoundError, TemplateNotFoundError) as e:
+        except (
+            ProjectNotFoundError, MemoryNotFoundError, TemplateNotFoundError,
+            TaskNotFoundError,
+        ) as e:
             return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=404)
         except AuthError as e:
             return JSONResponse({"error": str(e), "type": type(e).__name__}, status_code=401)
@@ -900,6 +908,151 @@ def _discard_pending(params, body, query):
     )
 
 
+# ---------- tasks ----------
+#
+# Queued requirements, stored in the project's own DuckDB tables. Not
+# `remote_aware`: tasks have no counterpart on an org server in Phase 1, so a
+# remote-bound project keeps its task list here rather than proxying to a
+# server that has no /tasks route.
+
+
+def _task_list(params, body, query):
+    slug = params["slug"]
+    container.project_service.get(slug)
+    state = query.get("state")
+    filters = TaskFilter(
+        state=TaskState(state) if state else None,
+        source=query.get("source") or None,
+        parent_id=query.get("parent_id") or None,
+        include_subtasks=_flag(query.get("include_subtasks")),
+        include_done=_flag(query.get("include_done")),
+        include_archived=_flag(query.get("include_archived")),
+    )
+    result = container.task_service.list_tasks(
+        slug,
+        filters,
+        limit=int(query.get("limit") or 100),
+        offset=int(query.get("offset") or 0),
+    )
+    return {
+        "tasks": [t.model_dump(mode="json") for t in result.tasks],
+        "total": result.total,
+        "open": result.open_count,
+        "running": result.running_ids,
+        "meta": {tid: m.model_dump(mode="json") for tid, m in result.meta.items()},
+    }
+
+
+def _task_create(params, body, query):
+    source = body.get("source") or "user"
+    req = CreateTaskRequest(
+        project=params["slug"],
+        title=body.get("title") or "",
+        description=body.get("description"),
+        priority=body.get("priority") or 0,
+        labels=body.get("labels") or [],
+        assignee=body.get("assignee"),
+        due_at=body.get("due_at"),
+        estimated_minutes=body.get("estimated_minutes"),
+        parent_id=body.get("parent_id"),
+        source=TaskSource(source),
+    )
+    task = container.task_service.create(req)
+    return {"status": "ok", "task": task.model_dump(mode="json")}
+
+
+def _task_reorder(params, body, query):
+    """Persist a drag-and-drop order. Body: {"ids": [task_id, ...]}."""
+    ids = body.get("ids") or []
+    if not isinstance(ids, list):
+        raise ValueError("ids must be a list of task ids")
+    return {"status": "ok", "reordered": container.task_service.reorder(params["slug"], ids)}
+
+
+def _task_get(params, body, query):
+    detail = container.task_service.detail(params["slug"], params["tid"])
+    return detail.model_dump(mode="json")
+
+
+def _task_update(params, body, query):
+    state = body.get("state")
+    req = UpdateTaskRequest(
+        project=params["slug"],
+        task_id=params["tid"],
+        title=body.get("title"),
+        description=body.get("description"),
+        state=TaskState(state) if state else None,
+        priority=body.get("priority"),
+        assignee=body.get("assignee"),
+        labels=body.get("labels"),
+        due_at=body.get("due_at"),
+        begin_at=body.get("begin_at"),
+        end_at=body.get("end_at"),
+        estimated_minutes=body.get("estimated_minutes"),
+    )
+    task, changed = container.task_service.update(req)
+    return {"status": "ok", "task": task.model_dump(mode="json"), "changed": changed}
+
+
+def _task_comment(params, body, query):
+    comment = container.task_service.comment(
+        params["slug"], params["tid"],
+        body.get("body") or "",
+        body.get("kind") or "note",
+        body.get("author"),
+    )
+    return {"status": "ok", "comment": comment.model_dump(mode="json")}
+
+
+def _task_start(params, body, query):
+    return container.task_service.start(params["slug"], params["tid"]).model_dump(mode="json")
+
+
+def _task_stop(params, body, query):
+    return container.task_service.stop(params["slug"], params["tid"]).model_dump(mode="json")
+
+
+def _task_done(params, body, query):
+    detail = container.task_service.done(
+        params["slug"], params["tid"], body.get("note"),
+    )
+    return detail.model_dump(mode="json")
+
+
+def _task_convert(params, body, query):
+    """Promote a sub-task to a top-level task."""
+    task = container.task_service.convert_to_task(params["slug"], params["tid"])
+    return {"status": "ok", "task": task.model_dump(mode="json")}
+
+
+def _task_delete(params, body, query):
+    """Delete permanently. Archiving is the reversible option beside it."""
+    return container.task_service.delete(params["slug"], params["tid"])
+
+
+def _task_activity(params, body, query):
+    """The task's audit trail, straight from the provenance table."""
+    entries = container.task_service.activity(params["slug"], params["tid"])
+    return {"activity": [e.model_dump(mode="json") for e in entries]}
+
+
+def _task_release(params, body, query):
+    """Force-release a claim from the UI.
+
+    The operator escape hatch for a task left held by a session that never came
+    back: it releases regardless of holder, unlike the MCP tool, which scopes
+    the release to the calling session. Claiming itself has no route - it is a
+    session concern, and the UI has no session to claim for.
+    """
+    task = container.task_service.release(params["slug"], params["tid"])
+    return {"status": "ok", "task": task.model_dump(mode="json")}
+
+
+def _task_archive(params, body, query):
+    task = container.task_service.archive(params["slug"], params["tid"])
+    return {"status": "ok", "task": task.model_dump(mode="json")}
+
+
 # ---------- governance: users, approvals, org-wide rules (server mode) ----------
 
 
@@ -1067,6 +1220,20 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/pending", _api(_pending, remote_aware=True), methods=["GET"]),
         Route("/api/projects/{slug}/pending/{mid}/adapt", _api(_adapt_pending, remote_aware=True), methods=["POST"]),
         Route("/api/projects/{slug}/pending/{mid}", _api(_discard_pending, remote_aware=True), methods=["DELETE"]),
+        Route("/api/projects/{slug}/tasks", _api(_task_list), methods=["GET"]),
+        Route("/api/projects/{slug}/tasks", _api(_task_create), methods=["POST"]),
+        Route("/api/projects/{slug}/tasks/reorder", _api(_task_reorder), methods=["POST"]),
+        Route("/api/projects/{slug}/tasks/{tid}", _api(_task_get), methods=["GET"]),
+        Route("/api/projects/{slug}/tasks/{tid}", _api(_task_update), methods=["PUT"]),
+        Route("/api/projects/{slug}/tasks/{tid}/comments", _api(_task_comment), methods=["POST"]),
+        Route("/api/projects/{slug}/tasks/{tid}/start", _api(_task_start), methods=["POST"]),
+        Route("/api/projects/{slug}/tasks/{tid}/stop", _api(_task_stop), methods=["POST"]),
+        Route("/api/projects/{slug}/tasks/{tid}/done", _api(_task_done), methods=["POST"]),
+        Route("/api/projects/{slug}/tasks/{tid}", _api(_task_delete), methods=["DELETE"]),
+        Route("/api/projects/{slug}/tasks/{tid}/convert", _api(_task_convert), methods=["POST"]),
+        Route("/api/projects/{slug}/tasks/{tid}/activity", _api(_task_activity), methods=["GET"]),
+        Route("/api/projects/{slug}/tasks/{tid}/release", _api(_task_release), methods=["POST"]),
+        Route("/api/projects/{slug}/tasks/{tid}/archive", _api(_task_archive), methods=["POST"]),
         Route("/api/templates", _api(_list_templates), methods=["GET"]),
         Route("/api/templates", _api(_create_template), methods=["POST"]),
         Route("/api/templates/{tid}", _api(_get_template), methods=["GET"]),

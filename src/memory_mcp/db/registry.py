@@ -69,6 +69,35 @@ CREATE INDEX IF NOT EXISTS idx_users_token ON users(token_hash);
 CREATE INDEX IF NOT EXISTS idx_users_session ON users(session_hash);
 """
 
+# Phase 2 seam - the asoode link table goes HERE, in _SCHEMA above, with any
+# later column added idempotently in _ensure_columns (executescript runs before
+# those ALTERs, so a column referenced by an index must be created there):
+#
+#   project_links(
+#       id INTEGER PRIMARY KEY AUTOINCREMENT,
+#       slug TEXT NOT NULL REFERENCES projects(slug) ON DELETE CASCADE,
+#       provider TEXT NOT NULL DEFAULT 'asoode',
+#       base_url TEXT NOT NULL, socket_url TEXT,     -- on-premise: never hardcoded
+#       remote_project_id TEXT, remote_work_package_id TEXT,
+#       label TEXT, is_default INTEGER NOT NULL DEFAULT 0,
+#       default_list_id TEXT, default_assignee_id TEXT,
+#       state_list_map TEXT,   -- JSON: task state -> remote list id
+#       match_paths TEXT,      -- JSON array of repo subpaths, so a monorepo's
+#                              -- apps/backend/** and apps/frontend/** can route
+#                              -- to different boards instead of one pile
+#       active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+#       UNIQUE(slug, remote_work_package_id)
+#   )
+#
+# One memory project links to MANY remote targets. Linking is always explicit -
+# copy the rule from ProjectService.bind_backend, where projects default to
+# 'local' and are never auto-bound so a private project cannot leak to someone
+# else's server.
+#
+# Credentials do NOT belong in that table: the asoode token reuses
+# get_credential/set_credential below, which key on the server URL and live in
+# app_settings only - never in the committable .claude-memory snapshot.
+
 _migration_lock = threading.Lock()
 
 

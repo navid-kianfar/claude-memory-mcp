@@ -70,7 +70,22 @@ every project. Never ask the user for it per project, and never accept it in
 chat: `memory-mcp asoode set-pat` prompts without echoing. `memory_asoode_status`
 returns a fingerprint, never the token.
 
-- `memory_asoode_link` creates/finds the asoode project + board for this project.
+**A project links to WORK PACKAGES, never to an asoode project.** asoode has no
+route attaching a task to a project — project → work package → list → task is the
+only path — so "linked to an asoode project" cannot be represented. One memory
+project holds MANY links (a monorepo has one board per app); `memory_task_add`'s
+`target` names which, and a task with no target routes to the default link.
+
+- `memory_asoode_attach` links a board that ALREADY EXISTS (the usual case).
+- `memory_asoode_link` CREATES a project + board — only when none exists yet.
+- `memory_asoode_boards` lists what can be attached.
+- `memory_asoode_import` pulls board tasks into the local list.
+
+Mirroring is automatic: every task create/update/completion/comment queues to an
+outbox and flushes off-thread, so a local write never waits on the network and an
+unreachable asoode is a delay, not a lost edit. `memory_asoode_push` is now only
+for full reconciliation. **Still one-way for edits** — importing is explicit, so
+never say the two sides are in sync.
 - `memory_asoode_push` mirrors local tasks onto it.
 - `memory-mcp asoode open <slug>` opens that board already signed in.
 

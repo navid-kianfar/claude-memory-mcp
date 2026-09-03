@@ -57,10 +57,12 @@ OPEN_TASK_STATES = [
 
 
 class TaskSource(str, Enum):
-    """Who put the task in the list. Phase 2 adds `asoode` for inbound mirrors."""
+    """Who put the task in the list."""
 
     USER = "user"
     CLAUDE = "claude"
+    # Imported from an asoode board - created there by a person, not here.
+    ASOODE = "asoode"
 
 
 class TaskCommentKind(str, Enum):
@@ -210,6 +212,9 @@ class Task(BaseModel):
     # Open string rather than an enum, matching Memory.source: a value written
     # by a newer build (Phase 2 adds "asoode") must still read back here.
     source: str = "user"
+    # Which linked asoode board this task belongs to. None routes to the
+    # project's default link - see AsoodeBridge.route.
+    link_id: int | None = None
     # Phase 2: inbound items awaiting a decision, mirroring memories.pending.
     # Nothing sets it in Phase 1.
     triage: bool = False
@@ -311,6 +316,10 @@ class CreateTaskRequest(BaseModel):
     estimated_minutes: int | None = Field(default=None, ge=0)
     parent_id: str | None = None
     source: TaskSource = TaskSource.USER
+    # Names the asoode board this task belongs to: a link label, a work package
+    # externalRef, or its id. Resolved to link_id before storage; None routes to
+    # the project's default link.
+    target: str | None = None
 
 
 class UpdateTaskRequest(BaseModel):

@@ -61,6 +61,35 @@
     "approved_at": null,
     "approved_by": null,
     "category": "mandatory_rules",
+    "content": "Do not merge, rename away, delete or transfer tasks/memories between memory projects, and never link one project's boards to another. Project history is the asset this server exists to keep; mixing two projects corrupts both and is not recoverable from a snapshot, because the snapshot records the merged state as if it were true.\n\nDuplicate registrations DO exist - the same repo registered twice under different slugs (see [[duplicate-memory-projects-in-this-workspace]]). The correct handling is to pick the project actually in use, act only on that one, and REPORT the duplicate for the user to retire. Never retire it yourself, and never 'tidy up' by consolidating.",
+    "created_at": "2026-09-04T02:51:06.929255",
+    "created_by": null,
+    "entities": [
+      "DO",
+      "REPORT",
+      "tidy up"
+    ],
+    "expires_at": null,
+    "id": "c599910c-ff58-420c-acee-8e46e7587997",
+    "metadata": null,
+    "priority": 3,
+    "related_ids": [],
+    "source": "user",
+    "status": "active",
+    "summary": "Do not merge, rename away, delete or transfer tasks/memories between memory projects, and never link one project's boards to another",
+    "tags": [
+      "projects",
+      "safety",
+      "history"
+    ],
+    "title": "Never merge, move or cross-link data between memory projects",
+    "updated_at": "2026-09-04T02:51:06.929255"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "mandatory_rules",
     "content": "After fixing any bug in this project, you must update the local installation so the running daemon reflects the fix. Rebuild the frontend if it changed (cd frontend && npm run build), then run `uv run memory-mcp-setup` to reinstall the runtime/UI and reload the launchd daemon, and verify the daemon is healthy. A bug fix is not considered complete until the local installation has been updated.",
     "created_at": "2026-05-19T12:17:39.381259",
     "created_by": null,

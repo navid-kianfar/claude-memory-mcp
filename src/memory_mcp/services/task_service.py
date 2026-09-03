@@ -46,11 +46,22 @@ class TaskService:
         provenance_repo: ProvenanceRepository,
         project_repo: ProjectRepository,
         session_repo: SessionRepository,
+        link_resolver=None,
+        outbox_repo=None,
+        mirror=None,
     ):
         self._task_repo = task_repo
         self._provenance_repo = provenance_repo
         self._project_repo = project_repo
         self._session_repo = session_repo
+        # Turns a task's `target` (a board name) into a link id. Injected so
+        # this service never imports the bridge: a task store must work with
+        # no asoode configured at all.
+        self._link_resolver = link_resolver
+        # The bridge's durable half. Both optional: a task store with no asoode
+        # configured must behave exactly as it always has.
+        self._outbox = outbox_repo
+        self._mirror = mirror
         # One lock per project, guarding the read-modify-write in claim_next.
         # DuckDB is single-writer and this repo opens a connection per
         # operation, so the "pick a task, then claim it" pair needs serializing.
@@ -119,6 +130,7 @@ class TaskService:
             parent_id=request.parent_id,
             position=position,
             source=request.source.value,
+            link_id=self._resolve_target(request.project, request.target),
         )
 
         self._project_repo.touch(request.project)
@@ -126,9 +138,38 @@ class TaskService:
             request.project, task_id, "task_create",
             {"title": task.title, "source": task.source, "priority": task.priority},
         )
+        self._enqueue(request.project, task_id, "create", {"title": task.title})
         return task
 
     # ---------- read ----------
+
+    def _enqueue(self, project: str, task_id: str, op: str, payload: dict | None = None) -> None:
+        """Record that a task changed, and nudge a mirror.
+
+        Both halves are best-effort by design: the local write has already
+        happened and is the source of truth. An unreachable asoode, a missing
+        credential and an unlinked project are all ordinary outcomes here, never
+        a reason to fail the edit that just succeeded.
+        """
+        if self._outbox is None:
+            return
+        try:
+            self._outbox.enqueue(project, task_id, op, payload)
+        except Exception:  # noqa: BLE001
+            return
+        if self._mirror is not None:
+            try:
+                self._mirror(project)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _resolve_target(self, project: str, target: str | None) -> int | None:
+        """A task's board, or None for the project's default. Raises if the name
+        is wrong - a task silently landing on the wrong board is worse than a
+        rejected create."""
+        if not target or self._link_resolver is None:
+            return None
+        return self._link_resolver(project, target)
 
     def get(self, project: str, task_id: str) -> Task:
         return self._require(project, task_id)
@@ -240,6 +281,12 @@ class TaskService:
                 "state_to": task.state.value,
             },
         )
+        # Only what asoode can actually represent. A local-only edit (position,
+        # claim, lease) must not queue a mirror that would be a no-op round trip.
+        if {"state", "title", "description"} & set(changed):
+            self._enqueue(request.project, request.task_id, "update", {
+                "state": task.state.value, "changed": changed,
+            })
         return task, changed
 
     def reorder(self, project: str, ordered_ids: list[str]) -> int:
@@ -250,6 +297,13 @@ class TaskService:
             self._touch_lease(project, task_id)
             self._record(project, task_id, "task_reorder", {"position": index})
         return count
+
+    def set_link(self, project: str, task_id: str, link_id: int | None) -> Task:
+        """Point a task at a linked board. Used by the importer, which knows the
+        board a task came from, and by a later re-route."""
+        task = self._task_repo.update(project, task_id, {"link_id": link_id})
+        self._record(project, task_id, "task_link", {"link_id": link_id})
+        return task
 
     def set_state(self, project: str, task_id: str, state: TaskState) -> Task:
         task, _ = self.update(
@@ -353,6 +407,7 @@ class TaskService:
         )
         self._touch_lease(project, task_id)
         self._record(project, task_id, "task_comment", {"kind": kind_value})
+        self._enqueue(project, task_id, "comment", {"body": body, "kind": kind_value})
         return comment
 
     # ---------- time tracking ----------
@@ -419,6 +474,7 @@ class TaskService:
             project, task_id, "task_done",
             {"state_from": task.state.value, "note": bool(note)},
         )
+        self._enqueue(project, task_id, "state", {"state": TaskState.DONE.value})
         return self.detail(project, task_id)
 
     def convert_to_task(self, project: str, task_id: str) -> Task:

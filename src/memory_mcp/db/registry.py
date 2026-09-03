@@ -88,7 +88,16 @@ CREATE TABLE IF NOT EXISTS project_links (
 CREATE INDEX IF NOT EXISTS idx_project_links_slug ON project_links(slug);
 """
 
-# `project_links` above is the asoode bridge's routing table. One memory project
+# `project_links` above is the task bridge's routing table.
+#
+# It keys on remote_work_package_id, not on remote_project_id, because a task
+# always lives under a BOARD: asoode has no route attaching a task to a project,
+# and the same is true of Asana (project/section), Monday (board/group), Trello
+# (board/list) and Jira (project + issue type). remote_project_id is kept for
+# building a URL a human can open, never for routing.
+#
+# `provider` defaults to 'asoode' and is not read yet - it is the seam for the
+# other platforms, so a project can hold links to several at once. One memory project
 # links to MANY remote boards - `match_paths` (a JSON array of repo subpaths) is
 # what lets a monorepo send apps/backend/** and apps/frontend/** to different
 # boards instead of one pile.

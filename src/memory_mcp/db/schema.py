@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -50,7 +50,11 @@ _TASK_DDL = (
         created_at        TIMESTAMP DEFAULT current_timestamp,
         updated_at        TIMESTAMP DEFAULT current_timestamp,
         done_at           TIMESTAMP,
-        archived_at       TIMESTAMP
+        archived_at       TIMESTAMP,
+        -- Which linked asoode board this task belongs to. NULL means "the
+        -- project's default link" - a monorepo maps one memory project to many
+        -- boards, and a task has to be able to say which app it is for.
+        link_id           INTEGER
     )
     """,
     """
@@ -345,6 +349,21 @@ def migrate_v5_to_v6(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (6)")
 
 
+def migrate_v6_to_v7(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v6 -> v7: a task can name the board it belongs to.
+
+    One memory project maps to MANY asoode work packages - a monorepo has one per
+    app - so a task needs to say which. Nullable on purpose: every task that
+    existed before this column routes to the project's default link, which is
+    what keeps single-board projects working unchanged.
+    """
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN link_id INTEGER")
+    except Exception:
+        pass
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (7)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -385,6 +404,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 6:
         migrate_v5_to_v6(conn)
         version = 6
+    if version < 7:
+        migrate_v6_to_v7(conn)
+        version = 7
     return version
 
 

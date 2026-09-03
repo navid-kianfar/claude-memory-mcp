@@ -32,6 +32,13 @@ class FakeClient:
         self.projects = projects or []
         self.created_projects, self.created_tasks, self.state_changes = [], [], []
         self.work_packages = {}
+        # Boards that already exist - what `attach` links to without creating.
+        self.existing_boards = [
+            dict(BOARD, id="wp-worker", title="Worker & Jobs",
+                 externalRef="app-worker", projectId="proj-1"),
+            dict(BOARD, id="wp-backend", title="Backend API",
+                 externalRef="app-backend", projectId="proj-1"),
+        ]
         self._by_ref = {}
         self._next = 0
 
@@ -75,6 +82,26 @@ class FakeClient:
                                    "external_ref": external_ref,
                                    "description": description})
         return task
+
+    def find_work_package(self, external_ref):
+        for board in self.existing_boards:
+            if board.get("externalRef") == external_ref:
+                return board
+        return None
+
+    def list_work_packages(self, project_id=None):
+        return [
+            {"id": b["id"], "title": b["title"], "external_ref": b.get("externalRef"),
+             "project_id": b.get("projectId"), "project_title": "Fake"}
+            for b in self.existing_boards
+            if project_id is None or b.get("projectId") == project_id
+        ]
+
+    def fetch_work_package(self, package_id):
+        for board in self.existing_boards:
+            if board["id"] == package_id:
+                return board
+        return None
 
     def change_state(self, task_id, state):
         self.state_changes.append((task_id, state))
@@ -346,3 +373,101 @@ class TestRebinding:
             is_default=False,
         )
         assert get_default_project_link(linked_project)["remote_work_package_id"] == "wp-main"
+
+
+class TestAttachExisting:
+    """Linking boards that already exist - the normal case for a monorepo.
+
+    bootstrap CREATES a board. Running it on a workspace whose per-app boards
+    already exist adds a duplicate beside the real ones, which is exactly what
+    happened to the asoode project's nine app boards.
+    """
+
+    def test_attaches_without_creating_anything(self, linked_project):
+        fake = FakeClient()
+        bridge = AsoodeBridge(container.project_service, container.task_service, fake)
+        result = bridge.attach(linked_project, external_ref="app-worker")
+
+        assert result["created"] is False
+        assert fake.created_projects == []
+        assert fake.work_packages == {}, "attach must not create a work package"
+        assert result["work_package"]["id"] == "wp-worker"
+
+    def test_resolves_by_external_ref(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, FakeClient()
+        )
+        result = bridge.attach(linked_project, external_ref="app-backend")
+        assert result["work_package"]["title"] == "Backend API"
+
+    def test_resolves_by_work_package_id(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, FakeClient()
+        )
+        result = bridge.attach(linked_project, work_package_id="wp-worker")
+        assert result["work_package"]["external_ref"] == "app-worker"
+
+    def test_an_unknown_ref_says_how_to_find_the_right_one(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, FakeClient()
+        )
+        with pytest.raises(AsoodeError, match="asoode boards"):
+            bridge.attach(linked_project, external_ref="does-not-exist")
+
+    def test_needs_some_identifier(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, FakeClient()
+        )
+        with pytest.raises(AsoodeError, match="work_package_id or external_ref"):
+            bridge.attach(linked_project)
+
+    def test_one_project_attaches_to_many_boards(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, FakeClient()
+        )
+        bridge.attach(linked_project, external_ref="app-backend", is_default=True)
+        bridge.attach(linked_project, external_ref="app-worker", is_default=False)
+
+        links = bridge.links(linked_project)
+        assert len(links) == 2
+        assert sum(1 for l in links if l["is_default"]) == 1, "exactly one default"
+        assert get_default_project_link(linked_project)["label"] == "Backend API"
+
+    def test_a_later_default_takes_over(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, FakeClient()
+        )
+        bridge.attach(linked_project, external_ref="app-backend")
+        bridge.attach(linked_project, external_ref="app-worker")
+        assert get_default_project_link(linked_project)["remote_work_package_id"] == "wp-worker"
+
+    def test_re_attaching_updates_rather_than_duplicating(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, FakeClient()
+        )
+        bridge.attach(linked_project, external_ref="app-worker", label="First")
+        bridge.attach(linked_project, external_ref="app-worker", label="Renamed")
+        links = bridge.links(linked_project)
+        assert len(links) == 1
+        assert links[0]["label"] == "Renamed"
+
+    def test_the_label_is_what_a_task_routes_by(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, FakeClient()
+        )
+        result = bridge.attach(linked_project, external_ref="app-worker", label="worker")
+        assert result["link"]["label"] == "worker"
+
+    def test_the_state_map_comes_from_the_real_board(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, FakeClient()
+        )
+        link = bridge.attach(linked_project, external_ref="app-worker")["link"]
+        assert link["state_list_map"]["done"] == "l-done"
+
+    def test_boards_lists_what_can_be_attached(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, FakeClient()
+        )
+        refs = {b["external_ref"] for b in bridge.boards()}
+        assert refs == {"app-worker", "app-backend"}

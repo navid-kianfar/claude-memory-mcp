@@ -72,6 +72,35 @@
     "approved_at": null,
     "approved_by": null,
     "category": "reference",
+    "content": "Same repo registered twice under different slugs, confirmed by the user 2026-09-04:\n- `resume-weapon` and `achasoftresumeweapon` are ONE project. Bad naming, nothing more. They map to the resume-weapon:wp:* asoode board family and have NOTHING to do with kalagh - do not treat those two ambiguities as related.\n- `kalagh` and `kalagh-monorepo` both point at /Desktop/DEV/achasoft/kalagh and share the kalagh:wp:* family. Which one is live was not confirmed - ask before acting on it.\n\nOnly ONE of a duplicate pair should own the asoode links, or a task would mirror twice. Picking the live one is a judgement call for the user, not a cleanup to perform.",
+    "created_at": "2026-09-04T02:51:07.133502",
+    "created_by": null,
+    "entities": [
+      "DEV",
+      "NOTHING",
+      "ONE"
+    ],
+    "expires_at": null,
+    "id": "7b727bd7-eca3-49a4-a51d-733bb130df4e",
+    "metadata": null,
+    "priority": 2,
+    "related_ids": [],
+    "source": "user",
+    "status": "active",
+    "summary": "Same repo registered twice under different slugs, confirmed by the user 2026-09-04:\n- `resume-weapon` and `achasoftresumeweapon` are ONE project",
+    "tags": [
+      "projects",
+      "asoode",
+      "duplicates"
+    ],
+    "title": "Duplicate memory projects in this workspace",
+    "updated_at": "2026-09-04T02:51:07.133502"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "reference",
     "content": "A session opened on /Users/aslan_nejad/Desktop/DEV/smg/visitor-analytics/VisitorAnalytics1.0 does NOT talk to this server. ~/.claude.json has a project-scoped mcpServers override for that path pointing `memory` at a stdio process from a different repo - github.com/serkansmg/smg-claude-memory-mcp, checked out at ~/Desktop/DEV/smg/smg-claude-memory-mcp - with MEMORY_MCP_DATA_DIR=~/.memory-mcp. That fork is at v0.5.0 and contains zero asoode code and no task module, so a session there sees no asoode tools and no bound-board brief, no matter what ships here.\n\nEvery other project resolves `memory` from the top-level ~/.claude.json entry: http://127.0.0.1:8765/mcp, the launchd daemon (com.claude-memory-mcp.daemon) running ~/.claude-memory-mcp/runtime, v0.6.0, data dir ~/.claude-memory-mcp.\n\nThe two registries are separate stores. ~/.memory-mcp/registry.duckdb knows only va1-panel and visitoranalytics10, and points the latter at VisitorAnalytics1.0/.memory-mcp.duckdb (in-repo, 271 memories). The daemon's registry has its own visitoranalytics10.duckdb with 0 memories. So dropping the override without migrating that file would hand the project an empty memory.\n\nConsequence for diagnosis: when a session reports that asoode or tasks are missing, check which server it is actually bound to before suspecting this code. Commit 7e8ee77 (\"Teach every session what asoode is\") cannot reach a session on the fork - the fix ships in this server's SERVER_INSTRUCTIONS, which that session never loads.",
     "created_at": "2026-09-04T00:30:19.108320",
     "created_by": null,

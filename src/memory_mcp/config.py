@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # MEMORY_MCP_ASOODE_API_URL=https://api.asoode.internal. An env value wins
     # over one stored from the UI, so a site can bake its URLs into the daemon's
     # launchd environment and have that be authoritative.
+    # Mirror task mutations to asoode automatically. Off in tests, which must
+    # never reach the network - a suite that talks to a live server is slow,
+    # flaky, and one fixture typo away from writing to a real board.
+    asoode_auto_mirror: bool = True
     asoode_app_url: str = ""
     asoode_api_url: str = ""
     asoode_socket_url: str = ""

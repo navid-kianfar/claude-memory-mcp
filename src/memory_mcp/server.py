@@ -64,6 +64,12 @@ parked. memory_session_start returns them as `queued_tasks`.
   - "Add a task to do X" means memory_task_add(title="X") and nothing else -
     keep doing what you were doing. Recording a requirement is precisely how the
     user avoids interrupting the work in progress.
+  - THE OTHER CASE: when you START work the user asked for, create a task for it
+    and memory_task_start it immediately. "Tasks are parked requirements" is
+    about not STARTING someone else's queued work - it is not a reason to leave
+    your own in-flight work unrecorded. Work that lives only in the conversation
+    is gone when the session ends, and on a linked project it never reaches the
+    board. Comment as you go; memory_task_done when finished.
   - Out-of-scope work you noticed goes in with memory_task_add(source='claude').
   - Several sessions may share a project, so a task is taken by claiming it:
     memory_task_claim_next(session_id) ONLY when you have finished what you were
@@ -207,19 +213,84 @@ def memory_asoode_link(
 
 
 @mcp.tool()
+def memory_asoode_attach(
+    external_ref: str | None = None,
+    work_package_id: str | None = None,
+    label: str | None = None,
+    is_default: bool = True,
+    project: str | None = None,
+) -> dict:
+    """Link this project to an asoode board that ALREADY EXISTS. Creates nothing.
+
+    Use this, not memory_asoode_link, whenever the boards are already set up -
+    which is the normal case for a monorepo where each app has its own work
+    package. memory_asoode_link CREATES a board, so running it there adds a
+    duplicate beside the real ones.
+
+    Identify the board by `external_ref` (its externalRef, e.g. "asoode-worker")
+    or by `work_package_id`. memory_asoode_boards lists what is available.
+
+    One project attaches to MANY boards. `is_default` picks the one a task with
+    no explicit target routes to; promoting a link demotes the others.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.asoode_bridge.attach(
+            slug, external_ref=external_ref, work_package_id=work_package_id,
+            label=label, is_default=is_default,
+        )
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_asoode_boards(asoode_project_id: str | None = None) -> dict:
+    """List the asoode boards this token can see, to pick one to attach to.
+
+    Returns each board's id, title, externalRef and owning project. Read-only.
+    """
+    def _run():
+        return {"boards": container.asoode_bridge.boards(asoode_project_id)}
+    return _safe(_run)
+
+
+@mcp.tool()
 def memory_asoode_push(project: str | None = None, include_done: bool = True) -> dict:
     """Mirror this project's local tasks onto its linked asoode board.
 
-    One-way, local -> asoode. Each task is sent with its local id as externalRef,
-    so asoode returns the task that already exists instead of creating a second
-    one: re-running this pushes changes, never duplicates.
+    RARELY NEEDED NOW: a linked project mirrors automatically on every task
+    create, update, completion and comment. Use this for a full reconciliation -
+    after working offline, or to seed a board that was linked after the tasks
+    already existed. Each task goes to ITS OWN board when the project has
+    several.
 
-    Nothing reads asoode back yet, so a change made in asoode does not reach the
-    local list - do not tell the user the two are in sync.
+    Each task carries its local id as externalRef, so asoode returns the task
+    that already exists rather than creating a second one.
+
+    STILL ONE-WAY, local -> asoode. Nothing reads asoode back, so a task created
+    or edited in asoode does not reach the local list. Never tell the user the
+    two sides are in sync.
     """
     def _run():
         slug = _resolve(project)
         return container.asoode_bridge.push(slug, include_done=include_done)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_asoode_import(project: str | None = None) -> dict:
+    """Pull tasks FROM the linked asoode boards into this project's task list.
+
+    For tasks created in asoode by a person - they have no externalRef, so the
+    remote id is the identity, held in task_sync. Re-importing therefore updates
+    rather than duplicating.
+
+    IMPORT-ONLY, not a two-way sync: a remote change overwrites the local title
+    and state, and local edits are not merged back from here. Never describe the
+    two sides as "in sync" on the strength of this.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.asoode_bridge.import_all(slug)
     return _safe(_run)
 
 
@@ -938,21 +1009,40 @@ def memory_task_add(
     estimated_minutes: int | None = None,
     parent_id: str | None = None,
     source: str = "user",
+    target: str | None = None,
     project: str | None = None,
 ) -> dict:
-    """Queue a requirement in this project's task list.
+    """Record a task: either a requirement parked for later, or work starting now.
 
-    THIS QUEUES WORK - IT DOES NOT START IT. A task added here is a requirement
-    parked for later, not an instruction and not permission to begin. When the
-    user says "add a task to do X", add it and carry on with what you were
-    doing; do not start X unless they ask you to in the same breath. That is the
-    entire point of the list: the user can record something mid-session without
-    derailing the work in progress.
+    TWO CASES, and confusing them is the common mistake:
+
+    1. PARKING A REQUIREMENT. "Add a task to do X" means add it and CARRY ON with
+       what you were doing - adding it is not permission to begin X. That is the
+       point of the list: the user can record something mid-session without
+       derailing the work in progress.
+
+    2. RECORDING WORK YOU ARE STARTING NOW. When you begin something the user
+       asked for, create the task and immediately memory_task_start it. Do NOT
+       skip this because "tasks are for parked work" - work that exists only in
+       the conversation is lost when the session ends, and on a linked project it
+       never reaches the board where the user can see it. Comment on it as you
+       go, and memory_task_done it when finished.
+
+    The difference is whether YOU are about to do it, not whether it belongs in
+    the list. Both belong in the list.
 
     source='user' (default) means the user asked for it - use this whenever the
     requirement came from them. source='claude' means you queued it yourself:
     out-of-scope work you noticed and are deliberately not doing now. Say that
     you queued it rather than acting on it.
+
+    `target` names the asoode board this task belongs to, when the project is
+    linked to several - a monorepo has one work package per app. Give a link
+    label, a work package externalRef, or its id; memory_asoode_links lists
+    them. Omit it and the task routes to the project's DEFAULT board, which is
+    what keeps single-board projects working unchanged. A wrong name is
+    rejected rather than guessed - a task silently landing on the wrong board is
+    worse than a failed create.
 
     Dates are ISO 8601 strings. priority is 0-3.
     """
@@ -969,6 +1059,7 @@ def memory_task_add(
             estimated_minutes=estimated_minutes,
             parent_id=parent_id,
             source=TaskSource(source),
+            target=target,
         )
         task = container.task_service.create(req)
         return {

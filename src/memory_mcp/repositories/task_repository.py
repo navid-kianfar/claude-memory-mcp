@@ -16,7 +16,7 @@ TASK_COLUMNS = (
     "id, title, description, state, priority, assignee, labels, due_at, "
     "begin_at, end_at, estimated_minutes, parent_id, position, source, triage, "
     "claimed_by, claimed_at, lease_expires_at, "
-    "created_at, updated_at, done_at, archived_at"
+    "created_at, updated_at, done_at, archived_at, link_id"
 )
 
 # A claim is free if nobody holds it, or if the holder's lease has run out. The
@@ -78,6 +78,7 @@ def _row_to_task(row) -> Task:
         updated_at=row[19],
         done_at=row[20],
         archived_at=row[21],
+        link_id=row[22],
     )
 
 
@@ -117,17 +118,18 @@ class TaskRepository:
         parent_id: str | None,
         position: int,
         source: str,
+        link_id: int | None = None,
     ) -> Task:
         with connect(project) as conn:
             conn.execute(
                 """
-                INSERT INTO tasks (id, title, description, state, priority, assignee, labels, due_at, begin_at, end_at, estimated_minutes, parent_id, position, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks (id, title, description, state, priority, assignee, labels, due_at, begin_at, end_at, estimated_minutes, parent_id, position, source, link_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     task_id, title, description, state, priority, assignee, labels,
                     due_at, begin_at, end_at, estimated_minutes, parent_id,
-                    position, source,
+                    position, source, link_id,
                 ],
             )
             row = conn.execute(
@@ -681,19 +683,42 @@ class OutboxRepository:
             return None
         return row[0] if row else None
 
+    def local_id_for_remote(self, project: str, link_id: int, remote_task_id: str) -> str | None:
+        """The local task a remote one maps to, if it has been seen before.
+
+        The import's identity key. asoode-native tasks carry no externalRef, so
+        the remote id is the only stable handle - which is why the mapping has to
+        be stored rather than derived.
+        """
+        try:
+            with connect(project) as conn:
+                row = conn.execute(
+                    "SELECT task_id FROM task_sync WHERE link_id = ? AND remote_task_id = ?",
+                    [link_id, remote_task_id],
+                ).fetchone()
+        except Exception:
+            return None
+        return row[0] if row else None
+
     def remember(
         self, project: str, task_id: str, link_id: int, remote_task_id: str,
         last_pushed_state: str | None = None,
     ) -> None:
         """Remember which remote task a local one became, so mirroring an edit
         never has to re-POST a create just to recover the id."""
+        # The timestamp is a bound parameter, not the `current_timestamp` keyword:
+        # inside an ON CONFLICT clause DuckDB binds a bare identifier against the
+        # target table and fails with "no column named current_timestamp".
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
         with connect(project) as conn:
             conn.execute(
                 "INSERT INTO task_sync (task_id, link_id, remote_task_id, "
-                "last_pushed_state, updated_at) VALUES (?, ?, ?, ?, current_timestamp) "
+                "last_pushed_state, updated_at) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT (task_id, link_id) DO UPDATE SET "
                 "remote_task_id = excluded.remote_task_id, "
                 "last_pushed_state = excluded.last_pushed_state, "
-                "updated_at = current_timestamp",
-                [task_id, link_id, remote_task_id, last_pushed_state],
+                "updated_at = excluded.updated_at",
+                [task_id, link_id, remote_task_id, last_pushed_state, now],
             )

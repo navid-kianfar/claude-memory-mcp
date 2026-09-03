@@ -8,6 +8,9 @@
   memory-mcp asoode check                  prove the PAT reaches the server
   memory-mcp asoode link <slug>            create/find the project + board
   memory-mcp asoode push <slug>            mirror local tasks onto that board
+  memory-mcp asoode boards                 list boards you can attach to
+  memory-mcp asoode attach <slug> --ref R  link an EXISTING board
+  memory-mcp asoode import <slug>          pull board tasks into the local list
   memory-mcp asoode open [slug]            open the board, already signed in
 
 The token is read from a no-echo prompt, or from stdin with --stdin. It is
@@ -38,7 +41,7 @@ _CLI_ERRORS = (AsoodeConfigError, AsoodeError)
 
 USAGE = (
     "Usage: memory-mcp asoode "
-    "[status|set-pat|clear-pat|set-url|reset-url|check|link|push|open]"
+    "[status|set-pat|clear-pat|set-url|reset-url|check|link|attach|boards|push|open]"
 )
 
 
@@ -194,6 +197,56 @@ def main(argv: list[str]) -> None:
             )
             for failure in result["failed"]:
                 print(f"  FAILED {failure['title']}: {failure['error']}", file=sys.stderr)
+
+        elif cmd == "boards":
+            p = argparse.ArgumentParser(prog="memory-mcp asoode boards")
+            p.add_argument("--project-id", default=None)
+            ns = p.parse_args(rest)
+            from memory_mcp.container import container
+
+            boards = container.asoode_bridge.boards(ns.project_id)
+            print(f"{len(boards)} board(s):")
+            for b in boards:
+                ref = b["external_ref"] or "-"
+                print(f"  {b['id']}  {ref:<32} {b['title'][:36]:<36} ({b['project_title']})")
+
+        elif cmd == "attach":
+            p = argparse.ArgumentParser(prog="memory-mcp asoode attach")
+            p.add_argument("slug")
+            group = p.add_mutually_exclusive_group(required=True)
+            group.add_argument("--ref", help="the board's externalRef")
+            group.add_argument("--wp-id", dest="wp_id", help="the work package id")
+            p.add_argument("--label", default=None, help="name a task can route by")
+            p.add_argument(
+                "--not-default", action="store_true",
+                help="attach without making it the default target",
+            )
+            ns = p.parse_args(rest)
+            from memory_mcp.container import container
+
+            result = container.asoode_bridge.attach(
+                ns.slug, external_ref=ns.ref, work_package_id=ns.wp_id,
+                label=ns.label, is_default=not ns.not_default,
+            )
+            wp = result["work_package"]
+            print(f"attached {ns.slug} -> {wp['title']!r} ({wp['id']})")
+            print(f"  externalRef {wp['external_ref']}  default={result['link']['is_default']}")
+            print(f"  lists: {', '.join(i['title'] for i in result['lists'])}")
+
+        elif cmd == "import":
+            p = argparse.ArgumentParser(prog="memory-mcp asoode import")
+            p.add_argument("slug")
+            ns = p.parse_args(rest)
+            from memory_mcp.container import container
+
+            result = container.asoode_bridge.import_all(ns.slug)
+            c = result["counts"]
+            print(f"{c['created']} created, {c['updated']} updated across {c['boards']} board(s).")
+            for b in result["boards"]:
+                if b["counts"]["created"] or b["counts"]["updated"]:
+                    print(f"  {b['board']}: +{b['counts']['created']} ~{b['counts']['updated']}")
+            for f in result["failed"]:
+                print(f"  FAILED {f['board']}: {f['error']}", file=sys.stderr)
 
         elif cmd == "open":
             p = argparse.ArgumentParser(prog="memory-mcp asoode open")

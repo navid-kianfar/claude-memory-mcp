@@ -12,6 +12,10 @@ import memory_mcp.db.connection as conn_mod
 def temp_data_dir(tmp_path):
     """Use a temporary directory for all tests. Reset all process-level caches."""
     original = settings.data_dir
+    original_mirror = settings.asoode_auto_mirror
+    # No test may reach asoode. A test that wants the flusher drives
+    # AsoodeBridge.flush directly, against a fake client.
+    settings.asoode_auto_mirror = False
     settings.data_dir = tmp_path / "memory-mcp"
     settings.ensure_dirs()
 
@@ -24,6 +28,7 @@ def temp_data_dir(tmp_path):
     conn_mod._initialized_dbs.clear()
     conn_mod.invalidate_path_cache()
     settings.data_dir = original
+    settings.asoode_auto_mirror = original_mirror
 
     # Delete the DuckDB files this test made. pytest keeps the last few runs of
     # tmp_path, and a DuckDB file has a ~5 MB floor even with one row - a suite

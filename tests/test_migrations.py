@@ -144,7 +144,7 @@ def test_migration_adds_v5_task_tables(tmp_path):
             "due_at", "begin_at", "end_at", "estimated_minutes", "parent_id",
             "position", "source", "triage", "claimed_by", "claimed_at",
             "lease_expires_at", "created_at", "updated_at", "done_at",
-            "archived_at",
+            "archived_at", "link_id",
         } == cols
 
         # The pre-existing memory survived the upgrade untouched.

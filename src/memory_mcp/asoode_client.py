@@ -176,6 +176,39 @@ class AsoodeClient:
             body["externalRef"] = external_ref
         return self._post(f"/work-packages/create/{project_id}", body)
 
+    def find_work_package(self, external_ref: str) -> dict | None:
+        """Locate an existing board by its externalRef, across every project.
+
+        The ref is unique per project, not globally, so a duplicate ref in two
+        projects would be ambiguous - the first match wins and the caller can
+        pass a work-package id instead when that matters. Reads only: attaching
+        to a board must never create one.
+        """
+        wanted = (external_ref or "").strip()
+        if not wanted:
+            return None
+        for project in self.list_projects():
+            for board in project.get("workPackages") or []:
+                if (board.get("externalRef") or "") == wanted:
+                    return {**board, "projectId": board.get("projectId") or project["id"]}
+        return None
+
+    def list_work_packages(self, project_id: str | None = None) -> list[dict]:
+        """Every board the token can see, optionally within one project."""
+        boards = []
+        for project in self.list_projects():
+            if project_id and project["id"] != project_id:
+                continue
+            for board in project.get("workPackages") or []:
+                boards.append({
+                    "id": board.get("id"),
+                    "title": board.get("title"),
+                    "external_ref": board.get("externalRef"),
+                    "project_id": project["id"],
+                    "project_title": project.get("title"),
+                })
+        return boards
+
     def fetch_work_package(self, package_id: str) -> dict:
         return self._post(f"/work-packages/fetch/{package_id}")
 
@@ -204,6 +237,22 @@ class AsoodeClient:
         elif assign_self:
             body["assignSelf"] = True
         return self._post(f"/tasks/{list_id}/create", body)
+
+    def reposition(self, task_id: str, list_id: str, order: int = 0) -> Any:
+        """Move a task into a board column.
+
+        Needed alongside change_state because asoode keeps `state` and `listId`
+        independent: setting state alone leaves a Done card sitting in the To Do
+        column, which is what a human actually looks at.
+        """
+        return self._post(
+            f"/tasks/{task_id}/reposition", {"listId": list_id, "order": order}
+        )
+
+    def comment(self, task_id: str, message: str, private: bool = False) -> Any:
+        return self._post(
+            f"/tasks/{task_id}/comment", {"message": message, "private": private}
+        )
 
     def change_state(self, task_id: str, state: str | int) -> Any:
         ordinal = state if isinstance(state, int) else STATE_TO_ORDINAL.get(state)

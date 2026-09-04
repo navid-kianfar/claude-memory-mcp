@@ -218,6 +218,9 @@ class Task(BaseModel):
     # Phase 2: inbound items awaiting a decision, mirroring memories.pending.
     # Nothing sets it in Phase 1.
     triage: bool = False
+    # Which agent role this task is for ("frontend", "backend", "e2e", ...).
+    # None means anyone may claim it - see TaskService.claim_next.
+    role: str | None = None
     # The multi-session claim: which session is holding this task, and until
     # when. NULL claimed_by means free. See TaskService.claim_next.
     claimed_by: str | None = None
@@ -316,6 +319,8 @@ class CreateTaskRequest(BaseModel):
     estimated_minutes: int | None = Field(default=None, ge=0)
     parent_id: str | None = None
     source: TaskSource = TaskSource.USER
+    # Which agent role should pick this up. None means anyone.
+    role: str | None = None
     # Names the asoode board this task belongs to: a link label, a work package
     # externalRef, or its id. Resolved to link_id before storage; None routes to
     # the project's default link.
@@ -336,6 +341,7 @@ class UpdateTaskRequest(BaseModel):
     end_at: datetime | None = None
     estimated_minutes: int | None = Field(default=None, ge=0)
     position: int | None = None
+    role: str | None = None
 
 
 class TaskFilter(BaseModel):

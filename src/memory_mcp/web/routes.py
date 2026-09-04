@@ -23,9 +23,9 @@ from memory_mcp.config import settings
 from memory_mcp.container import container
 from memory_mcp.context import (
     LOCAL_USER, RequestUser, current_user, get_active_project, get_request_user,
-    reset_request_user, set_active_project, set_request_user,
+    reset_request_user, set_request_user,
 )
-from memory_mcp.db.registry import get_credential
+from memory_mcp.db.registry import get_credential, get_setting, set_setting
 from memory_mcp.exceptions import (
     AuthError, ForbiddenError, MemoryMCPError, MemoryNotFoundError,
     ProjectNotFoundError, TaskNotFoundError,
@@ -444,7 +444,7 @@ def _meta(params, body, query):
         "version": __version__,
         "categories": [c.value for c in MemoryCategory],
         "rule_categories": ["mandatory_rules", "forbidden_rules"],
-        "active_project": get_active_project(),
+        "active_project": get_setting(UI_ACTIVE_PROJECT_KEY) or get_active_project(),
         "model": settings.embedding_model,
         "mode": "server" if server else "local",
         "current_user": user_public,
@@ -565,12 +565,28 @@ def _update_project(params, body, query):
     return {"status": "ok", "project": info.model_dump(mode="json")}
 
 
+# The project the management UI is LOOKING at. Deliberately not the same thing
+# as the MCP active project.
+#
+# It used to call set_active_project(), which writes a process-global that the
+# daemon shares with every MCP session, every subagent and this UI at once. So
+# clicking a project in the panel silently redirected the writes of every running
+# Claude session to it. That is not hypothetical: on 2026-09-04 a memory_task_plan
+# with no explicit project landed seven tasks in the wrong project and pushed them
+# to that project's board within seconds.
+#
+# A viewer must never steer a writer. The UI keeps its own selection here; only
+# memory_use and memory_session_start - called by the client that actually owns
+# the session - may set the MCP active project.
+UI_ACTIVE_PROJECT_KEY = "ui_active_project"
+
+
 def _set_active(params, body, query):
     slug = (body.get("slug") or "").strip()
     if not slug:
         raise ValueError("slug is required")
     container.project_service.get(slug)  # validate it exists
-    set_active_project(slug)
+    set_setting(UI_ACTIVE_PROJECT_KEY, slug)
     return {"status": "ok", "active_project": slug}
 
 

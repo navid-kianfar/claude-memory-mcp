@@ -133,6 +133,7 @@ class TaskService:
             position=position,
             source=request.source.value,
             link_id=self._resolve_target(request.project, request.target),
+            role=request.role,
         )
 
         self._project_repo.touch(request.project)
@@ -256,6 +257,10 @@ class TaskService:
             fields["estimated_minutes"] = request.estimated_minutes
         if request.position is not None:
             fields["position"] = request.position
+        if request.role is not None:
+            # "" clears it: a task re-opened to any agent has to be expressible,
+            # and None already means "leave this field alone".
+            fields["role"] = request.role or None
 
         if not fields:
             return before, []
@@ -411,6 +416,7 @@ class TaskService:
 
     def claim_next(
         self, project: str, session_id: str, ttl_minutes: int = CLAIM_LEASE_MINUTES,
+        role: str | None = None,
     ) -> Task | None:
         """Take the next available task for this session, or None if there is none.
 
@@ -426,13 +432,19 @@ class TaskService:
             # candidate and this terminates in one or two passes. The cap only
             # rules out a spin if that assumption is ever broken.
             for _ in range(_CLAIM_ATTEMPTS):
-                candidate = self._task_repo.next_claimable(project)
+                candidate = self._task_repo.next_claimable(project, role)
                 if candidate is None:
                     return None
-                if self._task_repo.claim(project, candidate.id, session_id, ttl_minutes):
+                if self._task_repo.claim(
+                    project, candidate.id, session_id, ttl_minutes, role,
+                ):
                     self._record(
                         project, candidate.id, "task_claim",
-                        {"session_id": session_id, "lease_minutes": ttl_minutes},
+                        {
+                            "session_id": session_id,
+                            "lease_minutes": ttl_minutes,
+                            "role": role,
+                        },
                     )
                     return self._task_repo.get(project, candidate.id)
             return None

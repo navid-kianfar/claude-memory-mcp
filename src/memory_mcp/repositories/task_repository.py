@@ -18,7 +18,7 @@ TASK_COLUMNS = (
     "id, title, description, state, priority, assignee, labels, due_at, "
     "begin_at, end_at, estimated_minutes, parent_id, position, source, triage, "
     "claimed_by, claimed_at, lease_expires_at, "
-    "created_at, updated_at, done_at, archived_at, link_id"
+    "created_at, updated_at, done_at, archived_at, link_id, role"
 )
 
 # A claim is free if nobody holds it, or if the holder's lease has run out. The
@@ -28,6 +28,19 @@ CLAIMABLE_SQL = (
     "(claimed_by IS NULL OR lease_expires_at IS NULL "
     "OR lease_expires_at < current_timestamp::TIMESTAMP)"
 )
+
+# Role routing, applied to BOTH the candidate search and the conditional UPDATE
+# that actually takes the task - if only the search filtered, a task could change
+# role between picking it and claiming it and the claim would still win.
+#
+# A caller with no role is unconstrained: that is every session that existed
+# before the agent team, and the main session orchestrating by hand. A caller
+# WITH a role gets its own work plus unroled work, never another role's.
+ROLE_SQL = "(role IS NULL OR role = ?)"
+
+
+def _role_clause(role: str | None) -> tuple[str, list]:
+    return (f" AND {ROLE_SQL}", [role]) if role else ("", [])
 
 COMMENT_COLUMNS = "id, task_id, body, kind, author, created_at"
 TIME_ENTRY_COLUMNS = "id, task_id, begin_at, end_at, manual"
@@ -81,6 +94,7 @@ def _row_to_task(row) -> Task:
         done_at=row[20],
         archived_at=row[21],
         link_id=row[22],
+        role=row[23],
     )
 
 
@@ -121,17 +135,18 @@ class TaskRepository:
         position: int,
         source: str,
         link_id: int | None = None,
+        role: str | None = None,
     ) -> Task:
         with connect(project) as conn:
             conn.execute(
                 """
-                INSERT INTO tasks (id, title, description, state, priority, assignee, labels, due_at, begin_at, end_at, estimated_minutes, parent_id, position, source, link_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks (id, title, description, state, priority, assignee, labels, due_at, begin_at, end_at, estimated_minutes, parent_id, position, source, link_id, role)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     task_id, title, description, state, priority, assignee, labels,
                     due_at, begin_at, end_at, estimated_minutes, parent_id,
-                    position, source, link_id,
+                    position, source, link_id, role,
                 ],
             )
             row = conn.execute(
@@ -240,18 +255,31 @@ class TaskRepository:
         return int(row[0]) if row else 0
 
     def next_position(self, project: str, parent_id: str | None) -> int:
-        """Append position, scoped to the parent so sub-task ordering is its own."""
+        """Append position, scoped to the parent so sub-task ordering is its own.
+
+        DO NOT rewrite this as `SELECT COALESCE(MAX(position), -1) ... WHERE
+        parent_id = ?`. That is what it used to be, and on DuckDB 1.5.1 it raises
+        an INTERNAL assertion - "Attempted to access index 0 within vector of size
+        0" - for an ungrouped MAX over a filtered scan of a PERSISTED table that
+        matches no rows, when the filter value falls inside the column's on-disk
+        statistics range. That is precisely the case that matters here: the FIRST
+        sub-task of a parent, whose id sorts among the existing parent_ids.
+
+        It took sub-task creation out entirely - memory_task_add with a parent_id,
+        and every memory_task_plan carrying a parent_index - so the "decompose into
+        sub-tasks" rule was unimplementable while it stood.
+
+        Not a corrupt file and not a stale index: CHECKPOINT does not clear it and
+        dropping idx_tasks_parent does not either. A plain SELECT of the same rows
+        is unaffected, and folding them in Python costs nothing at these row counts.
+        """
+        if parent_id is None:
+            sql, params = "SELECT position FROM tasks WHERE parent_id IS NULL", []
+        else:
+            sql, params = "SELECT position FROM tasks WHERE parent_id = ?", [parent_id]
         with connect(project) as conn:
-            if parent_id is None:
-                row = conn.execute(
-                    "SELECT COALESCE(MAX(position), -1) FROM tasks WHERE parent_id IS NULL"
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT COALESCE(MAX(position), -1) FROM tasks WHERE parent_id = ?",
-                    [parent_id],
-                ).fetchone()
-        return int(row[0]) + 1
+            rows = conn.execute(sql, params).fetchall()
+        return max((int(r[0]) for r in rows), default=-1) + 1
 
     # ---------- Update ----------
 
@@ -331,6 +359,15 @@ class TaskRepository:
             )
             conn.execute("DELETE FROM task_comments WHERE task_id = ?", [task_id])
             conn.execute("DELETE FROM task_time_entries WHERE task_id = ?", [task_id])
+            # The mirror's bookkeeping goes too, or deleting a task leaves rows
+            # pointing at a task that no longer exists. The flusher already drops
+            # an outbox row whose task is gone, so those were self-healing, but
+            # task_sync rows are not and simply accumulate.
+            for table in ("task_outbox", "task_sync"):
+                try:
+                    conn.execute(f"DELETE FROM {table} WHERE task_id = ?", [task_id])
+                except Exception:  # noqa: BLE001 - table absent on an old schema
+                    pass
             conn.execute("DELETE FROM tasks WHERE id = ?", [task_id])
 
     def archive(self, project: str, task_id: str) -> Task:
@@ -358,8 +395,15 @@ class TaskRepository:
 
     def claim(
         self, project: str, task_id: str, session_id: str, ttl_minutes: int,
+        role: str | None = None,
     ) -> bool:
-        """Try to take one task. True when this caller got it."""
+        """Try to take one task. True when this caller got it.
+
+        Still ONE conditional UPDATE whose rowcount is the answer - the role is
+        another predicate on it, not a separate check. Reading the role first and
+        then updating would reopen exactly the race this design closes.
+        """
+        clause, params = _role_clause(role)
         with connect(project) as conn:
             row = conn.execute(
                 f"""
@@ -368,25 +412,32 @@ class TaskRepository:
                     claimed_at = current_timestamp::TIMESTAMP,
                     lease_expires_at = (current_timestamp + INTERVAL (?) MINUTE)::TIMESTAMP,
                     updated_at = current_timestamp
-                WHERE id = ? AND {CLAIMABLE_SQL}
+                WHERE id = ? AND {CLAIMABLE_SQL}{clause}
                 """,
-                [session_id, ttl_minutes, task_id],
+                [session_id, ttl_minutes, task_id, *params],
             ).fetchone()
         return bool(row and row[0])
 
-    def next_claimable(self, project: str) -> Task | None:
+    def next_claimable(self, project: str, role: str | None = None) -> Task | None:
         """The task a session should be offered next: waiting, not archived, and
         either unclaimed or held on an expired lease. Reading order, so the most
-        urgent thing comes first."""
+        urgent thing comes first.
+
+        `role` narrows it to work this caller should do - its own role's tasks
+        plus unroled ones. Omitting it keeps the pre-agent-team behaviour exactly:
+        the caller is offered anything.
+        """
+        clause, params = _role_clause(role)
         with connect(project) as conn:
             row = conn.execute(
                 f"""
                 SELECT {TASK_COLUMNS} FROM tasks
                 WHERE state IN {OPEN_STATES_SQL} AND archived_at IS NULL
-                  AND parent_id IS NULL AND {CLAIMABLE_SQL}
+                  AND parent_id IS NULL AND {CLAIMABLE_SQL}{clause}
                 {_ORDER_BY}
                 LIMIT 1
-                """
+                """,
+                params,
             ).fetchone()
         return _row_to_task(row) if row else None
 

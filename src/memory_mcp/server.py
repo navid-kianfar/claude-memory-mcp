@@ -1089,6 +1089,7 @@ def memory_task_add(
     parent_id: str | None = None,
     source: str = "user",
     target: str | None = None,
+    role: str | None = None,
     project: str | None = None,
 ) -> dict:
     """Record a task: either a requirement parked for later, or work starting now.
@@ -1139,6 +1140,7 @@ def memory_task_add(
             parent_id=parent_id,
             source=TaskSource(source),
             target=target,
+            role=role,
         )
         task = container.task_service.create(req)
         return {
@@ -1218,6 +1220,7 @@ def memory_task_update(
     begin_at: str | None = None,
     end_at: str | None = None,
     estimated_minutes: int | None = None,
+    role: str | None = None,
     project: str | None = None,
 ) -> dict:
     """Change a task. Only the fields you pass are touched.
@@ -1226,6 +1229,9 @@ def memory_task_update(
     duplicate, incomplete, blocker. Setting it to done stamps done_at; moving it
     back off done clears it. begin_at/end_at are the PLANNED window - actual
     time comes from memory_task_start / memory_task_stop.
+
+    `role` re-routes the task to an agent ('frontend', 'backend', ...); pass an
+    empty string to clear it and let any agent claim it again.
     """
     def _run():
         slug = _resolve(project)
@@ -1242,6 +1248,7 @@ def memory_task_update(
             begin_at=begin_at,
             end_at=end_at,
             estimated_minutes=estimated_minutes,
+            role=role,
         )
         task, changed = container.task_service.update(req)
         return {
@@ -1361,7 +1368,9 @@ def memory_task_delete(task_id: str, project: str | None = None) -> dict:
 
 
 @mcp.tool()
-def memory_task_claim_next(session_id: str, project: str | None = None) -> dict:
+def memory_task_claim_next(
+    session_id: str, role: str | None = None, project: str | None = None,
+) -> dict:
     """Take the next available task in this project for this session.
 
     CALL THIS WHEN YOU HAVE FINISHED WHAT YOU WERE DOING - NEVER IN THE MIDDLE
@@ -1376,19 +1385,26 @@ def memory_task_claim_next(session_id: str, project: str | None = None) -> dict:
     collected. Claim when the user has pointed you at the list, or when you have
     finished the thing you were asked to do and are picking up the next one.
 
-    Pass the session_id returned by memory_session_start. Returns the claimed
-    task, or claimed=false when nothing is available. The claim is held on a
+    Pass the session_id returned by memory_session_start. Pass `role` when you
+    ARE one of the agents ('frontend', 'backend', ...): you are then offered your
+    own role's tasks plus unroled ones, and never another role's. Omit it and you
+    are offered anything, which is what the main session wants.
+
+    Returns the claimed task, or claimed=false when nothing is available. The claim is held on a
     30-minute lease that renews whenever you touch the task, and is dropped
     automatically by memory_session_end.
     """
     def _run():
         slug = _resolve(project)
-        task = container.task_service.claim_next(slug, session_id)
+        task = container.task_service.claim_next(slug, session_id, role=role)
         if task is None:
             return {
                 "claimed": False,
                 "project": slug,
-                "message": "No unclaimed task is waiting.",
+                "message": (
+                    f"No unclaimed task is waiting for role {role!r}."
+                    if role else "No unclaimed task is waiting."
+                ),
             }
         return {
             "claimed": True,

@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -46,6 +46,10 @@ _TASK_DDL = (
         triage            BOOLEAN DEFAULT FALSE,
         claimed_by        VARCHAR,
         claimed_at        TIMESTAMP,
+        -- Which agent this task is FOR: 'frontend', 'backend', 'e2e', ...
+        -- NULL means anyone may take it, which is what every task predating the
+        -- agent team is, so the queue never empties out from under a claimer.
+        role              VARCHAR,
         lease_expires_at  TIMESTAMP,
         created_at        TIMESTAMP DEFAULT current_timestamp,
         updated_at        TIMESTAMP DEFAULT current_timestamp,
@@ -466,6 +470,28 @@ def migrate_v10_to_v11(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (11)")
 
 
+def migrate_v11_to_v12(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v11 -> v12: a task can name the agent role it is for.
+
+    Five specialised agents share one queue, so a claim has to be able to say
+    "work meant for me" - without it the frontend agent takes a migration and
+    the e2e agent takes a design spec.
+
+    Nullable ON PURPOSE, and the claim treats NULL as claimable by anyone: every
+    task that existed before this column has no role, and a claim that demanded
+    one would empty the queue for every caller at once.
+
+    Added here AND to _TASK_DDL, so a database created fresh and one migrated to
+    v12 have the same shape. A column that exists on only one of those paths is a
+    bug that appears exclusively on someone else's machine.
+    """
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN role VARCHAR")
+    except Exception:
+        pass
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (12)")
+
+
 def migrate_v9_to_v10(conn: duckdb.DuckDBPyConnection) -> None:
     """Migrate v9 -> v10: remember which comments have been mirrored.
 
@@ -565,6 +591,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 11:
         migrate_v10_to_v11(conn)
         version = 11
+    if version < 12:
+        migrate_v11_to_v12(conn)
+        version = 12
     return version
 
 

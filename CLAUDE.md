@@ -126,6 +126,51 @@ so never tell the user the two are in sync.
 - At conversation start → `memory_session_start()`
 - At conversation end → `memory_session_end(session_id, summary)`
 
+## The agent team
+
+Eight agents share this server's memory and task board: `pm`, `backend`, `frontend`,
+`designer`, `test`, `reviewer`, `devops`, `docs`. All pinned to `claude-opus-5`; effort is
+`max` for pm/designer/test/reviewer, `xhigh` for backend/frontend/devops, `high` for docs.
+Design and verification status: `docs/bridge/06-agent-team.md`.
+
+**Every session starts as `pm`.** `setup_default_agent()` writes `agent: pm` to
+`~/.claude/settings.json`, so the session inherits pm's prompt, tools, model and effort and
+behaves as the orchestrator. Remove the `"agent"` key from that file to undo it. Note the
+mechanism: the MCP **server** cannot choose a session's agent — the **installer** sets it, and
+it reaches every project because it writes the same global files the MCP registration uses.
+
+**pm keeps Edit/Write on purpose.** A strictly read-only pm was considered and rejected: a
+session that cannot edit must dispatch a subagent for even a one-line change, and the measured
+floor for a dispatch is ~60k tokens. pm fans out to protect its own *context* — surveying a
+large codebase — not because it is forbidden to work. Do not "restore" a no-edit constraint
+without re-reading that trade-off.
+
+**`reviewer` cannot edit**, via `disallowedTools`. That one is load-bearing: a reviewer that can
+fix its own findings stops reviewing. `disallowedTools` is used rather than a `tools:` allowlist
+because a denylist leaves inherited MCP tools intact.
+
+**`agents/` is the source of truth.** Claude Code reads `~/.claude/agents/`; `setup_agents()`
+copies them there on every `memory-mcp-setup` and on the auto-update path. **Never edit the
+installed copy** — it is overwritten. Edit `agents/<name>.md`, re-run setup, restart Claude Code.
+Retiring an agent removes its installed copy, but only ever a file this installer wrote
+(`~/.claude-memory-mcp/agents-installed.json` is the manifest). See `agents/README.md`.
+
+**Routing.** A task carries a `role` (schema v12). `memory_task_claim_next(role=...)` offers an
+agent its own role's work plus unroled work, never another role's. A task with NO role is
+claimable by anyone — that keeps every task predating the column visible, so do not backfill
+roles to "tidy up".
+
+**Test credentials** live in `.claude/test-credentials.json`, gitignored, with a committed
+`.example`. Never in an agent definition — `agents/` is version-controlled and installs to a
+shared directory.
+
+**Two verified facts that shape every definition:** subagents inherit the memory MCP server in
+full, including its write surface (an agent's `tools` list restrains its filesystem, not the
+board); and `memory_search` does NOT search tasks, so an agent must read `memory_task_list` /
+`memory_task_get` or it misses the entire queue.
+
+Agents installed mid-session are not dispatchable until Claude Code restarts.
+
 ## Development
 
 ```bash

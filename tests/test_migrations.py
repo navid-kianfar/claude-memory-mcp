@@ -144,7 +144,7 @@ def test_migration_adds_v5_task_tables(tmp_path):
             "due_at", "begin_at", "end_at", "estimated_minutes", "parent_id",
             "position", "source", "triage", "claimed_by", "claimed_at",
             "lease_expires_at", "created_at", "updated_at", "done_at",
-            "archived_at", "link_id",
+            "archived_at", "link_id", "role",
         } == cols
 
         # The pre-existing memory survived the upgrade untouched.
@@ -316,3 +316,54 @@ def test_v8_keeps_queued_rows_through_the_rebuild(tmp_path):
         assert row == ("t9", "state", 2)
     finally:
         conn.close()
+
+
+def test_v12_adds_the_role_column_to_an_existing_tasks_table(tmp_path):
+    """An agent claim needs a role to filter on; old databases must gain it."""
+    db = tmp_path / "v12.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        run_migrations(conn)
+        columns = {r[1] for r in conn.execute("PRAGMA table_info('tasks')").fetchall()}
+        assert "role" in columns
+    finally:
+        conn.close()
+
+
+def test_v12_leaves_existing_tasks_unroled(tmp_path):
+    """The fallback the whole design rests on.
+
+    Every task predating the column has no role, and the claim treats NULL as
+    claimable by anyone. If the migration backfilled a role instead, the queue
+    would go invisible to every caller at once.
+    """
+    db = tmp_path / "v12-rows.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        run_migrations(conn)
+        conn.execute(
+            "INSERT INTO tasks (id, title, state) VALUES ('t1', 'Old task', 'todo')"
+        )
+        assert conn.execute("SELECT role FROM tasks WHERE id = 't1'").fetchone()[0] is None
+    finally:
+        conn.close()
+
+
+def test_tasks_table_matches_between_fresh_and_migrated_at_v12(tmp_path):
+    """The drift trap: a column added to only one of the two paths is a bug that
+    appears exclusively on a machine that upgraded rather than installed."""
+    fresh = duckdb.connect(str(tmp_path / "fresh12.duckdb"))
+    migrated_path = tmp_path / "migrated12.duckdb"
+    _make_v1_db(migrated_path)
+    migrated = duckdb.connect(str(migrated_path))
+    try:
+        create_schema(fresh)
+        run_migrations(migrated)
+        a = [(r[1], r[2]) for r in fresh.execute("PRAGMA table_info('tasks')").fetchall()]
+        b = [(r[1], r[2]) for r in migrated.execute("PRAGMA table_info('tasks')").fetchall()]
+        assert a == b
+    finally:
+        fresh.close()
+        migrated.close()

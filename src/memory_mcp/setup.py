@@ -9,6 +9,8 @@ Sets up the shared HTTP daemon model:
   6. /etc/hosts entry for the claude-memory-mcp hostname (prints a sudo command)
   7. Claude Code MCP config -> points at the HTTP daemon
   8. Claude Code hooks -> rule injection / session lifecycle
+  9. Agent definitions -> ~/.claude/agents/ (the standing agent team)
+ 10. `agent: pm` -> every session starts as the orchestrator
 
 The runtime is installed under ~/.memory-mcp/ (not in the repo) so the launchd
 background agent can run it even when the repo lives in a macOS TCC-protected
@@ -28,6 +30,10 @@ from memory_mcp.config import settings
 LAUNCHD_LABEL = "com.claude-memory-mcp.daemon"
 REPO_DIR = Path(__file__).resolve().parents[2]
 HOOKS_DIR = REPO_DIR / ".claude" / "hooks"
+# Agent definitions live at the repo root, NOT in .claude/agents/: a folder
+# there would scope the team to THIS repo, and the team has to follow the user
+# into every project. They install to ~/.claude/agents/ for that reason.
+AGENTS_DIR = REPO_DIR / "agents"
 
 
 def runtime_dir() -> Path:
@@ -276,16 +282,141 @@ def setup_hooks(remote_url: str | None = None, token: str | None = None) -> None
     print(f"    Hooks installed to {hooks_dest} ({added} added)")
 
 
+# ---------- 9. agent definitions ----------
+
+def claude_agents_dir() -> Path:
+    return Path.home() / ".claude" / "agents"
+
+
+def _installed_agents_manifest() -> Path:
+    """Which agent files THIS installer wrote, so it only ever removes its own."""
+    return settings.data_dir / "agents-installed.json"
+
+
+def setup_agents() -> None:
+    """Install the agent team from agents/ into ~/.claude/agents/.
+
+    agents/ in the repo is the source of truth; ~/.claude/agents/ is a build
+    artefact of it. That is the whole point - an agent edited in place under
+    ~/.claude/agents/ has no history, no review, and no way to tell whether a
+    prompt change helped. Edit agents/<name>.md and re-run setup.
+
+    Installed copies are OVERWRITTEN, exactly as the hook scripts are.
+
+    Retiring an agent removes its installed copy too, but only ever a file this
+    installer previously wrote: the manifest records what was installed last
+    time, so a hand-written agent sitting in the same directory is never touched.
+    """
+    if not AGENTS_DIR.is_dir():
+        print(f"    No agents/ directory at {AGENTS_DIR} - nothing to install.")
+        return
+
+    dest = claude_agents_dir()
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # README.md documents the folder for maintainers; it is not an agent.
+    sources = sorted(
+        p for p in AGENTS_DIR.glob("*.md") if p.name.lower() != "readme.md"
+    )
+    installed = [p.name for p in sources]
+
+    manifest = _installed_agents_manifest()
+    previous: list[str] = []
+    if manifest.exists():
+        try:
+            previous = json.loads(manifest.read_text())
+        except Exception:  # noqa: BLE001
+            previous = []
+
+    removed = 0
+    for name in previous:
+        if name not in installed:
+            stale = dest / name
+            if stale.exists():
+                stale.unlink()
+                removed += 1
+
+    for src in sources:
+        shutil.copy2(src, dest / src.name)
+
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps(installed, indent=2))
+
+    summary = f"    {len(installed)} agent(s) installed to {dest}"
+    if removed:
+        summary += f" ({removed} retired)"
+    print(summary)
+    if installed:
+        print(f"    Team: {', '.join(p.removesuffix('.md') for p in installed)}")
+
+
+# ---------- 10. pm as the session default ----------
+
+# The agent every Claude Code session starts as. Set in ~/.claude/settings.json -
+# the same global file setup_hooks() already owns.
+#
+# NOTE ON THE MECHANISM, because it is easy to misattribute: the memory MCP server
+# does NOT and cannot choose the session's agent. An MCP server exposes tools. The
+# INSTALLER sets this, and it reaches every project for the same reason the server
+# does - both are registered globally.
+DEFAULT_SESSION_AGENT = "pm"
+
+
+def setup_default_agent() -> None:
+    """Start every Claude Code session as the `pm` agent.
+
+    The session then inherits pm's prompt, tools, model and effort, so it behaves
+    as the orchestrator by default and delegates to the specialists.
+
+    pm deliberately KEEPS Edit/Write. A strictly read-only pm was considered and
+    rejected: a session that cannot edit must dispatch a subagent for even a
+    one-line change, and the measured floor for a dispatch is ~60k tokens. Do not
+    "restore" the no-edit constraint without reading that trade-off again.
+
+    A hand-set `agent` value is never clobbered - if someone chose a different
+    agent, that is a deliberate choice and this says so rather than overriding it.
+
+    To turn it off: remove the "agent" key from ~/.claude/settings.json.
+    """
+    path = claude_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    settings_obj: dict = {}
+    if path.exists():
+        try:
+            settings_obj = json.loads(path.read_text())
+        except Exception:  # noqa: BLE001
+            print("    Warning: ~/.claude/settings.json invalid - skipping default agent.")
+            return
+
+    if not (AGENTS_DIR / f"{DEFAULT_SESSION_AGENT}.md").exists():
+        print(f"    No agents/{DEFAULT_SESSION_AGENT}.md - leaving the session agent unset.")
+        return
+
+    current = settings_obj.get("agent")
+    if current and current != DEFAULT_SESSION_AGENT:
+        print(f"    Session agent is already '{current}' (set by hand) - leaving it alone.")
+        return
+    if current == DEFAULT_SESSION_AGENT:
+        print(f"    Sessions already start as '{DEFAULT_SESSION_AGENT}'.")
+        return
+
+    settings_obj["agent"] = DEFAULT_SESSION_AGENT
+    path.write_text(json.dumps(settings_obj, indent=2))
+    print(f"    Sessions now start as '{DEFAULT_SESSION_AGENT}' (remove the \"agent\" key to undo).")
+
+
 # ---------- lean update ----------
 
 def run_update() -> None:
     """Rebuild the runtime from the current source and reload the daemon.
 
     Lighter than full setup (skips the model/VSS/hosts/MCP-config/hooks
-    steps) - used by the auto-update hook when the repo source changes.
+    steps) - used by the auto-update hook when the repo source changes. Agent
+    definitions ARE source, so they refresh here too.
     """
     print("Updating the local installation...")
     setup_runtime()
+    setup_agents()
     setup_launchd()
     print("Local installation updated.")
 
@@ -308,6 +439,8 @@ def main() -> None:
         ("Checking /etc/hosts entry", setup_hosts),
         ("Configuring Claude Code MCP (HTTP daemon)", setup_claude_mcp),
         ("Installing Claude Code hooks", setup_hooks),
+        ("Installing the agent team", setup_agents),
+        ("Starting sessions as the pm agent", setup_default_agent),
     ]
     total = len(steps)
     for i, (msg, fn) in enumerate(steps, 1):

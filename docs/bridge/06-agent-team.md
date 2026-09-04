@@ -1,13 +1,29 @@
 # Phase 3 — the agent team
 
-> Status: **idea, agreed for later.** Not scheduled until Phase 1 (the task module) ships.
-> Sequence stays: **Phase 1 tasks → Phase 2 asoode bridge → Phase 3 agent team.**
+> Status: **built, 2026-09-04, and not yet dispatched.** EIGHT definitions live in
+> [`agents/`](../../agents/) and `memory-mcp-setup` installs them to `~/.claude/agents/`;
+> role-aware claiming is in the task store at schema v12. What remains is a real dispatch —
+> see *What was verified* below for exactly which assumptions are now checked and which are
+> still open.
+>
+> Sequence was: **Phase 1 tasks → Phase 2 asoode bridge → Phase 3 agent team.** Phases 1 and 2
+> shipped, which is what unblocked this one.
 
 ## The idea
 
 A standing team of specialised agents that work on my projects using the shared memory and the task
-board: a **project manager**, a **design/UI/UX** agent, a **frontend** agent, a **backend** agent, and
-an **e2e test** agent.
+board. The user specified this on 2026-09-04 and it supersedes the five-agent sketch below:
+**pm, backend, frontend, designer, test, reviewer, devops, docs** — each framed as a 20+ year
+senior practitioner, all on `claude-opus-5`, with token economy as an explicit constraint in
+every definition.
+
+`reviewer`, `devops` and `docs` were added because five agents all certifying their own work is
+the gap that this project's own history keeps punishing. `design` became `designer` and `e2e`
+became `test` (it covers e2e, integration, unit and preview testing).
+
+**pm orchestrates and has full tools.** Its fan-out exists to keep a whole codebase out of its
+own context — explorers survey, one digester folds their findings into a summary, pm consumes
+the summary — not to restrict what it may do. Verified: a subagent CAN spawn subagents.
 
 ## Why it is Phase 3, not Phase 1
 
@@ -34,11 +50,12 @@ That is the whole dependency. The five agent files themselves are roughly an hou
 Confirmed capabilities (see `03-claude-ui-surfaces.md` for the UI side of the same question):
 
 - **Subagents** are markdown files in `.claude/agents/` (project) or `~/.claude/agents/` (user), with
-  YAML frontmatter carrying at least `name`, `description`, `model`, `tools`, and `isolation`.
-  ⚠️ **Verify the exact frontmatter schema against the current docs before writing the files** — the
-  specs below record *intent*, not confirmed syntax.
-- **Subagents inherit the session's MCP servers.** So each agent can call `memory_*` and asoode's tools
-  directly. This is the "using its memory and project-management skills" requirement, already solved.
+  YAML frontmatter carrying `name`, `description`, `model`, `tools`, `color` and `isolation`.
+  ✅ **Confirmed 2026-09-04** against the installed plugin agents — the earlier warning that this
+  was intent rather than syntax is resolved.
+- **Subagents inherit the session's MCP servers.** ✅ **Verified 2026-09-04 by probe**, not assumed:
+  all 66 `mcp__memory__*` tools are available to a subagent immediately, with no `ToolSearch` and no
+  extra configuration, and the server's own instructions are injected verbatim too.
 - **`isolation: worktree`** gives an agent its own git worktree, auto-cleaned if unchanged. Frontend and
   backend agents can work the same repo in parallel without colliding.
   (asoode already has a `.claude/worktrees` directory, so this path is proven here.)
@@ -88,6 +105,48 @@ work along.
 `asoode/E2E-TEST-PLAN.md` is already the brief for this one. Sonnet rather than opus: running suites
 and reporting failures does not need the larger model, and this agent will run most often.
 
+## What was verified, and what is still open
+
+Probed 2026-09-04 with a real subagent. Recorded here because the rest of this document was
+written from assumption, and it is now possible to say which parts survived contact.
+
+**Confirmed:**
+
+- Subagents inherit the memory MCP server in full — 66 tools, immediately, plus the server's
+  own instructions. This was the load-bearing assumption of the whole design.
+- The frontmatter schema (see above).
+
+**Found, and it changed the definitions:**
+
+- `memory_search` does **not** search tasks. A probe searched "agent team" and got zero
+  results while a task by that exact name sat in the queue — memories and tasks are separate
+  stores. Every definition originally said "load context with `memory_get_rules` and
+  `memory_search`", which would have silently missed the entire task queue. All five now read
+  the queue explicitly.
+
+**Found, and not yet acted on:**
+
+- Subagents inherit the full **write** surface: `memory_store`, `memory_task_add`,
+  `memory_task_done`, `memory_asoode_push`, with no additional gate. The `pm` agent's "no
+  Edit/Write/Bash" restricts the filesystem, not the board. Worth a decision before the team
+  runs unattended.
+
+**Still open, all needing a restart to test:**
+
+- Whether an explicit `tools:` allowlist filters inherited MCP tools. The probe used
+  `general-purpose`, which has `tools: *`, so it cannot answer this. Every definition names its
+  `mcp__memory__*` tools explicitly meanwhile, which fails safe either way.
+- Whether `isolation: worktree` behaves as assumed.
+- Whether a handoff survives between two agents.
+
+**One operational fact, learned the hard way:** Claude Code enumerates `~/.claude/agents/` at
+**session start**. Agents installed mid-session are not dispatchable until a restart —
+`Agent(subagent_type="pm")` returns *"Agent type 'pm' not found"*.
+
+**Cost baseline:** one subagent doing three read-only lookups cost 61,742 tokens and ~50
+seconds. That is the floor for delegating anything, and the concrete argument behind
+"default to one agent" below.
+
 ## Orchestration — who dispatches
 
 **The main session dispatches. The `pm` agent does not.**
@@ -106,8 +165,12 @@ preference:
 
 ## Handoff protocol
 
+Work is routed by the `role` column on a task (schema v12): `memory_task_claim_next(role=...)`
+offers an agent its own role's work plus unroled work, and never another role's. A task with no
+role stays claimable by anyone, which is what keeps every pre-existing task visible.
+
 Because agents share no conversation, every handoff must be written down. Two channels, both already
-being built:
+built:
 
 - **A task comment** for anything tied to one piece of work — "API shape decided, see below",
   "blocked on the migration". The `kind` field on `task_comments` (Phase 1) distinguishes a note from a
@@ -138,9 +201,12 @@ config stays per-repo and committed.
 
 ## Open questions
 
-- Does `pm` write tasks directly, or propose them for approval? (Leaning: propose, using the same
-  `triage` flag the inbound asoode tasks use — one triage surface, not two.)
-- Per-project agent overrides, or one user-level team? (Leaning: user-level team, project-level
-  `CLAUDE.md` supplies the project specifics.)
+- ~~Does `pm` write tasks directly, or propose them for approval?~~ **Settled: propose**, using the
+  same `triage` flag the inbound asoode tasks use — one triage surface, not two.
+- ~~Per-project agent overrides, or one user-level team?~~ **Settled: one user-level team**, which is
+  why `agents/` sits at the repo root and installs to `~/.claude/agents/` rather than living in
+  `.claude/agents/`. Project-level `CLAUDE.md` supplies the specifics.
+- Should a subagent be allowed to write to the board at all? Raised by the probe above; nobody has
+  decided.
 - Should `design` and `frontend` be one agent? They hand off constantly. Worth trying as two first,
   merging if the handoff cost dominates.

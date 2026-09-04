@@ -641,3 +641,139 @@ class TestSessionIntegration:
         text = format_intro(slug)
         assert "1 task is waiting" in text
         assert "NOT instructions" in text
+
+
+class TestSubTaskPositionQuery:
+    """Guards the DuckDB crash that made sub-task creation impossible.
+
+    On 2026-09-04 `memory_task_add(parent_id=...)` and every `memory_task_plan`
+    carrying a `parent_index` failed with a DuckDB INTERNAL assertion,
+    "Attempted to access index 0 within vector of size 0", raised by
+    `next_position`'s `SELECT COALESCE(MAX(position), -1) ... WHERE parent_id = ?`
+    when the parent had no children yet.
+
+    THESE TESTS CANNOT REPRODUCE THE CRASH, and pretending otherwise would be
+    worse than not having them. It survived a copy of the live database but not a
+    `CREATE TABLE t2 AS SELECT * FROM tasks` of the very same 31 rows, so the
+    trigger is the persisted table's storage metadata, not the data, the schema
+    or the SQL text - and a table built fresh by a fixture never has it. That is
+    exactly why 627 passing tests, sub-task coverage included, missed it.
+
+    So the behavioural test below documents the intent, and the source guard is
+    the one that actually bites: it fails if anyone reintroduces the aggregate.
+    """
+
+    def test_first_sub_task_of_a_parent_gets_position_zero(self, container):
+        slug = _project(container, "t-subtask-position")
+        parent = _add(container, slug, title="Parent")
+        first = container.task_service.create(
+            CreateTaskRequest(project=slug, title="First child", parent_id=parent.id)
+        )
+        second = container.task_service.create(
+            CreateTaskRequest(project=slug, title="Second child", parent_id=parent.id)
+        )
+        # Sub-task ordering is its own sequence, not a continuation of the root one.
+        assert (first.position, second.position) == (0, 1)
+
+    def test_next_position_does_not_aggregate_over_a_filtered_scan(self):
+        """The shape that crashed. Fold the rows in Python instead."""
+        import ast
+        import inspect
+        import textwrap
+
+        from memory_mcp.repositories.task_repository import TaskRepository
+
+        # Inspect the SQL literals only. Not the whole source: the docstring
+        # quotes the banned SQL to explain it, and the fix itself calls Python's
+        # max() - either would make a naive substring check self-triggering.
+        func = ast.parse(
+            textwrap.dedent(inspect.getsource(TaskRepository.next_position))
+        ).body[0]
+        if isinstance(func.body[0], ast.Expr) and isinstance(
+            func.body[0].value, ast.Constant
+        ):
+            func.body.pop(0)
+        sql = " ".join(
+            node.value.upper()
+            for node in ast.walk(func)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        )
+        assert "SELECT" in sql, "expected next_position to still issue SQL"
+        assert "MAX(" not in sql, (
+            "next_position must not run an ungrouped MAX over a filtered scan - "
+            "it raises a DuckDB INTERNAL assertion when the parent has no "
+            "children yet, which is every parent's first sub-task."
+        )
+
+
+class TestRoleAwareClaiming:
+    """Five agents share one queue, so a claim must be able to say "work for me".
+
+    The fallback is the load-bearing part: a task with NO role stays claimable by
+    anyone. Every task that existed before the role column has none, and a claim
+    that demanded one would empty the queue for every caller at once.
+    """
+
+    def test_a_role_task_is_not_offered_to_another_role(self, container):
+        slug = _project(container, "t-role-mismatch")
+        _add(container, slug, title="Migration", role="backend")
+
+        assert container.task_service.claim_next(slug, "s1", role="frontend") is None
+
+    def test_a_role_task_is_offered_to_its_own_role(self, container):
+        slug = _project(container, "t-role-match")
+        task = _add(container, slug, title="Migration", role="backend")
+
+        claimed = container.task_service.claim_next(slug, "s1", role="backend")
+
+        assert claimed is not None and claimed.id == task.id
+
+    def test_an_unroled_task_is_claimable_by_any_role(self, container):
+        slug = _project(container, "t-role-open")
+        task = _add(container, slug, title="Anyone can do this")
+
+        claimed = container.task_service.claim_next(slug, "s1", role="e2e")
+
+        assert claimed is not None and claimed.id == task.id
+
+    def test_a_caller_with_no_role_is_offered_anything(self, container):
+        """Unchanged behaviour for every caller that predates the agent team."""
+        slug = _project(container, "t-role-none")
+        task = _add(container, slug, title="Migration", role="backend")
+
+        claimed = container.task_service.claim_next(slug, "s1")
+
+        assert claimed is not None and claimed.id == task.id
+
+    def test_a_role_skips_past_another_role_to_its_own_work(self, container):
+        slug = _project(container, "t-role-skip")
+        _add(container, slug, title="Backend work", role="backend", priority=3)
+        mine = _add(container, slug, title="Frontend work", role="frontend", priority=1)
+
+        claimed = container.task_service.claim_next(slug, "s1", role="frontend")
+
+        assert claimed is not None and claimed.id == mine.id
+
+    def test_the_role_is_enforced_by_the_claiming_update_itself(self, container):
+        """Not only by the candidate search.
+
+        If the role were filtered when picking a candidate but not when taking
+        it, a task whose role changed in between would still be claimed - the
+        race this design closes by making the conditional UPDATE the decision.
+        """
+        slug = _project(container, "t-role-update-guard")
+        task = _add(container, slug, title="Backend work", role="backend")
+
+        assert not container.task_repo.claim(slug, task.id, "s1", 30, "frontend")
+        assert container.task_repo.claim(slug, task.id, "s1", 30, "backend")
+
+    def test_role_survives_a_round_trip_and_can_be_cleared(self, container):
+        slug = _project(container, "t-role-update")
+        task = _add(container, slug, title="Work", role="backend")
+        assert container.task_service.get(slug, task.id).role == "backend"
+
+        updated, _ = container.task_service.update(
+            UpdateTaskRequest(project=slug, task_id=task.id, role="")
+        )
+
+        assert updated.role is None

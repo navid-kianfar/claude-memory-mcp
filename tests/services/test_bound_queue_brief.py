@@ -11,7 +11,7 @@ from memory_mcp.asoode_client import AsoodeError
 from memory_mcp.container import container
 from memory_mcp.db.registry import upsert_project_link
 from memory_mcp.models import CreateTaskRequest
-from memory_mcp.services.asoode_bridge import AsoodeBridge
+from memory_mcp.services.task_bridge import TaskBridge
 from memory_mcp.services.session_service import SessionService
 from tests.providers.fakes import FakeProvider
 
@@ -44,7 +44,7 @@ def _service(slug, client=None, bind=True):
             slug, base_url="https://api.asoode.com", remote_project_id="p1",
             remote_work_package_id="wp-1",
         )
-    bridge = AsoodeBridge(
+    bridge = TaskBridge(
         container.project_service, container.task_service, client or _provider()
     )
     return SessionService(
@@ -126,7 +126,7 @@ class TestFailureNeverBlocksASession:
 
 class TestQueueStatus:
     def test_returns_none_for_an_unbound_project(self, project):
-        bridge = AsoodeBridge(
+        bridge = TaskBridge(
             container.project_service, container.task_service, _provider()
         )
         assert bridge.queue_status(project) is None
@@ -136,7 +136,7 @@ class TestQueueStatus:
             project, base_url="https://api.asoode.com", remote_project_id="p1",
             remote_work_package_id="wp-1",
         )
-        bridge = AsoodeBridge(
+        bridge = TaskBridge(
             container.project_service, container.task_service,
             _provider(error=AsoodeError("asoode rejected the PAT (401)")),
         )

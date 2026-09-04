@@ -11,7 +11,7 @@ from memory_mcp.providers import ProviderError
 from memory_mcp.container import container
 from memory_mcp.db.registry import upsert_project_link
 from memory_mcp.models import TaskFilter
-from memory_mcp.services.asoode_bridge import AsoodeBridge
+from memory_mcp.services.task_bridge import TaskBridge
 from tests.providers.fakes import FakeProvider
 
 
@@ -42,7 +42,7 @@ def project():
 
 
 def _bridge(client=None):
-    return AsoodeBridge(
+    return TaskBridge(
         container.project_service, container.task_service, client or _provider(),
         outbox_repo=container.outbox_repo,
     )

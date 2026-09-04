@@ -205,7 +205,7 @@ def memory_asoode_link(
     """
     def _run():
         slug = _resolve(project)
-        return container.asoode_bridge.bootstrap(
+        return container.task_bridge.bootstrap(
             slug, project_title=project_title, board_title=board_title,
             reuse_project_id=asoode_project_id,
         )
@@ -244,7 +244,7 @@ def memory_asoode_attach(
     """
     def _run():
         slug = _resolve(project)
-        return container.asoode_bridge.attach(
+        return container.task_bridge.attach(
             slug, external_ref=external_ref, work_package_id=work_package_id,
             label=label, is_default=is_default, provider=provider,
             backfill=backfill,
@@ -263,7 +263,7 @@ def memory_asoode_boards(
     """
     def _run():
         return {
-            "boards": container.asoode_bridge.boards(asoode_project_id, provider),
+            "boards": container.task_bridge.boards(asoode_project_id, provider),
         }
     return _safe(_run)
 
@@ -287,7 +287,7 @@ def memory_asoode_push(project: str | None = None, include_done: bool = True) ->
     """
     def _run():
         slug = _resolve(project)
-        return container.asoode_bridge.push(slug, include_done=include_done)
+        return container.task_bridge.push(slug, include_done=include_done)
     return _safe(_run)
 
 
@@ -304,7 +304,7 @@ def memory_asoode_reconcile(project: str | None = None) -> dict:
     """
     def _run():
         slug = _resolve(project)
-        return container.asoode_bridge.reconcile(slug)
+        return container.task_bridge.reconcile(slug)
     return _safe(_run)
 
 
@@ -322,7 +322,7 @@ def memory_asoode_import(project: str | None = None) -> dict:
     """
     def _run():
         slug = _resolve(project)
-        return container.asoode_bridge.import_all(slug)
+        return container.task_bridge.import_all(slug)
     return _safe(_run)
 
 
@@ -331,7 +331,7 @@ def memory_asoode_links(project: str | None = None) -> dict:
     """Show which asoode boards this memory project is linked to."""
     def _run():
         slug = _resolve(project)
-        return {"slug": slug, "links": container.asoode_bridge.links(slug)}
+        return {"slug": slug, "links": container.task_bridge.links(slug)}
     return _safe(_run)
 
 

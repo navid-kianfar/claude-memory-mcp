@@ -213,7 +213,7 @@ class Task(BaseModel):
     # by a newer build (Phase 2 adds "asoode") must still read back here.
     source: str = "user"
     # Which linked asoode board this task belongs to. None routes to the
-    # project's default link - see AsoodeBridge.route.
+    # project's default link - see TaskBridge.route.
     link_id: int | None = None
     # Phase 2: inbound items awaiting a decision, mirroring memories.pending.
     # Nothing sets it in Phase 1.

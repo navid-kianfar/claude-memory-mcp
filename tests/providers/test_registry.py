@@ -19,7 +19,7 @@ from memory_mcp.providers import (
     reset_cache,
     unregister,
 )
-from memory_mcp.services.asoode_bridge import AsoodeBridge
+from memory_mcp.services.task_bridge import TaskBridge
 from tests.providers.fakes import FakeProvider
 
 
@@ -116,7 +116,7 @@ class TestOneProjectTwoPlatforms:
 
     def _bridge(self):
         # No injected provider: the registry must decide, per link.
-        return AsoodeBridge(
+        return TaskBridge(
             container.project_service, container.task_service,
             outbox_repo=container.outbox_repo,
         )

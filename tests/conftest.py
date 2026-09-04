@@ -14,7 +14,7 @@ def temp_data_dir(tmp_path):
     original = settings.data_dir
     original_mirror = settings.asoode_auto_mirror
     # No test may reach asoode. A test that wants the flusher drives
-    # AsoodeBridge.flush directly, against a fake client.
+    # TaskBridge.flush directly, against a fake client.
     settings.asoode_auto_mirror = False
     settings.data_dir = tmp_path / "memory-mcp"
     settings.ensure_dirs()

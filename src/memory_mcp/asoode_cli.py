@@ -168,7 +168,7 @@ def main(argv: list[str]) -> None:
             ns = p.parse_args(rest)
             from memory_mcp.container import container
 
-            result = container.asoode_bridge.bootstrap(
+            result = container.task_bridge.bootstrap(
                 ns.slug, project_title=ns.project_title,
                 board_title=ns.board_title, reuse_project_id=ns.asoode_project_id,
             )
@@ -187,7 +187,7 @@ def main(argv: list[str]) -> None:
             ns = p.parse_args(rest)
             from memory_mcp.container import container
 
-            result = container.asoode_bridge.push(
+            result = container.task_bridge.push(
                 ns.slug, include_done=not ns.skip_done,
             )
             counts = result["counts"]
@@ -204,7 +204,7 @@ def main(argv: list[str]) -> None:
             ns = p.parse_args(rest)
             from memory_mcp.container import container
 
-            boards = container.asoode_bridge.boards(ns.project_id)
+            boards = container.task_bridge.boards(ns.project_id)
             print(f"{len(boards)} board(s):")
             for b in boards:
                 ref = b["external_ref"] or "-"
@@ -224,7 +224,7 @@ def main(argv: list[str]) -> None:
             ns = p.parse_args(rest)
             from memory_mcp.container import container
 
-            result = container.asoode_bridge.attach(
+            result = container.task_bridge.attach(
                 ns.slug, external_ref=ns.ref, work_package_id=ns.wp_id,
                 label=ns.label, is_default=not ns.not_default,
             )
@@ -239,7 +239,7 @@ def main(argv: list[str]) -> None:
             ns = p.parse_args(rest)
             from memory_mcp.container import container
 
-            result = container.asoode_bridge.import_all(ns.slug)
+            result = container.task_bridge.import_all(ns.slug)
             c = result["counts"]
             print(f"{c['created']} created, {c['updated']} updated across {c['boards']} board(s).")
             for b in result["boards"]:

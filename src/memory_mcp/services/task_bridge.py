@@ -1,4 +1,8 @@
-"""The outbound bridge: mirror a memory project's task list onto an asoode board.
+"""The task bridge: mirror a memory project's task list onto a remote board.
+
+Provider-agnostic since the TaskProvider interface landed - it holds a provider,
+never a platform client, and every call routes through the link's provider. The
+file was called asoode_bridge.py while asoode was the only implementation.
 
 A MEMORY PROJECT LINKS TO WORK PACKAGES, NEVER TO A PROJECT. asoode's hierarchy
 is project -> work package (board) -> list (column) -> task, and there is no route
@@ -85,7 +89,7 @@ def build_state_list_map(board: Container) -> tuple[dict[str, str], str | None]:
     return mapping, default_id
 
 
-class AsoodeBridge:
+class TaskBridge:
     def __init__(
         self, project_service, task_service, provider: TaskProvider | None = None,
         outbox_repo=None, attachment_repo=None,

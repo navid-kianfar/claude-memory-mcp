@@ -30,31 +30,31 @@ def _link(slug, wp, label, is_default=False):
 class TestResolvingABoardName:
     def test_by_label(self, project):
         link = _link(project, "wp-worker", "worker")
-        assert container.asoode_bridge.resolve_link(project, "worker") == link["id"]
+        assert container.task_bridge.resolve_link(project, "worker") == link["id"]
 
     def test_is_case_insensitive_on_the_label(self, project):
         """The label is the human-typed identifier."""
         link = _link(project, "wp-worker", "worker")
-        assert container.asoode_bridge.resolve_link(project, "WORKER") == link["id"]
+        assert container.task_bridge.resolve_link(project, "WORKER") == link["id"]
 
     def test_by_work_package_id(self, project):
         link = _link(project, "wp-worker", "worker")
-        assert container.asoode_bridge.resolve_link(project, "wp-worker") == link["id"]
+        assert container.task_bridge.resolve_link(project, "wp-worker") == link["id"]
 
     def test_no_target_means_the_default(self, project):
         _link(project, "wp-worker", "worker", is_default=True)
-        assert container.asoode_bridge.resolve_link(project, None) is None
+        assert container.task_bridge.resolve_link(project, None) is None
 
     def test_a_wrong_name_is_rejected_and_lists_the_real_ones(self, project):
         _link(project, "wp-worker", "worker")
         _link(project, "wp-backend", "backend")
         with pytest.raises(ProviderError) as e:
-            container.asoode_bridge.resolve_link(project, "frontend")
+            container.task_bridge.resolve_link(project, "frontend")
         assert "worker" in str(e.value) and "backend" in str(e.value)
 
     def test_targeting_an_unlinked_project_says_to_attach(self, project):
         with pytest.raises(ProviderError, match="memory_asoode_attach"):
-            container.asoode_bridge.resolve_link(project, "worker")
+            container.task_bridge.resolve_link(project, "worker")
 
 
 class TestTheRoutingRule:
@@ -63,7 +63,7 @@ class TestTheRoutingRule:
         _link(project, "wp-worker", "worker")
         task = container.task_service.create(CreateTaskRequest(
             project=project, title="Worker thing", target="worker"))
-        assert container.asoode_bridge.route(project, task)["remote_work_package_id"] == "wp-worker"
+        assert container.task_bridge.route(project, task)["remote_work_package_id"] == "wp-worker"
 
     def test_a_task_with_no_target_goes_to_the_default(self, project):
         _link(project, "wp-backend", "backend", is_default=True)
@@ -71,7 +71,7 @@ class TestTheRoutingRule:
         task = container.task_service.create(
             CreateTaskRequest(project=project, title="Unspecified"))
         assert task.link_id is None
-        assert container.asoode_bridge.route(project, task)["remote_work_package_id"] == "wp-backend"
+        assert container.task_bridge.route(project, task)["remote_work_package_id"] == "wp-backend"
 
     def test_tasks_predating_the_column_still_route(self, project):
         """Defaulting rather than refusing is why upgrading does not strand them."""
@@ -79,12 +79,12 @@ class TestTheRoutingRule:
         task = container.task_service.create(
             CreateTaskRequest(project=project, title="Legacy"))
         assert task.link_id is None
-        assert container.asoode_bridge.route(project, task) is not None
+        assert container.task_bridge.route(project, task) is not None
 
     def test_an_unlinked_project_routes_nowhere_rather_than_failing(self, project):
         task = container.task_service.create(
             CreateTaskRequest(project=project, title="No boards"))
-        assert container.asoode_bridge.route(project, task) is None
+        assert container.task_bridge.route(project, task) is None
 
     def test_links_but_no_default_refuses_instead_of_guessing(self, project):
         _link(project, "wp-a", "a", is_default=False)
@@ -92,7 +92,7 @@ class TestTheRoutingRule:
         task = container.task_service.create(
             CreateTaskRequest(project=project, title="Ambiguous"))
         with pytest.raises(ProviderError, match="no default"):
-            container.asoode_bridge.route(project, task)
+            container.task_bridge.route(project, task)
 
     def test_a_deleted_link_falls_back_rather_than_dropping_the_task(self, project):
         from memory_mcp.db.registry import delete_project_link
@@ -102,7 +102,7 @@ class TestTheRoutingRule:
         task = container.task_service.create(CreateTaskRequest(
             project=project, title="Orphaned", target="worker"))
         delete_project_link(gone["id"])
-        assert container.asoode_bridge.route(project, task)["remote_work_package_id"] == "wp-backend"
+        assert container.task_bridge.route(project, task)["remote_work_package_id"] == "wp-backend"
 
     def test_a_bad_target_fails_the_create_rather_than_landing_anywhere(self, project):
         _link(project, "wp-backend", "backend", is_default=True)

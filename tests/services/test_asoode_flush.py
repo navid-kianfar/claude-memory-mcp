@@ -12,7 +12,7 @@ from memory_mcp.container import container
 from memory_mcp.db.registry import upsert_project_link
 from memory_mcp.models import CreateTaskRequest, TaskFilter
 from memory_mcp.repositories import OutboxRepository
-from memory_mcp.services.asoode_bridge import AsoodeBridge
+from memory_mcp.services.task_bridge import TaskBridge
 from memory_mcp.services.task_service import TaskService
 from tests.providers.fakes import FakeProvider
 
@@ -46,7 +46,7 @@ def _stack(slug, client):
         container.task_repo, container.provenance_repo, container.project_repo,
         container.session_repo, outbox_repo=outbox,
     )
-    return tasks, AsoodeBridge(
+    return tasks, TaskBridge(
         container.project_service, tasks, client, outbox_repo=outbox
     ), outbox
 

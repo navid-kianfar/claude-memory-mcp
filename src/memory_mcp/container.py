@@ -14,7 +14,7 @@ from memory_mcp.services import (
     MemoryService, SearchService, RulesService, RulesCache,
     SessionService, ProjectService, PortableService,
     ExportImportService, ModelService, UpdateService, ClaudeMdService,
-    TaskService, TemplateService, SyncService, AsoodeBridge, TaskPlanner,
+    TaskService, TemplateService, SyncService, TaskBridge, TaskPlanner,
 )
 
 
@@ -49,7 +49,7 @@ class Container:
             self.session_repo,
             # Late-bound: the bridge is constructed below and needs task_service,
             # so the resolver is a lambda rather than the object itself.
-            link_resolver=lambda project, target: self.asoode_bridge.resolve_link(
+            link_resolver=lambda project, target: self.task_bridge.resolve_link(
                 project, target
             ),
             outbox_repo=self.outbox_repo,
@@ -68,18 +68,24 @@ class Container:
         self.sync_service = SyncService(self.memory_repo, self.project_repo)
         # The asoode client is built lazily inside the bridge, so a machine
         # with no PAT stored still constructs the container fine.
-        self.asoode_bridge = AsoodeBridge(
+        self.task_bridge = TaskBridge(
             self.project_service, self.task_service, outbox_repo=self.outbox_repo,
             attachment_repo=self.attachment_repo,
         )
-        self.task_planner = TaskPlanner(self.task_service, self.asoode_bridge)
+        self.task_planner = TaskPlanner(self.task_service, self.task_bridge)
         # Constructed after the bridge: a bound project's session brief tells the
         # agent to work the board, so the session service needs it.
         self.session_service = SessionService(
             self.session_repo, self.memory_repo, self.project_repo,
-            self.rules_service, self.task_service, self.asoode_bridge,
+            self.rules_service, self.task_service, self.task_bridge,
         )
 
+
+    @property
+    def asoode_bridge(self) -> TaskBridge:
+        """Kept as an alias. The bridge is provider-agnostic and is now
+        `task_bridge`; this name is what existing callers and tests say."""
+        return self.task_bridge
 
     def _mirror_soon(self, project: str) -> None:
         """Drain the outbox off the caller's thread.
@@ -102,11 +108,11 @@ class Container:
 
         def _run():
             try:
-                self.asoode_bridge.flush(project)
+                self.task_bridge.flush(project)
                 # Then pull anything added on the board. Only NEW remote tasks -
-                # see AsoodeBridge.reconcile - so this can never overwrite local
+                # see TaskBridge.reconcile - so this can never overwrite local
                 # work, which is what makes it safe to run unattended.
-                self.asoode_bridge.reconcile(project)
+                self.task_bridge.reconcile(project)
             except Exception:  # noqa: BLE001 - a mirror can never break a local write
                 pass
             finally:

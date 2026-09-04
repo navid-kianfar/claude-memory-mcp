@@ -835,7 +835,7 @@ def _asoode_link(params, body, query):
     Idempotent via externalRef, but it does create real objects on the user's
     asoode account the first time - the UI asks before calling it.
     """
-    return container.asoode_bridge.bootstrap(
+    return container.task_bridge.bootstrap(
         params["slug"],
         project_title=body.get("project_title"),
         board_title=body.get("board_title"),
@@ -844,7 +844,7 @@ def _asoode_link(params, body, query):
 
 
 def _asoode_push(params, body, query):
-    return container.asoode_bridge.push(
+    return container.task_bridge.push(
         params["slug"], include_done=bool(body.get("include_done", True)),
     )
 
@@ -852,7 +852,7 @@ def _asoode_push(params, body, query):
 def _asoode_links(params, body, query):
     return {
         "slug": params["slug"],
-        "links": container.asoode_bridge.links(params["slug"]),
+        "links": container.task_bridge.links(params["slug"]),
     }
 
 

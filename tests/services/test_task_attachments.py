@@ -13,7 +13,7 @@ from memory_mcp.exceptions import MemoryMCPError
 from memory_mcp.models import CreateTaskRequest
 from memory_mcp.providers import Capabilities, ProviderError
 from memory_mcp.repositories import AttachmentRepository, OutboxRepository
-from memory_mcp.services.asoode_bridge import AsoodeBridge
+from memory_mcp.services.task_bridge import TaskBridge
 from memory_mcp.services.task_service import TaskService
 from tests.providers.fakes import FakeProvider
 
@@ -39,7 +39,7 @@ def stack(project):
         container.task_repo, container.provenance_repo, container.project_repo,
         container.session_repo, outbox_repo=outbox, attachment_repo=attachments,
     )
-    bridge = AsoodeBridge(
+    bridge = TaskBridge(
         container.project_service, tasks, provider,
         outbox_repo=outbox, attachment_repo=attachments,
     )

@@ -30,7 +30,7 @@ class SessionService:
         project_repo: ProjectRepository,
         rules_service: RulesService,
         task_service: TaskService,
-        asoode_bridge=None,
+        task_bridge=None,
     ):
         self._session_repo = session_repo
         self._memory_repo = memory_repo
@@ -39,7 +39,7 @@ class SessionService:
         self._task_service = task_service
         # Optional: absent in tests and on installs that never link a board, in
         # which case a session behaves exactly as it always has.
-        self._asoode_bridge = asoode_bridge
+        self._task_bridge = task_bridge
 
     def start(self, project: str) -> SessionContext:
         session_id = str(uuid.uuid4())
@@ -115,10 +115,10 @@ class SessionService:
         work the local list, because the local list is the same queue mirrored.
         Never raises: no integration failure may stop a session from starting.
         """
-        if self._asoode_bridge is None:
+        if self._task_bridge is None:
             return None, task_brief(project, queued)
         try:
-            status = self._asoode_bridge.queue_status(project)
+            status = self._task_bridge.queue_status(project)
         except Exception:  # noqa: BLE001 - defensive; queue_status already swallows
             return None, task_brief(project, queued)
         if status is None:

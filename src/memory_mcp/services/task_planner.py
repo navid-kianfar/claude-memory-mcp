@@ -33,9 +33,9 @@ class PlanError(MemoryMCPError):
 
 
 class TaskPlanner:
-    def __init__(self, task_service, asoode_bridge=None):
+    def __init__(self, task_service, task_bridge=None):
         self._tasks = task_service
-        self._bridge = asoode_bridge
+        self._bridge = task_bridge
 
     def plan(
         self, project: str, request: str, items: list[dict], *, mirror: bool = True,

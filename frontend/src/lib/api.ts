@@ -1,4 +1,7 @@
 import type {
+  AsoodeStatus,
+  BoardRef,
+  ProjectLink,
   ApplyTemplateResult,
   AuthSession,
   BulkAddRuleInput,
@@ -629,6 +632,57 @@ export const api = {
   deleteOrgRule(rid: string): Promise<{ status: string }> {
     return request(`/api/org/rules/${encodeURIComponent(rid)}`, {
       method: "DELETE",
+    });
+  },
+
+  // ---------- asoode integration ----------
+
+  getAsoodeStatus(): Promise<AsoodeStatus> {
+    return request("/api/asoode");
+  },
+
+  setAsoodeUrls(input: {
+    api_url?: string;
+    app_url?: string;
+    socket_url?: string;
+    reset?: boolean;
+  }): Promise<AsoodeStatus> {
+    return request("/api/asoode", { method: "PUT", body: JSON.stringify(input) });
+  },
+
+  setAsoodePat(token: string): Promise<AsoodeStatus> {
+    return request("/api/asoode/pat", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+  },
+
+  clearAsoodePat(): Promise<AsoodeStatus> {
+    return request("/api/asoode/pat", { method: "DELETE" });
+  },
+
+  getProjectLinks(slug: string): Promise<{ slug: string; links: ProjectLink[] }> {
+    return request(`/api/projects/${encodeURIComponent(slug)}/asoode/links`);
+  },
+
+  listBoards(): Promise<{ boards: BoardRef[] }> {
+    return request("/api/asoode/boards");
+  },
+
+  attachBoard(
+    slug: string,
+    input: { work_package_id?: string; external_ref?: string; label?: string; is_default?: boolean; backfill?: boolean }
+  ): Promise<Record<string, unknown>> {
+    return request(`/api/projects/${encodeURIComponent(slug)}/asoode/link`, {
+      method: "POST",
+      body: JSON.stringify({ ...input, attach: true }),
+    });
+  },
+
+  pushProject(slug: string): Promise<Record<string, unknown>> {
+    return request(`/api/projects/${encodeURIComponent(slug)}/asoode/push`, {
+      method: "POST",
+      body: JSON.stringify({}),
     });
   },
 };

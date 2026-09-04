@@ -6,6 +6,7 @@ import {
   ShieldCheck,
   Users,
   Command as CommandIcon,
+  Plug,
 } from "lucide-react";
 import type { Project } from "../types";
 import { cn } from "../lib/utils";
@@ -17,7 +18,8 @@ export type SidebarView =
   | "templates"
   | "moderation"
   | "users"
-  | "org-rules";
+  | "org-rules"
+  | "integrations";
 
 const ADMIN_NAV: { view: SidebarView; label: string; icon: React.ReactNode }[] = [
   { view: "moderation", label: "Moderation", icon: <ShieldCheck className="size-3.5" /> },
@@ -56,6 +58,8 @@ export function Sidebar({
   isAdmin,
 }: SidebarProps) {
   const showAdmin = Boolean(serverMode && isAdmin);
+  // Read before the branches below narrow `view` away from this value.
+  const isIntegrations = view === "integrations";
   return (
     <aside className="flex h-full w-72 shrink-0 flex-col border-r border-border bg-card">
       <div className="flex items-center gap-2.5 px-4 py-4">
@@ -224,6 +228,24 @@ export function Sidebar({
       ) : (
         <div className="flex-1" />
       )}
+
+      {/* Global, not per project: the endpoints and the token are machine-wide,
+          and putting them on a project would imply otherwise. Rendered outside
+          the view branches so it is reachable from all of them. */}
+      <div className="border-t border-border p-3">
+        <button
+          onClick={() => onViewChange("integrations")}
+          className={cn(
+            "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
+            isIntegrations
+              ? "bg-accent text-foreground"
+              : "text-muted-foreground hover:bg-accent hover:text-foreground"
+          )}
+        >
+          <Plug className="size-3.5" />
+          Integrations
+        </button>
+      </div>
     </aside>
   );
 }

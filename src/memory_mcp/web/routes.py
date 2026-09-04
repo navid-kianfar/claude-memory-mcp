@@ -829,12 +829,29 @@ def _asoode_clear_pat(params, body, query):
     return asoode.status()
 
 
+def _asoode_boards(params, body, query):
+    """Boards this credential can see - what the UI offers to attach."""
+    return {"boards": container.task_bridge.boards(query.get("project_id"))}
+
+
 def _asoode_link(params, body, query):
     """Create or find the asoode project + board for this memory project.
 
     Idempotent via externalRef, but it does create real objects on the user's
     asoode account the first time - the UI asks before calling it.
     """
+    # `attach` links a board that already exists; without it this CREATES one.
+    # The UI always attaches - creating from a browser click is too easy to do
+    # by accident, and a stray board cannot be removed from here.
+    if body.get("attach") or body.get("work_package_id") or body.get("external_ref"):
+        return container.task_bridge.attach(
+            params["slug"],
+            work_package_id=body.get("work_package_id"),
+            external_ref=body.get("external_ref"),
+            label=body.get("label"),
+            is_default=bool(body.get("is_default", True)),
+            backfill=bool(body.get("backfill", False)),
+        )
     return container.task_bridge.bootstrap(
         params["slug"],
         project_title=body.get("project_title"),
@@ -1308,6 +1325,7 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/asoode/link", _api(_asoode_link), methods=["POST"]),
         Route("/api/projects/{slug}/asoode/push", _api(_asoode_push), methods=["POST"]),
         Route("/api/asoode", _api(_asoode_status), methods=["GET"]),
+        Route("/api/asoode/boards", _api(_asoode_boards), methods=["GET"]),
         Route("/api/asoode", _api(_asoode_set_urls, admin=True), methods=["PUT"]),
         Route("/api/asoode/pat", _api(_asoode_set_pat, admin=True), methods=["POST"]),
         Route("/api/asoode/pat", _api(_asoode_clear_pat, admin=True), methods=["DELETE"]),

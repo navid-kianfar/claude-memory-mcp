@@ -433,3 +433,44 @@ export interface LoadFromFolderResult {
   source: LoadFromFolderSource;
   active: boolean;
 }
+
+
+/** asoode integration config, as /api/asoode reports it. */
+export interface AsoodeEndpoints {
+  app_url: string;
+  api_url: string;
+  socket_url: string;
+  is_default: boolean;
+  /** Per field: "default" | "env" | "setting" — where the value came from. */
+  sources: Record<string, string>;
+}
+
+export interface AsoodeStatus {
+  endpoints: AsoodeEndpoints;
+  pat_configured: boolean;
+  /** Prefix + last4 only. The token itself never leaves the daemon. */
+  pat: { prefix: string; last4: string; length: number } | null;
+  warnings: string[];
+  providers?: string[];
+}
+
+export interface ProjectLink {
+  id: number;
+  slug: string;
+  provider: string;
+  label: string | null;
+  base_url: string;
+  remote_project_id: string | null;
+  remote_work_package_id: string;
+  is_default: boolean;
+  state_list_map: Record<string, string> | null;
+}
+
+export interface BoardRef {
+  id: string;
+  title: string;
+  external_ref: string | null;
+  project_id: string | null;
+  project_title: string | null;
+  provider?: string;
+}

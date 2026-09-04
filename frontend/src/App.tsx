@@ -51,6 +51,7 @@ import { ImportDialog } from "./components/ImportDialog";
 import { ImportRulesDialog } from "./components/ImportRulesDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { TemplatesView } from "./components/TemplatesView";
+import { IntegrationsView } from "./components/IntegrationsView";
 import { EditProjectDialog } from "./components/EditProjectDialog";
 import { BulkAddRuleDialog } from "./components/BulkAddRuleDialog";
 
@@ -670,6 +671,14 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
               <h1 className="text-lg font-semibold capitalize">
                 {view === "org-rules" ? "Org-wide rules" : view}
               </h1>
+            ) : view === "integrations" ? (
+              <>
+                <h1 className="text-lg font-semibold">Integrations</h1>
+                <p className="truncate text-sm text-muted-foreground">
+                  asoode endpoints, the machine-wide token, and which board each
+                  project mirrors to.
+                </p>
+              </>
             ) : view === "templates" ? (
               <>
                 <h1 className="text-lg font-semibold">Templates</h1>
@@ -770,6 +779,8 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
               {bootError}
             </div>
           )}
+
+          {view === "integrations" && <IntegrationsView projects={projects} />}
 
           {view === "templates" && (
             <TemplatesView

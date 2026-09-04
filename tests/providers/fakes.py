@@ -48,6 +48,7 @@ class FakeProvider:
         self.attachments_sent: list[tuple[str, str, bytes, str | None]] = []
         self.archived: list[tuple[str, bool]] = []
         self.groups_archived: list[str] = []
+        self.change_queries: list[object] = []
         self.created_spaces: list[str] = []
         self._n = 0
 
@@ -107,6 +108,7 @@ class FakeProvider:
             supports_external_ref=True, supports_comments=True, supports_groups=True,
             supports_independent_state=True, supports_time_tracking=True,
             supports_attachments=True, supports_archive=True,
+            supports_change_feed=True,
             states=STATES,
         )
 
@@ -221,6 +223,11 @@ class FakeProvider:
     def archive(self, task_id, archived=True):
         self._require_task(task_id)["archived"] = bool(archived)
         self.archived.append((task_id, bool(archived)))
+
+    def changed_containers_since(self, since):
+        """Everything, always - a fake has no clock worth trusting."""
+        self.change_queries.append(since)
+        return set(self._containers), "watermark"
 
     def archive_group(self, group_id):
         """Bulk: every task in the group, in one call - what asoode's

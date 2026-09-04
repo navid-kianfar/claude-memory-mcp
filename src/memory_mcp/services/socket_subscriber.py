@@ -25,6 +25,7 @@ missed change.
 
 import asyncio
 import contextlib
+from datetime import datetime, timezone
 import logging
 import time
 
@@ -47,6 +48,11 @@ RECONNECT_MIN, RECONNECT_MAX = 2.0, 60.0
 # so this only delays noticing a change made while nothing local is happening.
 CATCH_UP_MIN_INTERVAL = 300.0
 
+#: How far the last catch-up got. Machine-wide (the sweep spans every
+#: project), so the SQLite registry rather than any project store, and
+#: durable because a daemon restart is exactly the outage this exists for.
+CATCH_UP_WATERMARK_KEY = "catchup:watermark"
+
 
 class SocketSubscriber:
     """Keeps a socket open and reconciles the projects a board event touches."""
@@ -68,6 +74,7 @@ class SocketSubscriber:
         self.echoes = 0
         self.catch_ups = 0
         self._last_catch_up: float | None = None
+        self.delta_catch_ups = 0
         self.last_error: str | None = None
 
     # ---------- lifecycle ----------
@@ -190,10 +197,20 @@ class SocketSubscriber:
             self._timer = asyncio.create_task(self._flush_soon())
 
     async def _catch_up(self) -> None:
-        """Reconcile every linked project once, rate-limited.
+        """Reconcile linked projects once, rate-limited.
 
         This is the poll the socket was always an optimisation over: it is what
         makes a dropped connection cost promptness rather than correctness.
+
+        Asks the provider WHAT CHANGED first, when it can answer. One call
+        covering every board replaces a read of each - measured here as 79 links
+        across 14 projects - and the usual answer is "nothing", which then costs
+        one request instead of seventy-nine.
+
+        Falls back to sweeping everything when there is no watermark yet (the
+        first run, which has real work to do anyway) or the provider has no
+        change feed. That fallback is not optional: a delta that silently
+        returned nothing would look exactly like "up to date".
         """
         now = time.monotonic()
         if (self._last_catch_up is not None
@@ -201,12 +218,67 @@ class SocketSubscriber:
             return
         self._last_catch_up = now
         links = self._safe(self._get_links) or []
-        for slug in sorted({link["slug"] for link in links if link.get("slug")}):
+        slugs = sorted({link["slug"] for link in links if link.get("slug")})
+
+        narrowed = await asyncio.to_thread(self._changed_slugs, links)
+        if narrowed is not None:
+            slugs = sorted(narrowed)
+            self.delta_catch_ups += 1
+
+        for slug in slugs:
             try:
                 await asyncio.to_thread(self._bridge.reconcile, slug)
                 self.catch_ups += 1
             except Exception as e:  # noqa: BLE001 - a catch-up must not kill the socket
                 self.last_error = f"catch-up {slug}: {e}"
+
+        if narrowed is None:
+            self._seed_watermark()
+
+    def _changed_slugs(self, links: list[dict]) -> set[str] | None:
+        """Slugs worth reconciling, or None to sweep everything.
+
+        None is the honest answer whenever we cannot be sure: no watermark, no
+        change feed, or the call failed. Returning an empty set on doubt would
+        silently stop syncing and look identical to being up to date.
+        """
+        from memory_mcp.db.registry import get_setting, set_setting
+
+        try:
+            since = get_setting(CATCH_UP_WATERMARK_KEY)
+            if not since:
+                return None  # first run: nothing to be incremental about
+
+            provider = self._bridge.provider_for(links[0]) if links else None
+            if provider is None or not provider.capabilities.supports_change_feed:
+                return None
+
+            containers, watermark = provider.changed_containers_since(since)
+            # Map changed containers back to the projects that link them.
+            slugs = {
+                link["slug"] for link in links
+                if link.get("remote_work_package_id") in containers
+                and link.get("slug")
+            }
+            # Only advance the watermark once the pages were exhausted, or a
+            # truncated crawl would skip everything it did not reach.
+            if watermark:
+                set_setting(CATCH_UP_WATERMARK_KEY, watermark)
+            return slugs
+        except Exception as e:  # noqa: BLE001
+            self.last_error = f"catch-up delta: {e}"
+            return None
+
+    def _seed_watermark(self) -> None:
+        """Record where a full sweep got to, so the next one can be a delta."""
+        from memory_mcp.db.registry import get_setting, set_setting
+
+        with contextlib.suppress(Exception):
+            if not get_setting(CATCH_UP_WATERMARK_KEY):
+                set_setting(
+                    CATCH_UP_WATERMARK_KEY,
+                    datetime.now(timezone.utc).isoformat(),
+                )
 
     async def _flush_soon(self) -> None:
         await asyncio.sleep(DEBOUNCE_SECONDS)

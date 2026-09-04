@@ -337,6 +337,30 @@ class AsoodeClient:
         body = {k: v for k, v in dates.items() if v is not None}
         return self._post(f"/tasks/{task_id}/set-date", body)
 
+    def task_changes(self, since: str, cursor: str | None = None,
+                     take: int | None = None, package_id: str | None = None) -> Any:
+        """POST /tasks/changes - what changed since an instant, across EVERY
+        work package this token can reach.
+
+        Not to be confused with `kartabl`, which filters on TaskMember and so
+        only ever returns tasks ASSIGNED to this user. A catch-up must see a task
+        somebody else created and left unassigned, so kartabl cannot serve it.
+
+        Returns {changes, nextCursor, syncedAt}. `nextCursor` absent means the
+        end - an empty `changes` does NOT, so page on the cursor. `syncedAt` is
+        the watermark to use as the next `since` once pages are exhausted.
+
+        Omitting package_id is the point: one call covers all boards.
+        """
+        body: dict = {"since": since}
+        if cursor:
+            body["cursor"] = cursor
+        if take:
+            body["take"] = take
+        if package_id:
+            body["packageId"] = package_id
+        return self._post("/tasks/changes", body)
+
     def kartabl(self, **filters) -> Any:
         """Tasks assigned to this token's user.
 

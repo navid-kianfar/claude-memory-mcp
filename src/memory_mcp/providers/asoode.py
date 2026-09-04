@@ -48,10 +48,16 @@ _CAPABILITIES = Capabilities(
     # POST /tasks/:id/spend-time {begin, end}
     supports_time_tracking=True,
     supports_archive=True,
+    supports_change_feed=True,
     # POST /tasks/:taskId/attach, multipart
     supports_attachments=True,
     states=tuple(STATE_TO_ORDINAL),
 )
+
+
+#: A catch-up on the daemon's startup path must terminate. 50 pages at the
+#: server's 200-row default is 10,000 changes, far past any real backlog.
+MAX_CHANGE_PAGES = 50
 
 
 class AsoodeProvider:
@@ -187,6 +193,32 @@ class AsoodeProvider:
     def archive(self, task_id: str, archived: bool = True) -> None:
         """POST /tasks/:id/archive - {archived} sets the state absolutely."""
         self.client.archive_task(task_id, archived)
+
+    def changed_containers_since(self, since) -> tuple[set[str], str | None]:
+        """One call for every board, paged on the cursor.
+
+        Bounded at MAX_CHANGE_PAGES: a catch-up that has fallen far behind must
+        not turn into an unbounded crawl on the daemon's startup path. Running
+        out of pages returns no watermark, so the next sweep asks from the same
+        instant and makes progress the honest way.
+        """
+        since_iso = since.isoformat() if hasattr(since, "isoformat") else str(since)
+        containers: set[str] = set()
+        cursor: str | None = None
+        watermark: str | None = None
+        for _ in range(MAX_CHANGE_PAGES):
+            page = self.client.task_changes(since_iso, cursor=cursor) or {}
+            for row in page.get("changes") or []:
+                package_id = row.get("packageId")
+                if package_id:
+                    containers.add(package_id)
+            watermark = page.get("syncedAt") or watermark
+            cursor = page.get("nextCursor")
+            if not cursor:
+                return containers, watermark
+        # Pages exhausted: report what we found but no watermark, so the next
+        # sweep starts from the same place rather than skipping the remainder.
+        return containers, None
 
     def archive_group(self, group_id: str) -> None:
         """One call for a whole column - asoode has a real bulk route."""

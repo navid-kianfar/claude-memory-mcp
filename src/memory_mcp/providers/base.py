@@ -83,6 +83,10 @@ class Capabilities:
     #: When False the flusher keeps the local archive and sends nothing,
     #: rather than failing a local operation on a remote shortcoming.
     supports_archive: bool = False
+    #: The platform can say what changed since an instant, so a catch-up
+    #: need not re-read every container. Without it the caller MUST fall
+    #: back to the full sweep rather than silently syncing nothing.
+    supports_change_feed: bool = False
     #: Local task states this platform can represent. A state outside this set is
     #: mapped to the nearest one by the provider, never dropped silently.
     states: tuple[str, ...] = ()
@@ -254,6 +258,18 @@ class TaskProvider(Protocol):
         Takes the BOOLEAN rather than being one-way: the local store can
         un-archive, and a one-way call would make that unmirrorable, so the two
         sides would drift the moment anyone restored a task.
+        """
+
+    def changed_containers_since(self, since) -> tuple[set[str], str | None]:
+        """Which containers have changed since `since`, and the new watermark.
+
+        Only called when `supports_change_feed`. Returns (container_ids,
+        watermark); the watermark is passed as the next `since`.
+
+        Deliberately returns CONTAINERS rather than tasks: the caller already
+        knows how to reconcile a container, and this only has to answer "which
+        ones are worth looking at". An empty set means nothing changed, which is
+        the whole point - the common answer should cost one call.
         """
 
     def archive_group(self, group_id: str) -> None:

@@ -28,6 +28,7 @@ class FakeAsoodeClient:
         self.attached: list[tuple[str, str, bytes]] = []
         self.archived: list[tuple[str, bool]] = []
         self.lists_archived: list[str] = []
+        self.change_queries: list[tuple] = []
         self._n = 0
 
     def _next(self, prefix):
@@ -125,6 +126,17 @@ class FakeAsoodeClient:
         if task_id not in self.tasks:
             raise AsoodeError(f"no task {task_id}")
         self.attached.append((task_id, filename, content))
+
+    def task_changes(self, since, cursor=None, take=None, package_id=None):
+        """One page, no cursor - the end. Records what was asked."""
+        self.change_queries.append((since, cursor, package_id))
+        return {
+            "changes": [
+                {"packageId": t.get("packageId") or t.get("workPackageId"), "id": tid}
+                for tid, t in self.tasks.items()
+            ],
+            "syncedAt": "2026-01-02T00:00:00Z",
+        }
 
     def archive_task(self, task_id, archived=True):
         self.tasks[task_id]["archivedAt"] = "now" if archived else None

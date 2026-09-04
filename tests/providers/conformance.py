@@ -102,6 +102,20 @@ class ProviderConformance(SpaceConformance):
         """A container to work in, created through the provider's own API."""
         return provider.create_container("Conformance", external_ref="conformance-1")
 
+    # ---------- change feed ----------
+
+    def test_change_feed_returns_containers_and_a_watermark(self, provider, container):
+        """Containers, not tasks: the caller already knows how to reconcile one."""
+        if not provider.capabilities.supports_change_feed:
+            pytest.skip("provider has no change feed")
+        import datetime as _dt
+
+        since = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+        containers, watermark = provider.changed_containers_since(since)
+
+        assert isinstance(containers, set)
+        assert watermark is None or isinstance(watermark, str)
+
     # ---------- archive ----------
 
     def test_archive_hides_a_task_and_can_restore_it(self, provider, container):

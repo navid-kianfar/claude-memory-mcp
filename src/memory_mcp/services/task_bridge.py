@@ -41,6 +41,7 @@ import threading
 
 from memory_mcp.asoode import get_endpoints
 from memory_mcp.providers import Container, ProviderError, TaskProvider
+from memory_mcp.services.echo_log import EchoLog
 from memory_mcp.db.registry import (
     get_default_project_link,
     get_project_links,
@@ -113,6 +114,10 @@ class TaskBridge:
         # lock belongs HERE, where every flush passes, not at one call site.
         self._flush_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        # What we have just written to the remote, so the socket can ignore the
+        # broadcast of our own change. asoode does no actor exclusion and drops
+        # the actor id before the client sees it, so the writer has to say.
+        self.echo = EchoLog()
 
     def _flush_lock(self, slug: str) -> threading.Lock:
         with self._locks_guard:
@@ -403,6 +408,7 @@ class TaskBridge:
             return False
 
         remote_id = self._outbox.remote_id(slug, task.id, link["id"])
+        created_here = False
         if not remote_id:
             # create_task with the task's externalRef is BOTH create and lookup:
             # asoode returns the existing row for a repeated ref, so recovering a
@@ -419,8 +425,14 @@ class TaskBridge:
             if not remote_id:
                 raise ProviderError("the provider returned a task without an id")
             self._outbox.remember(slug, task.id, link["id"], remote_id, task.state.value)
-            if task.state.value == "todo":
-                return True  # created in ToDo already; no state call needed
+            created_here = True
+
+        # Everything from here on is a write WE make, and asoode will broadcast
+        # it straight back to us. Noted before the call so the echo cannot beat
+        # the record home.
+        self.echo.note(remote_id)
+        if created_here and task.state.value == "todo":
+            return True  # created in ToDo already; no state call needed
 
         op = row["op"]
         if op == "attachment":
@@ -835,6 +847,7 @@ class TaskBridge:
                     external_ref=f"memory-mcp:{task.id}",
                 )
                 remote_id = remote.id
+                self.echo.note(remote_id)
                 # Remember the mapping, exactly as the flusher does. Without it a
                 # pushed task looks unmirrored to the backfill count and looks NEW
                 # to reconcile - which is how 54 duplicates were created.

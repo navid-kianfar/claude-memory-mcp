@@ -45,6 +45,30 @@ USAGE = (
 )
 
 
+def _route(path: str, method: str, payload: dict | None, local, label: str):
+    """Ask the daemon to do it; do it here only if no daemon is running.
+
+    The daemon holds the DuckDB write lock for every project it has opened, so
+    doing this in-process fails - and fails LATE, after the remote calls have
+    already happened. Routing through the owner of the lock is both the fix and
+    the faster path.
+    """
+    from memory_mcp import daemon_client
+
+    try:
+        result, via_daemon = daemon_client.run(path, method, payload, local)
+    except Exception as e:  # noqa: BLE001 - translated below or re-raised
+        hint = daemon_client.lock_message(e)
+        if hint is None:
+            raise
+        print(f"Cannot {label}: {hint}", file=sys.stderr)
+        raise SystemExit(1) from e
+    if via_daemon:
+        print("(done by the running daemon, which owns the database)",
+              file=sys.stderr)
+    return result
+
+
 def _print_status() -> None:
     st = status()
     ep = st["endpoints"]
@@ -166,11 +190,21 @@ def main(argv: list[str]) -> None:
                 help="put the board in this existing asoode project",
             )
             ns = p.parse_args(rest)
-            from memory_mcp.container import container
 
-            result = container.task_bridge.bootstrap(
-                ns.slug, project_title=ns.project_title,
-                board_title=ns.board_title, reuse_project_id=ns.asoode_project_id,
+            def _local():
+                from memory_mcp.container import container
+
+                return container.task_bridge.bootstrap(
+                    ns.slug, project_title=ns.project_title,
+                    board_title=ns.board_title,
+                    reuse_project_id=ns.asoode_project_id,
+                )
+
+            result = _route(
+                f"/api/projects/{ns.slug}/asoode/link", "POST",
+                {"project_title": ns.project_title, "board_title": ns.board_title,
+                 "asoode_project_id": ns.asoode_project_id},
+                _local, "create the board",
             )
             print(f"project      {result['project']['id']}  {result['project']['title']}")
             print(f"work package {result['work_package']['id']}  {result['work_package']['title']}")
@@ -185,10 +219,17 @@ def main(argv: list[str]) -> None:
                 help="leave finished tasks out of the mirror",
             )
             ns = p.parse_args(rest)
-            from memory_mcp.container import container
 
-            result = container.task_bridge.push(
-                ns.slug, include_done=not ns.skip_done,
+            def _local():
+                from memory_mcp.container import container
+
+                return container.task_bridge.push(
+                    ns.slug, include_done=not ns.skip_done,
+                )
+
+            result = _route(
+                f"/api/projects/{ns.slug}/asoode/push", "POST",
+                {"include_done": not ns.skip_done}, _local, "push",
             )
             counts = result["counts"]
             print(
@@ -222,11 +263,20 @@ def main(argv: list[str]) -> None:
                 help="attach without making it the default target",
             )
             ns = p.parse_args(rest)
-            from memory_mcp.container import container
 
-            result = container.task_bridge.attach(
-                ns.slug, external_ref=ns.ref, work_package_id=ns.wp_id,
-                label=ns.label, is_default=not ns.not_default,
+            def _local():
+                from memory_mcp.container import container
+
+                return container.task_bridge.attach(
+                    ns.slug, external_ref=ns.ref, work_package_id=ns.wp_id,
+                    label=ns.label, is_default=not ns.not_default,
+                )
+
+            result = _route(
+                f"/api/projects/{ns.slug}/asoode/link", "POST",
+                {"attach": True, "external_ref": ns.ref, "work_package_id": ns.wp_id,
+                 "label": ns.label, "is_default": not ns.not_default},
+                _local, "attach the board",
             )
             wp = result["work_package"]
             print(f"attached {ns.slug} -> {wp['title']!r} ({wp['id']})")
@@ -237,9 +287,16 @@ def main(argv: list[str]) -> None:
             p = argparse.ArgumentParser(prog="memory-mcp asoode import")
             p.add_argument("slug")
             ns = p.parse_args(rest)
-            from memory_mcp.container import container
 
-            result = container.task_bridge.import_all(ns.slug)
+            def _local():
+                from memory_mcp.container import container
+
+                return container.task_bridge.import_all(ns.slug)
+
+            result = _route(
+                f"/api/projects/{ns.slug}/asoode/import", "POST", {},
+                _local, "import",
+            )
             c = result["counts"]
             print(f"{c['created']} created, {c['updated']} updated across {c['boards']} board(s).")
             for b in result["boards"]:

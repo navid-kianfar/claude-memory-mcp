@@ -89,7 +89,18 @@ def get_connection(slug: str) -> duckdb.DuckDBPyConnection:
     db_path = _resolve_db_path(slug)
     _ensure_initialized(db_path)
 
-    conn = duckdb.connect(str(db_path))
+    try:
+        conn = duckdb.connect(str(db_path))
+    except duckdb.IOException as e:
+        # DuckDB is single-writer per file across processes, so this is almost
+        # always the daemon rather than real disk trouble. Its own message names
+        # a PID and nothing else, which sends people looking for a hung process.
+        from memory_mcp.daemon_client import lock_message
+
+        hint = lock_message(e)
+        if hint is None:
+            raise
+        raise duckdb.IOException(f"{db_path.name}: {hint}") from e
     try:
         install_vss(conn)
     except Exception:

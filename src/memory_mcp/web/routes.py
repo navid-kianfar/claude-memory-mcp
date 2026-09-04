@@ -876,6 +876,16 @@ def _asoode_push(params, body, query):
     )
 
 
+def _asoode_import(params, body, query):
+    """Pull the linked boards' tasks into the local list.
+
+    Unlike the automatic reconcile this OVERWRITES title and state from the
+    board, which is why it stays an explicit call. Exposed over HTTP so the CLI
+    can ask the daemon rather than fighting it for the DuckDB lock.
+    """
+    return container.task_bridge.import_all(params["slug"])
+
+
 def _asoode_links(params, body, query):
     return {
         "slug": params["slug"],
@@ -1334,6 +1344,7 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/asoode/links", _api(_asoode_links), methods=["GET"]),
         Route("/api/projects/{slug}/asoode/link", _api(_asoode_link), methods=["POST"]),
         Route("/api/projects/{slug}/asoode/push", _api(_asoode_push), methods=["POST"]),
+        Route("/api/projects/{slug}/asoode/import", _api(_asoode_import), methods=["POST"]),
         Route("/api/asoode", _api(_asoode_status), methods=["GET"]),
         Route("/api/asoode/boards", _api(_asoode_boards), methods=["GET"]),
         Route("/api/asoode/socket", _asoode_socket, methods=["GET"]),

@@ -510,3 +510,54 @@ class TestMovingOnlyWhenAColumnExists:
 
         assert provider.moves == moves_before, "no column for blocked, so no move"
         assert ("r1", "blocked") in provider.states, "but the state is still set"
+
+
+class TestTheWriterRecordsItsOwnWrites:
+    """The socket cannot recognise our echo on its own - asoode does no actor
+    exclusion and drops the actor id before the client sees it - so every
+    outbound write must leave a trace the subscriber can consult."""
+
+    def test_a_created_task_is_noted(self, project):
+        client = _provider()
+        tasks, bridge, _ = _stack(project, client)
+        tasks.create(CreateTaskRequest(project=project, title="X"))
+        bridge.flush(project)
+        assert bridge.echo.is_echo({"r1"}) is True
+
+    def test_a_state_change_is_noted(self, project):
+        """The create path returns early for a todo task; the second flush goes
+        down the set_state branch and must be noted there too."""
+        client = _provider()
+        tasks, bridge, _ = _stack(project, client)
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        bridge.flush(project)
+        bridge.echo = type(bridge.echo)()      # forget the create
+        tasks.done(project, task.id)
+        bridge.flush(project)
+        assert bridge.echo.is_echo({"r1"}) is True
+
+    def test_a_comment_is_noted(self, project):
+        client = _provider()
+        tasks, bridge, _ = _stack(project, client)
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        bridge.flush(project)
+        bridge.echo = type(bridge.echo)()
+        tasks.comment(project, task.id, "a note")
+        bridge.flush(project)
+        assert bridge.echo.is_echo({"r1"}) is True
+
+    def test_a_push_is_noted(self, project):
+        """push() creates directly, bypassing the outbox - the 54-duplicate bug
+        was exactly this path being forgotten."""
+        client = _provider()
+        tasks, bridge, _ = _stack(project, client)
+        tasks.create(CreateTaskRequest(project=project, title="X"))
+        bridge.push(project)
+        assert bridge.echo.is_echo({"r1"}) is True
+
+    def test_an_untouched_task_is_not_an_echo(self, project):
+        client = _provider()
+        tasks, bridge, _ = _stack(project, client)
+        tasks.create(CreateTaskRequest(project=project, title="X"))
+        bridge.flush(project)
+        assert bridge.echo.is_echo({"r-somebody-else"}) is False

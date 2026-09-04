@@ -276,6 +276,14 @@ memory-mcp asoode push <slug>                 # full reconciliation (rarely need
 memory-mcp asoode open <slug>                 # open that board already signed in
 ```
 
+These commands ask the **running daemon** to do the work rather than opening the
+project database themselves. DuckDB allows one writer per file across processes
+and the daemon holds that lock, so doing it in-process used to fail — and fail
+*late*, after the remote calls had already gone out, leaving tasks on the board
+that the local store had no record of. If no daemon is running they fall back to
+direct access, and any other path that hits the lock now says so and offers both
+ways out instead of raising a DuckDB `IOException`.
+
 ### One project, many boards
 
 **A project links to work packages, never to an asoode project.** asoode has no
@@ -377,12 +385,23 @@ forever repeating a side effect.
 **In:** the daemon holds a Socket.IO subscription, so a task added on the board
 reaches the session within seconds. It is an optimisation, not a correctness
 requirement — `reconcile` also runs after every mirror, so a dropped socket
-degrades to polling. `GET /api/asoode/socket` reports whether it is connected.
+degrades to polling. asoode replays nothing, so every connect (the first one
+included — the daemon was deaf before it started) also reconciles each linked
+project once, floored at five minutes so a flapping socket cannot spend its life
+sweeping. `GET /api/asoode/socket` reports connection, events, reconciles,
+catch-ups and suppressed echoes.
 
 Note the socket needs a **ticket**, not the PAT: asoode's gateway keeps no
 database and verifies signed JWTs only, so the PAT is exchanged at
 `POST /account/socket-token` on each connect. A raw PAT is accepted and then
 dropped with `transport error`.
+
+**Our own writes are not reacted to.** asoode broadcasts every change to every
+member and deliberately does not exclude the actor — and it drops the actor id
+before the client sees it, so the payload cannot be used to tell. The writer
+therefore records what it wrote and the listener consults it: a push of 29 tasks
+now produces 29 suppressed echoes and **zero** board reads, where it used to
+cost seven.
 
 **Inbound only creates, never overwrites.** A task that exists on both sides is
 left alone, because resolving a two-sided edit needs a conflict policy that has

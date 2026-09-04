@@ -85,7 +85,19 @@ Mirroring is automatic in both directions. Out: every create/update/completion/
 comment/time-entry/attachment queues to an outbox and flushes off-thread, so a
 local write never waits on the network. In: a Socket.IO subscription reconciles
 within seconds of a board change, backed by a poll so a dropped socket only costs
-promptness.
+promptness. Every connect also sweeps each linked project once, because asoode
+replays nothing that happened while the socket was down.
+
+The subscriber ignores the echo of our OWN writes. asoode broadcasts to every
+member without excluding the actor, and drops the actor id before the client
+sees it, so the writer records what it wrote (`services/echo_log.py`) and the
+listener consults that. Do not "fix" this with a time window — it would drop a
+genuine concurrent change that lands in the same window.
+
+`memory-mcp asoode` write commands go through the daemon's HTTP API when one is
+running: DuckDB is single-writer per file and the daemon holds the lock, so
+doing it in-process fails AFTER the remote calls have already happened. Adding a
+CLI write means adding its route too.
 
 **Inbound only CREATES.** A task on both sides is never overwritten — that needs
 a conflict policy nobody has decided. `memory_asoode_import` is the explicit path

@@ -143,6 +143,10 @@ class TaskService:
             {"title": task.title, "source": task.source, "priority": task.priority},
         )
         self._enqueue(request.project, task_id, "create", {"title": task.title})
+        if task.role:
+            # So the board says which agent the card is for. Queued, never
+            # blocking: creating a task must not wait on the network.
+            self._enqueue(request.project, task_id, "role", {"role": task.role})
         return task
 
     # ---------- read ----------
@@ -250,6 +254,7 @@ class TaskService:
         """Apply the given fields. Returns (task, names of fields that changed)."""
         before = self._require(request.project, request.task_id)
 
+        role_changed = False
         fields: dict = {}
         if request.title is not None:
             fields["title"] = request.title.strip()
@@ -277,6 +282,7 @@ class TaskService:
             # "" clears it: a task re-opened to any agent has to be expressible,
             # and None already means "leave this field alone".
             fields["role"] = request.role or None
+            role_changed = True
 
         if not fields:
             return before, []
@@ -310,6 +316,12 @@ class TaskService:
         if {"state", "title", "description"} & set(changed):
             self._enqueue(request.project, request.task_id, "update", {
                 "state": task.state.value, "changed": changed,
+            })
+        if role_changed:
+            # Its own op: the update op reconciles state, and the role label is a
+            # separate remote call that must retry on its own if it fails.
+            self._enqueue(request.project, request.task_id, "role", {
+                "role": task.role,
             })
         return task, changed
 

@@ -81,3 +81,89 @@ class TestArchiveEnqueues:
         archive_rows = [r for r in rows if r["op"] == "archive"]
         assert archive_rows, f"no archive op queued; got {[r['op'] for r in rows]}"
         assert (archive_rows[-1].get("payload") or {}).get("archived") is True
+
+
+class TestRoleLabelMirror:
+    """The board must show which agent a card is for.
+
+    claimed_by holds a session uuid, which tells a person nothing, and no
+    platform has a field for "which agent". asoode's labels are the only place
+    it can go - and they are ENTITIES scoped to a board, not free strings, so
+    the provider resolves or creates one before attaching.
+
+    WHAT IS MIRRORED is the task's `role` - what it is FOR - not who currently
+    holds it. A claim is a 30-minute lease that churns; the role is the durable
+    routing fact, and a label that flickered with every claim would be noise.
+    """
+
+    @pytest.fixture
+    def container(self):
+        from memory_mcp.container import Container
+
+        return Container()
+
+    def _project(self, container, slug):
+        from memory_mcp.db.connection import get_connection
+
+        container.project_repo.register(slug, slug)
+        get_connection(slug).close()
+        return slug
+
+    def test_asoode_declares_label_support(self):
+        from memory_mcp.providers.asoode import AsoodeProvider
+
+        assert AsoodeProvider().capabilities.supports_labels is True
+
+    def test_creating_with_a_role_queues_the_mirror(self, container):
+        slug = self._project(container, "t-role-mirror-create")
+
+        container.task_service.create(
+            CreateTaskRequest(project=slug, title="Migration", role="backend")
+        )
+
+        ops = [r["op"] for r in container.outbox_repo.pending(slug, 50)]
+        assert "role" in ops, f"no role op queued; got {ops}"
+
+    def test_creating_without_a_role_queues_nothing_extra(self, container):
+        """An unroled task must not pay for a label call it does not need."""
+        slug = self._project(container, "t-role-mirror-none")
+
+        container.task_service.create(
+            CreateTaskRequest(project=slug, title="Anyone can do this")
+        )
+
+        ops = [r["op"] for r in container.outbox_repo.pending(slug, 50)]
+        assert "role" not in ops
+
+    def test_changing_the_role_queues_the_mirror(self, container):
+        from memory_mcp.models import UpdateTaskRequest
+
+        slug = self._project(container, "t-role-mirror-update")
+        task = container.task_service.create(
+            CreateTaskRequest(project=slug, title="Work")
+        )
+        container.outbox_repo.pending(slug, 50)
+
+        container.task_service.update(
+            UpdateTaskRequest(project=slug, task_id=task.id, role="frontend")
+        )
+
+        ops = [r["op"] for r in container.outbox_repo.pending(slug, 50)]
+        assert "role" in ops
+
+    def test_clearing_the_role_also_queues_a_mirror(self, container):
+        """Otherwise the board keeps advertising an agent that no longer owns it."""
+        from memory_mcp.models import UpdateTaskRequest
+
+        slug = self._project(container, "t-role-mirror-clear")
+        task = container.task_service.create(
+            CreateTaskRequest(project=slug, title="Work", role="backend")
+        )
+
+        container.task_service.update(
+            UpdateTaskRequest(project=slug, task_id=task.id, role="")
+        )
+
+        rows = [r for r in container.outbox_repo.pending(slug, 50) if r["op"] == "role"]
+        assert rows, "clearing a role must mirror too"
+        assert (rows[-1].get("payload") or {}).get("role") is None

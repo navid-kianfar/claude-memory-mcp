@@ -22,6 +22,8 @@ The three translations that earn the adapter:
    callers that know the group pass it.
 """
 
+import contextlib
+
 from memory_mcp.asoode_client import (
     ORDINAL_TO_STATE,
     STATE_TO_ORDINAL,
@@ -49,6 +51,7 @@ _CAPABILITIES = Capabilities(
     supports_time_tracking=True,
     supports_archive=True,
     supports_change_feed=True,
+    supports_labels=True,
     # POST /tasks/:taskId/attach, multipart
     supports_attachments=True,
     states=tuple(STATE_TO_ORDINAL),
@@ -58,6 +61,10 @@ _CAPABILITIES = Capabilities(
 #: A catch-up on the daemon's startup path must terminate. 50 pages at the
 #: server's 200-row default is 10,000 changes, far past any real backlog.
 MAX_CHANGE_PAGES = 50
+
+#: Role labels are prefixed so they are obviously ours and cannot collide with a
+#: label a human made for their own purposes on the same board.
+ROLE_LABEL_PREFIX = "agent:"
 
 
 class AsoodeProvider:
@@ -193,6 +200,42 @@ class AsoodeProvider:
     def archive(self, task_id: str, archived: bool = True) -> None:
         """POST /tasks/:id/archive - {archived} sets the state absolutely."""
         self.client.archive_task(task_id, archived)
+
+    def set_role_label(self, task_id: str, container_id: str,
+                       role: str | None) -> None:
+        """Attach `agent:<role>` to the task, removing any other role label.
+
+        asoode labels are ENTITIES scoped to a work package, attached by id - not
+        free strings - so this resolves the label on the board and creates it
+        only when absent. Existing labels are read from the board rather than
+        cached across calls, because another client can add one at any time and a
+        stale cache would mean creating a duplicate.
+        """
+        board = self.client.fetch_work_package(container_id) or {}
+        existing = {
+            (lbl.get("title") or ""): lbl.get("id")
+            for lbl in (board.get("labels") or [])
+            if lbl.get("id")
+        }
+
+        wanted = f"{ROLE_LABEL_PREFIX}{role}" if role else None
+
+        # Take off any role label that is not the one we want. Leaves labels a
+        # human added alone - only ours carry the prefix.
+        for title, label_id in existing.items():
+            if title.startswith(ROLE_LABEL_PREFIX) and title != wanted:
+                with contextlib.suppress(Exception):
+                    self.client.remove_task_label(task_id, label_id)
+
+        if not wanted:
+            return
+
+        label_id = existing.get(wanted)
+        if not label_id:
+            created = self.client.create_label(container_id, wanted) or {}
+            label_id = created.get("id") or (created.get("data") or {}).get("id")
+        if label_id:
+            self.client.add_task_label(task_id, label_id)
 
     def changed_containers_since(self, since) -> tuple[set[str], str | None]:
         """One call for every board, paged on the cursor.

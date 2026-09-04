@@ -102,6 +102,18 @@ class ProviderConformance(SpaceConformance):
         """A container to work in, created through the provider's own API."""
         return provider.create_container("Conformance", external_ref="conformance-1")
 
+    # ---------- role label ----------
+
+    def test_a_role_can_be_shown_on_the_remote_task(self, provider, container):
+        """No platform has a field for it, so it rides on labels."""
+        if not provider.capabilities.supports_labels:
+            pytest.skip("provider has no labels")
+        task = provider.create_task(container.id, None, "Roled")
+
+        provider.set_role_label(task.id, container.id, "backend")
+        provider.set_role_label(task.id, container.id, "frontend")  # replaces
+        provider.set_role_label(task.id, container.id, None)  # clears
+
     # ---------- change feed ----------
 
     def test_change_feed_returns_containers_and_a_watermark(self, provider, container):

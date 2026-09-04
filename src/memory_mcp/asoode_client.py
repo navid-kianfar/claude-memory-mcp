@@ -337,6 +337,20 @@ class AsoodeClient:
         body = {k: v for k, v in dates.items() if v is not None}
         return self._post(f"/tasks/{task_id}/set-date", body)
 
+    def create_label(self, package_id: str, title: str,
+                     color: str = "#6366f1") -> Any:
+        """POST /work-packages/labels/:packageId/create -> the new label."""
+        return self._post(
+            f"/work-packages/labels/{package_id}/create",
+            {"title": title, "color": color, "darkColor": False},
+        )
+
+    def add_task_label(self, task_id: str, label_id: str) -> Any:
+        return self._post(f"/tasks/{task_id}/label/add/{label_id}")
+
+    def remove_task_label(self, task_id: str, label_id: str) -> Any:
+        return self._post(f"/tasks/{task_id}/label/{label_id}/remove")
+
     def task_changes(self, since: str, cursor: str | None = None,
                      take: int | None = None, package_id: str | None = None) -> Any:
         """POST /tasks/changes - what changed since an instant, across EVERY

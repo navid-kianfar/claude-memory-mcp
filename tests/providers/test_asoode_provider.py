@@ -29,6 +29,8 @@ class FakeAsoodeClient:
         self.archived: list[tuple[str, bool]] = []
         self.lists_archived: list[str] = []
         self.change_queries: list[tuple] = []
+        self.labels_added: list[tuple] = []
+        self.labels_removed: list[tuple] = []
         self._n = 0
 
     def _next(self, prefix):
@@ -126,6 +128,19 @@ class FakeAsoodeClient:
         if task_id not in self.tasks:
             raise AsoodeError(f"no task {task_id}")
         self.attached.append((task_id, filename, content))
+
+    def create_label(self, package_id, title, color="#6366f1"):
+        lid = self._next("lbl")
+        self.boards[package_id].setdefault("labels", []).append(
+            {"id": lid, "title": title}
+        )
+        return {"id": lid, "title": title}
+
+    def add_task_label(self, task_id, label_id):
+        self.labels_added.append((task_id, label_id))
+
+    def remove_task_label(self, task_id, label_id):
+        self.labels_removed.append((task_id, label_id))
 
     def task_changes(self, since, cursor=None, take=None, package_id=None):
         """One page, no cursor - the end. Records what was asked."""

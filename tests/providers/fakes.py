@@ -49,6 +49,7 @@ class FakeProvider:
         self.archived: list[tuple[str, bool]] = []
         self.groups_archived: list[str] = []
         self.change_queries: list[object] = []
+        self.role_labels: list[tuple] = []
         self.created_spaces: list[str] = []
         self._n = 0
 
@@ -108,7 +109,7 @@ class FakeProvider:
             supports_external_ref=True, supports_comments=True, supports_groups=True,
             supports_independent_state=True, supports_time_tracking=True,
             supports_attachments=True, supports_archive=True,
-            supports_change_feed=True,
+            supports_change_feed=True, supports_labels=True,
             states=STATES,
         )
 
@@ -223,6 +224,10 @@ class FakeProvider:
     def archive(self, task_id, archived=True):
         self._require_task(task_id)["archived"] = bool(archived)
         self.archived.append((task_id, bool(archived)))
+
+    def set_role_label(self, task_id, container_id, role):
+        self._require_task(task_id)["role_label"] = role
+        self.role_labels.append((task_id, container_id, role))
 
     def changed_containers_since(self, since):
         """Everything, always - a fake has no clock worth trusting."""

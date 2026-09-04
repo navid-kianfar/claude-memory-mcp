@@ -435,6 +435,12 @@ class TaskBridge:
             return True  # created in ToDo already; no state call needed
 
         op = row["op"]
+        if op == "role":
+            provider = self.provider_for(link)
+            if not provider.capabilities.supports_labels:
+                return False  # keep the local role, send nothing
+            provider.set_role_label(remote_id, link["remote_work_package_id"], task.role)
+            return True
         if op == "archive":
             provider = self.provider_for(link)
             if not provider.capabilities.supports_archive:

@@ -87,6 +87,9 @@ class Capabilities:
     #: need not re-read every container. Without it the caller MUST fall
     #: back to the full sweep rather than silently syncing nothing.
     supports_change_feed: bool = False
+    #: A task can carry labels/tags. Used to show WHICH AGENT a card is for,
+    #: since no platform has a field for that. False means skip, not fail.
+    supports_labels: bool = False
     #: Local task states this platform can represent. A state outside this set is
     #: mapped to the nearest one by the provider, never dropped silently.
     states: tuple[str, ...] = ()
@@ -258,6 +261,17 @@ class TaskProvider(Protocol):
         Takes the BOOLEAN rather than being one-way: the local store can
         un-archive, and a one-way call would make that unmirrorable, so the two
         sides would drift the moment anyone restored a task.
+        """
+
+    def set_role_label(self, task_id: str, container_id: str,
+                       role: str | None) -> None:
+        """Show on the remote task which agent role it is for.
+
+        Only called when `supports_labels`. `role` of None clears it.
+
+        Takes the CONTAINER because on some platforms - asoode among them - a
+        label is an entity scoped to the board rather than a free string, so the
+        provider has to resolve or create it there before attaching.
         """
 
     def changed_containers_since(self, since) -> tuple[set[str], str | None]:

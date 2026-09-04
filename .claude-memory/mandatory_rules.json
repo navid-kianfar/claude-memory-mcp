@@ -150,6 +150,35 @@
     "approved_at": null,
     "approved_by": null,
     "category": "mandatory_rules",
+    "content": "If a task has an attachment - a screenshot, a log, a diff, a generated report - it must reach the remote task's attachments, not just sit locally. asoode takes them at POST /tasks/:taskId/attach as multipart with the file field named `files` (tasks.controller.ts:280, FileInterceptor('files')), and has rename/remove/cover on /tasks/attachment/:id.\n\nThis is the same rule as time tracking, which had to be asked for repeatedly: if the local store holds something and the provider can represent it, mirroring it is part of the feature. Check the platform's endpoints for what is representable before deciding what to send. An attachment that exists only locally is invisible to everyone else looking at the board, which defeats the point of mirroring at all.",
+    "created_at": "2026-09-04T04:05:54.085358",
+    "created_by": null,
+    "entities": [
+      "FileInterceptor",
+      "POST",
+      "files"
+    ],
+    "expires_at": null,
+    "id": "e248fd3a-f282-43bf-b80b-fc7a891f5095",
+    "metadata": null,
+    "priority": 3,
+    "related_ids": [],
+    "source": "user",
+    "status": "active",
+    "summary": "If a task has an attachment - a screenshot, a log, a diff, a generated report - it must reach...",
+    "tags": [
+      "providers",
+      "attachments",
+      "mirroring"
+    ],
+    "title": "A task's attachments belong on the remote task too",
+    "updated_at": "2026-09-04T04:05:54.085358"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "mandatory_rules",
     "content": "After fixing any bug in this project, you must update the local installation so the running daemon reflects the fix. Rebuild the frontend if it changed (cd frontend && npm run build), then run `uv run memory-mcp-setup` to reinstall the runtime/UI and reload the launchd daemon, and verify the daemon is healthy. A bug fix is not considered complete until the local installation has been updated.",
     "created_at": "2026-05-19T12:17:39.381259",
     "created_by": null,

@@ -55,14 +55,30 @@ class SpaceConformance:
         created = provider.create_space("Listed Space")
         assert created.id in {s.id for s in provider.list_spaces()}
 
-    def test_a_created_space_is_findable_by_title(self, provider):
-        created = provider.create_space("Conformance Space")
-        found = provider.find_space("Conformance Space")
-        assert found is not None and found.id == created.id
+    def test_create_space_returns_something_usable(self, provider):
+        """NOT "a space with exactly that title".
+
+        Three behaviours are all valid here and the interface has to hold them
+        together: a platform with no space level returns a synthetic one; asoode
+        creates a project; Asana CANNOT create a workspace through its API and
+        returns an existing one instead. What every caller actually needs is a
+        space it can then create a container in - which is what this asserts.
+        """
+        space = provider.create_space("Conformance Space")
+        assert space.id
+        assert space.id in {s.id for s in provider.list_spaces()}
+
+    def test_a_listed_space_is_findable_by_its_own_title(self, provider):
+        space = provider.list_spaces()[0] if provider.list_spaces() else \
+            provider.create_space("Findable Space")
+        found = provider.find_space(space.title)
+        assert found is not None and found.id == space.id
 
     def test_find_space_is_case_insensitive(self, provider):
-        provider.create_space("Mixed Case Space")
-        assert provider.find_space("mixed case space") is not None
+        space = provider.list_spaces()[0] if provider.list_spaces() else \
+            provider.create_space("Mixed Case Space")
+        assert provider.find_space(space.title.upper()) is not None
+        assert provider.find_space(space.title.lower()) is not None
 
     def test_find_space_returns_none_when_absent(self, provider):
         assert provider.find_space("no space has this title") is None

@@ -107,5 +107,11 @@ def _ensure_builtins() -> None:
 
         return TrelloProvider()
 
+    def _asana() -> TaskProvider:
+        from memory_mcp.providers.asana import AsanaProvider
+
+        return AsanaProvider()
+
     register(DEFAULT_PROVIDER, _asoode)
     register("trello", _trello)
+    register("asana", _asana)

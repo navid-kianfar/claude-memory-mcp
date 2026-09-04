@@ -67,6 +67,8 @@ _CAPABILITIES = Capabilities(
     # available through the plain task update - claiming it would make the
     # flusher send calls that silently do nothing.
     supports_time_tracking=False,
+    # POST /attachments?parent=<task gid>, multipart
+    supports_attachments=True,
     states=_ROUND_TRIP_STATES,
 )
 
@@ -271,6 +273,23 @@ class AsanaProvider:
     def comment(self, task_id: str, body: str) -> None:
         self._request("POST", f"/tasks/{task_id}/stories",
                       json={"data": {"text": body}})
+
+    def attach(self, task_id: str, filename: str, content: bytes,
+               content_type: str | None = None) -> None:
+        headers = {"Authorization": f"Bearer {self._bearer()}"}
+        files = {"file": (filename, content, content_type or "application/octet-stream")}
+        try:
+            with httpx.Client(timeout=max(self._timeout, 60.0)) as client:
+                resp = client.post(
+                    f"{API}/attachments", params={"parent": task_id},
+                    files=files, headers=headers,
+                )
+        except httpx.HTTPError as e:
+            raise ProviderError(f"Asana unreachable: {e}") from e
+        if resp.status_code in (401, 403):
+            raise ProviderAuthError("Asana rejected the token on attach")
+        if resp.status_code >= 400:
+            raise ProviderError(f"Asana {resp.status_code} on attach: {resp.text[:200]}")
 
     def log_time(self, task_id: str, begin, end=None) -> None:  # pragma: no cover
         raise ProviderError("Asana time tracking is not writable through this API")

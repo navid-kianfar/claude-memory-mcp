@@ -74,6 +74,8 @@ class Capabilities:
     #: A task carries a state independent of the group it sits in. False for
     #: Trello, where the list IS the state - moving the card is the state change.
     supports_independent_state: bool = True
+    #: Files can be attached to a remote task.
+    supports_attachments: bool = False
     #: Time spent can be logged against a remote task. When False the flusher
     #: keeps the local entries and sends nothing, rather than losing them.
     supports_time_tracking: bool = False
@@ -229,6 +231,17 @@ class TaskProvider(Protocol):
 
     def comment(self, task_id: str, body: str) -> None:
         """Post a comment. Only called when `supports_comments`."""
+
+    def attach(
+        self, task_id: str, filename: str, content: bytes,
+        content_type: str | None = None,
+    ) -> None:
+        """Attach a file to a remote task. Only called when `supports_attachments`.
+
+        Content is BYTES, not a path: a provider must never reach into this
+        server's filesystem layout, and every platform's upload is a multipart
+        body anyway.
+        """
 
     def log_time(self, task_id: str, begin, end=None) -> None:
         """Record a stretch of work against a task. Only called when

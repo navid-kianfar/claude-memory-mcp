@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -95,6 +95,26 @@ _TASK_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_tasks_claimed ON tasks (claimed_by)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks (created_at)",
     "CREATE INDEX IF NOT EXISTS idx_task_comments_task ON task_comments (task_id)",
+    """
+    CREATE TABLE IF NOT EXISTS task_attachments (
+        id           VARCHAR NOT NULL,
+        task_id      VARCHAR NOT NULL,
+        filename     VARCHAR NOT NULL,
+        content_type VARCHAR,
+        size_bytes   BIGINT NOT NULL DEFAULT 0,
+        -- Content-addressed: the same screenshot attached twice is one file on
+        -- disk, and the hash gives the send-once guard something stable to key
+        -- on even if the filename changes.
+        sha256       VARCHAR NOT NULL,
+        -- Bytes live on disk, not in DuckDB: the per-project DB sits next to a
+        -- committed snapshot and a few screenshots would bloat it badly.
+        path         VARCHAR NOT NULL,
+        created_at   TIMESTAMP DEFAULT current_timestamp,
+        mirrored_at  TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_task_attach_task ON task_attachments (task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_task_attach_id ON task_attachments (id)",
     "CREATE INDEX IF NOT EXISTS idx_task_time_task ON task_time_entries (task_id)",
 )
 
@@ -430,6 +450,22 @@ def migrate_v7_to_v8(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (8)")
 
 
+def migrate_v10_to_v11(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v10 -> v11: task attachments.
+
+    Bytes go on disk and the row holds metadata plus a sha256. Two reasons: the
+    per-project DuckDB sits beside a committed .claude-memory snapshot and a few
+    screenshots would bloat it badly, and a content hash gives deduplication plus
+    a stable key for the send-once guard even when a filename changes.
+
+    `mirrored_at` is there from the start rather than added later, because
+    comments and time entries both had to be retrofitted with it after duplicates
+    reached a real board.
+    """
+    create_task_tables(conn)
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (11)")
+
+
 def migrate_v9_to_v10(conn: duckdb.DuckDBPyConnection) -> None:
     """Migrate v9 -> v10: remember which comments have been mirrored.
 
@@ -526,6 +562,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 10:
         migrate_v9_to_v10(conn)
         version = 10
+    if version < 11:
+        migrate_v10_to_v11(conn)
+        version = 11
     return version
 
 

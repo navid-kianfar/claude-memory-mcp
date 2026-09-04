@@ -28,6 +28,7 @@ class FakeTrello:
         self.orgs, self.boards, self.lists, self.cards = {}, {}, {}, {}
         self.comments: list[tuple[str, str]] = []
         self.moves: list[tuple[str, str]] = []
+        self.attachments: list[tuple[str, str]] = []
         self._n = 0
 
     def _next(self, prefix):
@@ -115,6 +116,11 @@ class FakeTrello:
                     card["idList"] = params["idList"]
                     self.moves.append((card["id"], params["idList"]))
                 return httpx.Response(200, json=card)
+        if method == "POST" and len(parts) == 3 and parts[0] == "cards" and parts[2] == "attachments":
+            if parts[1] not in self.cards:
+                return httpx.Response(404)
+            self.attachments.append((parts[1], params.get("name") or ""))
+            return httpx.Response(200, json={"id": self._next("att")})
         if method == "POST" and len(parts) == 4 and parts[0] == "cards" and parts[3] == "comments":
             if parts[1] not in self.cards:
                 return httpx.Response(404)

@@ -70,6 +70,8 @@ _CAPABILITIES = Capabilities(
     # The list IS the state - set_state moves the card.
     supports_independent_state=False,
     supports_time_tracking=False,
+    # POST /1/cards/{id}/attachments, multipart
+    supports_attachments=True,
     states=_ROUND_TRIP_STATES,
 )
 
@@ -266,6 +268,23 @@ class TrelloProvider:
     def comment(self, task_id: str, body: str) -> None:
         self._request("POST", f"/cards/{task_id}/actions/comments",
                       params={"text": body})
+
+    def attach(self, task_id: str, filename: str, content: bytes,
+               content_type: str | None = None) -> None:
+        key, token = self._auth()
+        files = {"file": (filename, content, content_type or "application/octet-stream")}
+        try:
+            with httpx.Client(timeout=max(self._timeout, 60.0)) as client:
+                resp = client.post(
+                    f"{API}/cards/{task_id}/attachments",
+                    params={"key": key, "token": token, "name": filename}, files=files,
+                )
+        except httpx.HTTPError as e:
+            raise ProviderError(f"Trello unreachable: {e}") from e
+        if resp.status_code in (401, 403):
+            raise ProviderAuthError(f"Trello rejected the credential on attach")
+        if resp.status_code >= 400:
+            raise ProviderError(f"Trello {resp.status_code} on attach: {resp.text[:200]}")
 
     def log_time(self, task_id: str, begin, end=None) -> None:  # pragma: no cover
         raise ProviderError("Trello has no native time tracking")

@@ -25,6 +25,7 @@ class FakeAsoodeClient:
         self.repositions: list[tuple[str, str]] = []
         self.comments: list[tuple[str, str]] = []
         self.spent: list[tuple[str, str, str | None]] = []
+        self.attached: list[tuple[str, str, bytes]] = []
         self._n = 0
 
     def _next(self, prefix):
@@ -117,6 +118,11 @@ class FakeAsoodeClient:
         if task_id not in self.tasks:
             raise AsoodeError(f"no task {task_id}")
         self.comments.append((task_id, message))
+
+    def attach(self, task_id, filename, content, content_type=None):
+        if task_id not in self.tasks:
+            raise AsoodeError(f"no task {task_id}")
+        self.attached.append((task_id, filename, content))
 
     def spend_time(self, task_id, begin, end=None):
         if task_id not in self.tasks:

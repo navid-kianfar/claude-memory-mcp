@@ -47,6 +47,8 @@ _CAPABILITIES = Capabilities(
     supports_independent_state=True,
     # POST /tasks/:id/spend-time {begin, end}
     supports_time_tracking=True,
+    # POST /tasks/:taskId/attach, multipart
+    supports_attachments=True,
     states=tuple(STATE_TO_ORDINAL),
 )
 
@@ -176,6 +178,10 @@ class AsoodeProvider:
 
     def comment(self, task_id: str, body: str) -> None:
         self.client.comment(task_id, body)
+
+    def attach(self, task_id: str, filename: str, content: bytes,
+               content_type: str | None = None) -> None:
+        self.client.attach(task_id, filename, content, content_type)
 
     def log_time(self, task_id: str, begin, end=None) -> None:
         """asoode takes ISO instants; a datetime is what the local store holds."""

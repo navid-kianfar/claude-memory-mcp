@@ -277,6 +277,29 @@ class AsoodeClient:
             f"/tasks/{task_id}/change-description", {"description": description}
         )
 
+    def attach(self, task_id: str, filename: str, content: bytes,
+               content_type: str | None = None) -> Any:
+        """POST /tasks/:taskId/attach - multipart, and the field is `files`.
+
+        Not `file`: the controller uses FileInterceptor('files')
+        (tasks.controller.ts:281), and the wrong field name is silently accepted
+        as an empty upload.
+        """
+        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+        files = {"files": (filename, content, content_type or "application/octet-stream")}
+        try:
+            with httpx.Client(timeout=max(self._timeout, 60.0)) as client:
+                resp = client.post(
+                    f"{self._base}/tasks/{task_id}/attach", files=files, headers=headers,
+                )
+        except httpx.HTTPError as e:
+            raise AsoodeError(f"asoode unreachable ({self._base}): {e}") from e
+        if resp.status_code in (401, 403):
+            raise AsoodeAuthError(f"asoode rejected the PAT ({resp.status_code}) on attach")
+        if resp.status_code >= 400:
+            raise AsoodeError(f"asoode {resp.status_code} on attach: {resp.text[:200]}")
+        return resp.json() if resp.content else {}
+
     def spend_time(self, task_id: str, begin: str, end: str | None = None) -> Any:
         """Log a stretch of work. SpendTimeDto is {begin, end?} (task.dto.ts:116)."""
         body: dict = {"begin": begin}

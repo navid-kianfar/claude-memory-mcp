@@ -25,6 +25,7 @@ class FakeAsana:
         self.projects, self.sections, self.tasks = {}, {}, {}
         self.stories: list[tuple[str, str]] = []
         self.moves: list[tuple[str, str]] = []
+        self.attachments: list[tuple[str, str]] = []
         self._n = 0
 
     def _next(self, prefix):
@@ -51,6 +52,13 @@ class FakeAsana:
 
     def _route(self, method, path, params, body):
         parts = [p for p in path.split("/") if p]
+
+        if method == "POST" and path == "/attachments":
+            parent = params.get("parent")
+            if parent not in self.tasks:
+                return httpx.Response(404, json={"errors": [{"message": "no task"}]})
+            self.attachments.append((parent, "upload"))
+            return self._wrap({"gid": self._next("att")})
 
         if method == "GET" and path == "/workspaces":
             return self._wrap([{"gid": g, "name": n} for g, n in self.workspaces.items()])

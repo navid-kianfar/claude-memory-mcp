@@ -399,11 +399,25 @@ class TaskRowMeta(BaseModel):
     running: bool = False
 
 
+class TaskAttachment(BaseModel):
+    """A file attached to a task. Bytes live on disk; this is the metadata."""
+
+    id: str
+    task_id: str
+    filename: str
+    content_type: str | None = None
+    size_bytes: int = 0
+    sha256: str
+    created_at: datetime | None = None
+    mirrored_at: datetime | None = None
+
+
 class TaskDetail(BaseModel):
     task: Task
     comments: list[TaskComment] = Field(default_factory=list)
     time_entries: list[TaskTimeEntry] = Field(default_factory=list)
     subtasks: list[Task] = Field(default_factory=list)
+    attachments: list[TaskAttachment] = Field(default_factory=list)
     minutes_spent: int = 0
     running: bool = False
 

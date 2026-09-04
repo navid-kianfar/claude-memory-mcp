@@ -234,6 +234,19 @@ class ProviderConformance(SpaceConformance):
             container.id, self._group(provider, container), "Commentable")
         provider.comment(task.id, "a note")
 
+    def test_a_file_can_be_attached_when_declared(self, provider, container):
+        if not provider.capabilities.supports_attachments:
+            pytest.skip("provider cannot take attachments")
+        task = provider.create_task(
+            container.id, self._group(provider, container), "With evidence")
+        provider.attach(task.id, "proof.png", b"bytes", "image/png")
+
+    def test_attaching_to_an_unknown_task_raises(self, provider):
+        if not provider.capabilities.supports_attachments:
+            pytest.skip("provider cannot take attachments")
+        with pytest.raises(ProviderError):
+            provider.attach("no-such-task", "proof.png", b"bytes", "image/png")
+
     def test_time_can_be_logged_when_declared(self, provider, container):
         from datetime import datetime, timedelta, timezone
 

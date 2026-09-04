@@ -8,7 +8,9 @@ they are not a MemoryCategory, so they never reach the git-committed
 from datetime import datetime
 
 from memory_mcp.db.connection import connect
-from memory_mcp.models import Task, TaskComment, TaskFilter, TaskTimeEntry
+from memory_mcp.models import (
+    Task, TaskAttachment, TaskComment, TaskFilter, TaskTimeEntry,
+)
 
 # Column order is load-bearing: every read uses this list and _row_to_task maps
 # by position. Append new columns AT THE END so existing indices stay valid.
@@ -603,6 +605,101 @@ class TaskRepository:
 # every retry duplicated the comment - an unbounded retry is not "eventually
 # consistent", it is a loop with a side effect.
 MAX_OUTBOX_ATTEMPTS = 5
+
+
+class AttachmentRepository:
+    """Task attachments: metadata in DuckDB, bytes on disk.
+
+    Content-addressed by sha256, so attaching the same screenshot to two tasks
+    stores one file. Deleting a row therefore only removes the blob when nothing
+    else references it - the cheap alternative, deleting eagerly, would break the
+    other task silently.
+    """
+
+    def add(self, project: str, attachment: TaskAttachment, path: str) -> TaskAttachment:
+        with connect(project) as conn:
+            conn.execute(
+                "INSERT INTO task_attachments (id, task_id, filename, content_type, "
+                "size_bytes, sha256, path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [attachment.id, attachment.task_id, attachment.filename,
+                 attachment.content_type, attachment.size_bytes, attachment.sha256, path],
+            )
+        return attachment
+
+    def list_for(self, project: str, task_id: str) -> list[TaskAttachment]:
+        try:
+            with connect(project) as conn:
+                rows = conn.execute(
+                    "SELECT id, task_id, filename, content_type, size_bytes, sha256, "
+                    "created_at, mirrored_at FROM task_attachments "
+                    "WHERE task_id = ? ORDER BY created_at ASC",
+                    [task_id],
+                ).fetchall()
+        except Exception:
+            return []
+        return [
+            TaskAttachment(
+                id=r[0], task_id=r[1], filename=r[2], content_type=r[3],
+                size_bytes=r[4] or 0, sha256=r[5], created_at=r[6], mirrored_at=r[7],
+            )
+            for r in rows
+        ]
+
+    def get(self, project: str, attachment_id: str) -> tuple[TaskAttachment, str] | None:
+        with connect(project) as conn:
+            row = conn.execute(
+                "SELECT id, task_id, filename, content_type, size_bytes, sha256, "
+                "created_at, mirrored_at, path FROM task_attachments WHERE id = ?",
+                [attachment_id],
+            ).fetchone()
+        if not row:
+            return None
+        return (
+            TaskAttachment(
+                id=row[0], task_id=row[1], filename=row[2], content_type=row[3],
+                size_bytes=row[4] or 0, sha256=row[5], created_at=row[6],
+                mirrored_at=row[7],
+            ),
+            row[8],
+        )
+
+    def unmirrored(self, project: str, task_id: str) -> list[dict]:
+        """Attachments not yet sent, oldest first."""
+        try:
+            with connect(project) as conn:
+                rows = conn.execute(
+                    "SELECT id, filename, content_type, path FROM task_attachments "
+                    "WHERE task_id = ? AND mirrored_at IS NULL ORDER BY created_at ASC",
+                    [task_id],
+                ).fetchall()
+        except Exception:
+            return []
+        return [{"id": r[0], "filename": r[1], "content_type": r[2], "path": r[3]}
+                for r in rows]
+
+    def mark_mirrored(self, project: str, attachment_id: str) -> None:
+        from datetime import datetime, timezone
+
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE task_attachments SET mirrored_at = ? WHERE id = ?",
+                [datetime.now(timezone.utc), attachment_id],
+            )
+
+    def delete(self, project: str, attachment_id: str) -> str | None:
+        """Remove the row. Returns the blob path only when no row still uses it,
+        so a file shared by two tasks is never deleted out from under one."""
+        found = self.get(project, attachment_id)
+        if not found:
+            return None
+        attachment, path = found
+        with connect(project) as conn:
+            conn.execute("DELETE FROM task_attachments WHERE id = ?", [attachment_id])
+            still_used = conn.execute(
+                "SELECT count(*) FROM task_attachments WHERE sha256 = ?",
+                [attachment.sha256],
+            ).fetchone()[0]
+        return None if still_used else path
 
 
 class OutboxRepository:

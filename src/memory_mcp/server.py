@@ -312,6 +312,48 @@ def memory_asoode_links(project: str | None = None) -> dict:
 
 
 @mcp.tool()
+def memory_task_attach(
+    task_id: str,
+    path: str,
+    filename: str | None = None,
+    project: str | None = None,
+) -> dict:
+    """Attach a file on disk to a task, and mirror it to the linked board.
+
+    USE THIS FOR EVIDENCE. A screenshot proving a fix works, a failing log, a
+    generated report, a diff - anything the work produced that someone reading
+    the task later would want to see. A file described in prose is not the same
+    as the file.
+
+    `path` is a local path; the bytes are COPIED into the task store, so a
+    scratch file that gets cleaned up later is safe to attach. `filename` renames
+    it for display. Attachments mirror to the remote task automatically on the
+    next flush, once and only once, on every platform that supports them.
+
+    Limits: 25 MB, and an empty file is refused.
+    """
+    def _run():
+        slug = _resolve(project)
+        attachment = container.task_service.attach(slug, task_id, path, filename)
+        return {"status": "ok", "attachment": attachment.model_dump(mode="json")}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_attachments(task_id: str, project: str | None = None) -> dict:
+    """List the files attached to a task, with whether each has been mirrored."""
+    def _run():
+        slug = _resolve(project)
+        return {
+            "attachments": [
+                a.model_dump(mode="json")
+                for a in container.task_service.attachments(slug, task_id)
+            ]
+        }
+    return _safe(_run)
+
+
+@mcp.tool()
 def memory_task_plan(
     request: str,
     tasks: list[dict],

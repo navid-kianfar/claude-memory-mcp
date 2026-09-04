@@ -8,7 +8,7 @@ import threading
 
 from memory_mcp.repositories import (
     MemoryRepository, ProjectRepository, SessionRepository, ProvenanceRepository,
-    OutboxRepository, TaskRepository, TemplateRepository,
+    AttachmentRepository, OutboxRepository, TaskRepository, TemplateRepository,
 )
 from memory_mcp.services import (
     MemoryService, SearchService, RulesService, RulesCache,
@@ -30,6 +30,7 @@ class Container:
         self.template_repo = TemplateRepository()
         self.task_repo = TaskRepository()
         self.outbox_repo = OutboxRepository()
+        self.attachment_repo = AttachmentRepository()
 
         # Caches
         self.rules_cache = RulesCache()
@@ -53,6 +54,7 @@ class Container:
             ),
             outbox_repo=self.outbox_repo,
             mirror=self._mirror_soon,
+            attachment_repo=self.attachment_repo,
         )
         self.project_service = ProjectService(self.project_repo)
         self.portable_service = PortableService(self.project_repo)
@@ -68,6 +70,7 @@ class Container:
         # with no PAT stored still constructs the container fine.
         self.asoode_bridge = AsoodeBridge(
             self.project_service, self.task_service, outbox_repo=self.outbox_repo,
+            attachment_repo=self.attachment_repo,
         )
         self.task_planner = TaskPlanner(self.task_service, self.asoode_bridge)
         # Constructed after the bridge: a bound project's session brief tells the

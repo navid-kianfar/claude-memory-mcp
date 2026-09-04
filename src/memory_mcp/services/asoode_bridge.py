@@ -88,12 +88,13 @@ def build_state_list_map(board: Container) -> tuple[dict[str, str], str | None]:
 class AsoodeBridge:
     def __init__(
         self, project_service, task_service, provider: TaskProvider | None = None,
-        outbox_repo=None,
+        outbox_repo=None, attachment_repo=None,
     ):
         self._projects = project_service
         self._tasks = task_service
         self._provider = provider
         self._outbox = outbox_repo
+        self._attachments = attachment_repo
         # One flush per project at a time, whoever calls it. The background
         # mirror had a lock; a direct flush() bypassed it, so a manual flush
         # could race the mirror and both would DELETE the same outbox row -
@@ -409,6 +410,8 @@ class AsoodeBridge:
                 return True  # created in ToDo already; no state call needed
 
         op = row["op"]
+        if op == "attachment":
+            return self._flush_attachments(slug, task, link, remote_id)
         if op == "time":
             return self._flush_time(slug, task, link, remote_id)
         if op == "comment":
@@ -520,6 +523,35 @@ class AsoodeBridge:
                 "boards": len(boards),
             },
         }
+
+    def _flush_attachments(self, slug: str, task, link: dict, remote_id: str) -> bool:
+        """Upload every attachment on this task that has not been sent yet.
+
+        Reads the LOCAL unmirrored rows and marks each as it lands - the same
+        send-once discipline comments and time entries needed, and it matters
+        more here: a repeated 5 MB screenshot costs storage on both sides, not
+        just noise.
+        """
+        provider = self.provider_for(link)
+        if not provider.capabilities.supports_attachments or self._attachments is None:
+            return False
+        pending = self._attachments.unmirrored(slug, task.id)
+        if not pending:
+            return False
+        from pathlib import Path as _Path
+
+        for row in pending:
+            blob = _Path(row["path"])
+            if not blob.is_file():
+                # The blob is gone - a cleared data dir, a manual delete. Mark it
+                # rather than retrying forever against a file that will not return.
+                self._attachments.mark_mirrored(slug, row["id"])
+                continue
+            provider.attach(
+                remote_id, row["filename"], blob.read_bytes(), row["content_type"],
+            )
+            self._attachments.mark_mirrored(slug, row["id"])
+        return True
 
     def _flush_comments(self, slug: str, task, link: dict, remote_id: str) -> bool:
         """Send every comment on this task that has not been sent yet.

@@ -16,7 +16,7 @@ import uuid
 
 from memory_mcp.config import settings
 from memory_mcp.context import current_user
-from memory_mcp.exceptions import TaskNotFoundError
+from memory_mcp.exceptions import MemoryMCPError, TaskNotFoundError
 from memory_mcp.models import (
     CreateTaskRequest, Task, TaskComment, TaskCommentKind, TaskDetail, TaskFilter,
     TaskListResponse, TaskRowMeta, TaskState, TaskTimeEntry, UpdateTaskRequest,
@@ -49,6 +49,7 @@ class TaskService:
         link_resolver=None,
         outbox_repo=None,
         mirror=None,
+        attachment_repo=None,
     ):
         self._task_repo = task_repo
         self._provenance_repo = provenance_repo
@@ -62,6 +63,7 @@ class TaskService:
         # configured must behave exactly as it always has.
         self._outbox = outbox_repo
         self._mirror = mirror
+        self._attachments = attachment_repo
         # One lock per project, guarding the read-modify-write in claim_next.
         # DuckDB is single-writer and this repo opens a connection per
         # operation, so the "pick a task, then claim it" pair needs serializing.
@@ -178,6 +180,7 @@ class TaskService:
         task = self._require(project, task_id)
         entries = self._task_repo.entries_for(project, task_id)
         return TaskDetail(
+            attachments=self.attachments(project, task_id),
             task=task,
             comments=self._task_repo.comments_for(project, task_id),
             time_entries=entries,
@@ -297,6 +300,90 @@ class TaskService:
             self._touch_lease(project, task_id)
             self._record(project, task_id, "task_reorder", {"position": index})
         return count
+
+    # ---------- attachments ----------
+    #
+    # A file the work produced - a screenshot proving a fix, a log, a diff -
+    # belongs on the task, and on the remote task too. Bytes are copied into a
+    # content-addressed store rather than referenced in place: the source is
+    # usually a scratch file that will be gone by the time anyone looks.
+
+    #: Above this a mirror would make the flusher look hung, and no task platform
+    #: wants a 100 MB attachment anyway. Refused with the size named.
+    MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
+    def attach(
+        self, project: str, task_id: str, source_path: str,
+        filename: str | None = None, content_type: str | None = None,
+    ) -> "TaskAttachment":
+        """Attach a file that exists on disk to a task."""
+        import hashlib
+        import mimetypes
+        import shutil
+        import uuid
+        from pathlib import Path as _Path
+
+        from memory_mcp.config import settings
+        from memory_mcp.models import TaskAttachment
+
+        self._require(project, task_id)
+        src = _Path(source_path).expanduser()
+        if not src.is_file():
+            raise MemoryMCPError(f"no file at {source_path}")
+        size = src.stat().st_size
+        if size > self.MAX_ATTACHMENT_BYTES:
+            raise MemoryMCPError(
+                f"{src.name} is {size / 1_048_576:.1f} MB, over the "
+                f"{self.MAX_ATTACHMENT_BYTES // 1_048_576} MB attachment limit"
+            )
+        if size == 0:
+            raise MemoryMCPError(f"{src.name} is empty")
+
+        digest = hashlib.sha256()
+        with src.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        sha = digest.hexdigest()
+
+        # Content-addressed, so the same screenshot on two tasks is one blob.
+        store = _Path(settings.data_dir) / "attachments" / project / sha[:2]
+        store.mkdir(parents=True, exist_ok=True)
+        blob = store / sha
+        if not blob.exists():
+            shutil.copyfile(src, blob)
+
+        name = filename or src.name
+        attachment = TaskAttachment(
+            id=str(uuid.uuid4()), task_id=task_id, filename=name,
+            content_type=content_type or mimetypes.guess_type(name)[0]
+            or "application/octet-stream",
+            size_bytes=size, sha256=sha,
+        )
+        if self._attachments is not None:
+            self._attachments.add(project, attachment, str(blob))
+        self._record(project, task_id, "task_attach",
+                     {"filename": name, "size_bytes": size})
+        self._enqueue(project, task_id, "attachment", {"attachment_id": attachment.id})
+        return attachment
+
+    def attachments(self, project: str, task_id: str) -> list:
+        if self._attachments is None:
+            return []
+        return self._attachments.list_for(project, task_id)
+
+    def detach(self, project: str, attachment_id: str) -> bool:
+        """Remove an attachment. The blob goes only when nothing else uses it."""
+        if self._attachments is None:
+            return False
+        orphan = self._attachments.delete(project, attachment_id)
+        if orphan:
+            from pathlib import Path as _Path
+
+            try:
+                _Path(orphan).unlink(missing_ok=True)
+            except OSError:
+                pass
+        return True
 
     def set_link(self, project: str, task_id: str, link_id: int | None) -> Task:
         """Point a task at a linked board. Used by the importer, which knows the

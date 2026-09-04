@@ -7,48 +7,23 @@ never lose or block a local task.
 
 import pytest
 
-from memory_mcp.asoode_client import AsoodeError
+from memory_mcp.providers import ProviderError
 from memory_mcp.container import container
 from memory_mcp.db.registry import upsert_project_link
 from memory_mcp.models import CreateTaskRequest, TaskFilter
 from memory_mcp.repositories import OutboxRepository
 from memory_mcp.services.asoode_bridge import AsoodeBridge
 from memory_mcp.services.task_service import TaskService
+from tests.providers.fakes import FakeProvider
 
 BOARD_LISTS = {"todo": "l-todo", "in_progress": "l-doing", "done": "l-done"}
 
 
-class Client:
-    def __init__(self, fail=None):
-        self.fail = fail
-        self.created, self.states, self.comments, self.moves = [], [], [], []
-        self._by_ref, self._n = {}, 0
-
-    def _boom(self):
-        if self.fail:
-            raise self.fail
-
-    def create_task(self, list_id, title, *, description="", external_ref=None, **kw):
-        self._boom()
-        if external_ref and external_ref in self._by_ref:
-            return self._by_ref[external_ref]
-        self._n += 1
-        task = {"id": f"r{self._n}", "title": title}
-        if external_ref:
-            self._by_ref[external_ref] = task
-        self.created.append({"list_id": list_id, "title": title, "ref": external_ref})
-        return task
-
-    def change_state(self, task_id, state):
-        self._boom()
-        self.states.append((task_id, state))
-
-    def reposition(self, task_id, list_id, order=0):
-        self.moves.append((task_id, list_id))
-
-    def comment(self, task_id, message, private=False):
-        self._boom()
-        self.comments.append((task_id, message))
+def _provider(fail=None):
+    p = FakeProvider(fail=fail)
+    p.seed(container_id="wp1", title="Board", space_id="p1",
+           groups=(("l-todo", "To Do"), ("l-doing", "In Progress"), ("l-done", "Done")))
+    return p
 
 
 @pytest.fixture
@@ -78,18 +53,18 @@ def _stack(slug, client):
 
 class TestMutationsQueue:
     def test_creating_a_task_queues_a_mirror(self, project):
-        tasks, _, outbox = _stack(project, Client())
+        tasks, _, outbox = _stack(project, _provider())
         tasks.create(CreateTaskRequest(project=project, title="New"))
         assert outbox.depth(project) == 1
 
     def test_completing_a_task_queues_one(self, project):
-        tasks, _, outbox = _stack(project, Client())
+        tasks, _, outbox = _stack(project, _provider())
         task = tasks.create(CreateTaskRequest(project=project, title="X"))
         tasks.done(project, task.id)
         assert outbox.depth(project) >= 2
 
     def test_a_comment_queues_one(self, project):
-        tasks, _, outbox = _stack(project, Client())
+        tasks, _, outbox = _stack(project, _provider())
         task = tasks.create(CreateTaskRequest(project=project, title="X"))
         tasks.comment(project, task.id, "a note")
         ops = [r["op"] for r in outbox.pending(project)]
@@ -97,7 +72,7 @@ class TestMutationsQueue:
 
     def test_a_local_only_edit_queues_nothing(self, project):
         """Reordering has no remote meaning; queuing it would be a wasted call."""
-        tasks, _, outbox = _stack(project, Client())
+        tasks, _, outbox = _stack(project, _provider())
         task = tasks.create(CreateTaskRequest(project=project, title="X"))
         before = outbox.depth(project)
         tasks.reorder(project, [task.id])
@@ -106,24 +81,24 @@ class TestMutationsQueue:
 
 class TestFlush:
     def test_drains_and_creates_remotely(self, project):
-        client = Client()
+        client = _provider()
         tasks, bridge, outbox = _stack(project, client)
         tasks.create(CreateTaskRequest(project=project, title="Ship it"))
         result = bridge.flush(project)
 
         assert result["flushed"] == 1
         assert outbox.depth(project) == 0
-        assert client.created[0]["title"] == "Ship it"
+        assert client.created_tasks[0]["title"] == "Ship it"
 
     def test_the_external_ref_is_the_local_id(self, project):
-        client = Client()
+        client = _provider()
         tasks, bridge, _ = _stack(project, client)
         task = tasks.create(CreateTaskRequest(project=project, title="X"))
         bridge.flush(project)
-        assert client.created[0]["ref"] == f"memory-mcp:{task.id}"
+        assert client.created_tasks[0]["external_ref"] == f"memory-mcp:{task.id}"
 
     def test_the_remote_id_is_remembered_so_edits_do_not_re_create(self, project):
-        client = Client()
+        client = _provider()
         tasks, bridge, outbox = _stack(project, client)
         task = tasks.create(CreateTaskRequest(project=project, title="X"))
         bridge.flush(project)
@@ -132,10 +107,10 @@ class TestFlush:
 
         tasks.done(project, task.id)
         bridge.flush(project)
-        assert len(client.created) == 1, "an edit must not create a second remote task"
+        assert len(client.created_tasks) == 1, "an edit must not create a second remote task"
 
     def test_completion_mirrors_state_and_moves_the_card(self, project):
-        client = Client()
+        client = _provider()
         tasks, bridge, _ = _stack(project, client)
         task = tasks.create(CreateTaskRequest(project=project, title="X"))
         bridge.flush(project)
@@ -148,7 +123,7 @@ class TestFlush:
         )
 
     def test_a_comment_reaches_the_remote_task(self, project):
-        client = Client()
+        client = _provider()
         tasks, bridge, _ = _stack(project, client)
         task = tasks.create(CreateTaskRequest(project=project, title="X"))
         tasks.comment(project, task.id, "what I learned")
@@ -158,7 +133,7 @@ class TestFlush:
 
 class TestUnreachableAsoodeNeverLosesAWrite:
     def test_the_local_task_survives_a_dead_remote(self, project):
-        tasks, bridge, outbox = _stack(project, Client(fail=AsoodeError("down")))
+        tasks, bridge, outbox = _stack(project, _provider(fail=ProviderError("down")))
         task = tasks.create(CreateTaskRequest(project=project, title="Offline work"))
 
         assert tasks.get(project, task.id).title == "Offline work"
@@ -167,7 +142,7 @@ class TestUnreachableAsoodeNeverLosesAWrite:
         assert outbox.depth(project) == 1, "the row stays, to retry"
 
     def test_the_row_is_retried_when_the_remote_returns(self, project):
-        client = Client(fail=AsoodeError("down"))
+        client = _provider(fail=ProviderError("down"))
         tasks, bridge, outbox = _stack(project, client)
         tasks.create(CreateTaskRequest(project=project, title="Deferred"))
         bridge.flush(project)
@@ -176,10 +151,10 @@ class TestUnreachableAsoodeNeverLosesAWrite:
         client.fail = None
         assert bridge.flush(project)["flushed"] == 1
         assert outbox.depth(project) == 0
-        assert client.created[0]["title"] == "Deferred"
+        assert client.created_tasks[0]["title"] == "Deferred"
 
     def test_the_failure_is_recorded_rather_than_silent(self, project):
-        tasks, bridge, outbox = _stack(project, Client(fail=AsoodeError("boom")))
+        tasks, bridge, outbox = _stack(project, _provider(fail=ProviderError("boom")))
         tasks.create(CreateTaskRequest(project=project, title="X"))
         bridge.flush(project)
         row = outbox.pending(project)[0]
@@ -187,7 +162,7 @@ class TestUnreachableAsoodeNeverLosesAWrite:
         assert "boom" in row["last_error"]
 
     def test_it_stops_at_the_first_failure_rather_than_hammering(self, project):
-        client = Client(fail=AsoodeError("down"))
+        client = _provider(fail=ProviderError("down"))
         tasks, bridge, _ = _stack(project, client)
         for i in range(3):
             tasks.create(CreateTaskRequest(project=project, title=f"T{i}"))
@@ -197,7 +172,7 @@ class TestUnreachableAsoodeNeverLosesAWrite:
     def test_an_unlinked_project_drops_rows_instead_of_retrying_forever(self, project):
         from memory_mcp.db.registry import delete_project_link, get_project_links
 
-        tasks, bridge, outbox = _stack(project, Client())
+        tasks, bridge, outbox = _stack(project, _provider())
         tasks.create(CreateTaskRequest(project=project, title="X"))
         for link in get_project_links(project):
             delete_project_link(link["id"])
@@ -207,7 +182,7 @@ class TestUnreachableAsoodeNeverLosesAWrite:
         assert outbox.depth(project) == 0
 
     def test_a_task_deleted_before_the_flush_is_not_an_error(self, project):
-        tasks, bridge, outbox = _stack(project, Client())
+        tasks, bridge, outbox = _stack(project, _provider())
         task = tasks.create(CreateTaskRequest(project=project, title="Fleeting"))
         container.task_repo.hard_delete(project, task.id)
         result = bridge.flush(project)
@@ -252,3 +227,79 @@ class TestTestsNeverReachTheNetwork:
         )
         container.task_service.done(project, task.id)
         assert container.task_service.get(project, task.id).state.value == "done"
+
+
+class TestAPoisonRowIsEventuallyAbandoned:
+    """Retrying forever is not eventual consistency - it is a loop with a side effect.
+
+    The live failure that forced this: a row posted its comment to asoode and
+    then failed the LOCAL delete, so every pass re-posted the comment. Bounding
+    the attempts trades one lost mirror for not duplicating a side effect
+    indefinitely.
+    """
+
+    def test_a_row_is_dropped_after_the_attempt_cap(self, project):
+        from memory_mcp.repositories.task_repository import MAX_OUTBOX_ATTEMPTS
+
+        tasks, bridge, outbox = _stack(project, _provider(fail=ProviderError("nope")))
+        tasks.create(CreateTaskRequest(project=project, title="Doomed"))
+
+        for _ in range(MAX_OUTBOX_ATTEMPTS):
+            bridge.flush(project)
+        assert outbox.depth(project) == 0, "the poison row must not queue forever"
+
+    def test_giving_up_is_reported_not_silent(self, project):
+        from memory_mcp.repositories.task_repository import MAX_OUTBOX_ATTEMPTS
+
+        tasks, bridge, outbox = _stack(project, _provider(fail=ProviderError("nope")))
+        tasks.create(CreateTaskRequest(project=project, title="Doomed"))
+
+        results = [bridge.flush(project) for _ in range(MAX_OUTBOX_ATTEMPTS)]
+        assert results[-1]["abandoned"] == 1
+
+    def test_the_local_task_outlives_the_abandoned_mirror(self, project):
+        from memory_mcp.repositories.task_repository import MAX_OUTBOX_ATTEMPTS
+
+        tasks, bridge, _ = _stack(project, _provider(fail=ProviderError("nope")))
+        task = tasks.create(CreateTaskRequest(project=project, title="Survivor"))
+        for _ in range(MAX_OUTBOX_ATTEMPTS):
+            bridge.flush(project)
+        assert tasks.get(project, task.id).title == "Survivor"
+
+    def test_a_row_that_succeeds_before_the_cap_is_not_abandoned(self, project):
+        provider = _provider(fail=ProviderError("temporarily down"))
+        tasks, bridge, outbox = _stack(project, provider)
+        tasks.create(CreateTaskRequest(project=project, title="Recovers"))
+
+        bridge.flush(project)
+        provider.fail = None
+        result = bridge.flush(project)
+        assert result["flushed"] == 1 and result["abandoned"] == 0
+
+
+class TestConcurrentFlushes:
+    def test_two_flushes_do_not_race_the_same_row(self, project):
+        """A manual flush used to race the background mirror, and both would
+        DELETE the same outbox row - DuckDB failed that with an index error."""
+        import threading
+
+        tasks, bridge, outbox = _stack(project, _provider())
+        for i in range(5):
+            tasks.create(CreateTaskRequest(project=project, title=f"T{i}"))
+
+        errors = []
+
+        def run():
+            try:
+                bridge.flush(project)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=run) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        assert outbox.depth(project) == 0

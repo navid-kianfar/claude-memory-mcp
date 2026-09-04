@@ -80,6 +80,21 @@ class Capabilities:
 
 
 @dataclass(frozen=True)
+class SpaceRef:
+    """The level ABOVE a container: asoode project, Asana workspace, Jira site.
+
+    Optional in the model but real on most platforms, and `bootstrap` needs it -
+    creating a board somewhere requires knowing where "somewhere" is. A platform
+    with no such level returns a single synthetic space, for the same reason a
+    platform with no groups returns one: shared code must never branch on whether
+    a level exists.
+    """
+
+    id: str
+    title: str
+
+
+@dataclass(frozen=True)
 class Group:
     """A column/section inside a container: asoode list, Trello list, Asana section."""
 
@@ -145,6 +160,23 @@ class TaskProvider(Protocol):
     @property
     def capabilities(self) -> Capabilities:
         ...
+
+    # ---------- spaces ----------
+
+    def list_spaces(self) -> list[SpaceRef]:
+        """Every space the credential can see. One synthetic entry when the
+        platform has no such level."""
+
+    def find_space(self, title: str) -> SpaceRef | None:
+        """A space by exact title, case-insensitively, or None.
+
+        By title rather than by ref because spaces are the level a human names
+        and platforms rarely give them a caller-supplied key.
+        """
+
+    def create_space(self, title: str, *, description: str = "") -> SpaceRef:
+        """Create a space. A platform without the level returns its synthetic one
+        rather than raising - callers must not have to ask first."""
 
     # ---------- discovery ----------
 

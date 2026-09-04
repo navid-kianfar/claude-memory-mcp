@@ -264,3 +264,55 @@ def test_v6_tables_match_between_fresh_and_migrated(tmp_path):
     finally:
         fresh.close()
         migrated.close()
+
+
+def test_v8_rebuilds_the_outbox_without_a_primary_key(tmp_path):
+    """A queue row must always be deletable.
+
+    A live outbox reached a state where a row could be SELECTed but never
+    DELETEd - DuckDB's ART index reported "Failed to delete all rows from
+    index" - so the flusher retried it forever, re-posting its side effect each
+    time. The constraint bought nothing: the table is addressed by id through a
+    plain index.
+    """
+    db = tmp_path / "legacy.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        run_migrations(conn)
+        ddl = conn.execute(
+            "SELECT sql FROM duckdb_tables() WHERE table_name = 'task_outbox'"
+        ).fetchone()[0]
+        assert "PRIMARY KEY" not in ddl.upper()
+
+        # and a row inserted then deleted must actually go
+        conn.execute(
+            "INSERT INTO task_outbox (id, task_id, op) VALUES ('x1', 't1', 'create')"
+        )
+        conn.execute("DELETE FROM task_outbox WHERE id = 'x1'")
+        assert conn.execute("SELECT count(*) FROM task_outbox").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_v8_keeps_queued_rows_through_the_rebuild(tmp_path):
+    """Rebuilding the table must not silently drop pending mirrors."""
+    db = tmp_path / "legacy.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        run_migrations(conn)
+        conn.execute(
+            "INSERT INTO task_outbox (id, task_id, op, attempts) "
+            "VALUES ('keep', 't9', 'state', 2)"
+        )
+        # a second migration pass is a no-op, but the rebuild path is idempotent
+        from memory_mcp.db.schema import migrate_v7_to_v8
+
+        migrate_v7_to_v8(conn)
+        row = conn.execute(
+            "SELECT task_id, op, attempts FROM task_outbox WHERE id = 'keep'"
+        ).fetchone()
+        assert row == ("t9", "state", 2)
+    finally:
+        conn.close()

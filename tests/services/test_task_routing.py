@@ -6,7 +6,7 @@ The user's model is a monorepo where each app has its own work package, so
 
 import pytest
 
-from memory_mcp.asoode_client import AsoodeError
+from memory_mcp.providers import ProviderError
 from memory_mcp.container import container
 from memory_mcp.db.registry import upsert_project_link
 from memory_mcp.models import CreateTaskRequest
@@ -48,12 +48,12 @@ class TestResolvingABoardName:
     def test_a_wrong_name_is_rejected_and_lists_the_real_ones(self, project):
         _link(project, "wp-worker", "worker")
         _link(project, "wp-backend", "backend")
-        with pytest.raises(AsoodeError) as e:
+        with pytest.raises(ProviderError) as e:
             container.asoode_bridge.resolve_link(project, "frontend")
         assert "worker" in str(e.value) and "backend" in str(e.value)
 
     def test_targeting_an_unlinked_project_says_to_attach(self, project):
-        with pytest.raises(AsoodeError, match="memory_asoode_attach"):
+        with pytest.raises(ProviderError, match="memory_asoode_attach"):
             container.asoode_bridge.resolve_link(project, "worker")
 
 
@@ -91,7 +91,7 @@ class TestTheRoutingRule:
         _link(project, "wp-b", "b", is_default=False)
         task = container.task_service.create(
             CreateTaskRequest(project=project, title="Ambiguous"))
-        with pytest.raises(AsoodeError, match="no default"):
+        with pytest.raises(ProviderError, match="no default"):
             container.asoode_bridge.route(project, task)
 
     def test_a_deleted_link_falls_back_rather_than_dropping_the_task(self, project):
@@ -106,7 +106,7 @@ class TestTheRoutingRule:
 
     def test_a_bad_target_fails_the_create_rather_than_landing_anywhere(self, project):
         _link(project, "wp-backend", "backend", is_default=True)
-        with pytest.raises(AsoodeError):
+        with pytest.raises(ProviderError):
             container.task_service.create(CreateTaskRequest(
                 project=project, title="Typo", target="wroker"))
         assert container.task_service.list_tasks(project, limit=10).total == 0

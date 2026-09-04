@@ -33,10 +33,10 @@ socket subscription plus the `updatedSince` reconcile poll, and it belongs in th
 daemon's lifespan (see daemon.build_app).
 """
 
+import threading
+
 from memory_mcp.asoode import get_endpoints
-from memory_mcp.asoode_client import (
-    ORDINAL_TO_STATE, STATE_TO_ORDINAL, AsoodeClient, AsoodeError,
-)
+from memory_mcp.providers import Container, ProviderError, TaskProvider
 from memory_mcp.db.registry import (
     get_default_project_link,
     get_project_links,
@@ -62,31 +62,20 @@ _LIST_ALIASES = {
 }
 
 
-def _board_lists(board: dict) -> list[dict]:
-    """The board's columns, whichever key this asoode build returns them under."""
-    for key in ("lists", "workPackageLists", "boardLists"):
-        value = board.get(key)
-        if isinstance(value, list) and value:
-            return value
-    return []
-
-
-def build_state_list_map(board: dict) -> tuple[dict[str, str], str | None]:
+def build_state_list_map(board: Container) -> tuple[dict[str, str], str | None]:
     """Map each local task state to a board list id.
 
     Returns (map, default_list_id). Matching is by column title; every state gets
     an entry, falling back to the first column, so a push never has to decide
     what to do with an unmapped state mid-flight.
     """
-    lists = _board_lists(board)
-    if not lists:
+    groups = list(board.groups)
+    if not groups:
         return {}, None
-    by_title = {
-        (item.get("title") or "").strip().lower(): item.get("id") for item in lists
-    }
-    default_id = lists[0].get("id")
+    by_title = {g.title.strip().lower(): g.id for g in groups}
+    default_id = groups[0].id
     mapping: dict[str, str] = {}
-    for state in STATE_TO_ORDINAL:
+    for state in _LIST_ALIASES:
         target = default_id
         for alias in _LIST_ALIASES.get(state, ()):
             if alias in by_title:
@@ -98,19 +87,44 @@ def build_state_list_map(board: dict) -> tuple[dict[str, str], str | None]:
 
 class AsoodeBridge:
     def __init__(
-        self, project_service, task_service, client: AsoodeClient | None = None,
+        self, project_service, task_service, provider: TaskProvider | None = None,
         outbox_repo=None,
     ):
         self._projects = project_service
         self._tasks = task_service
-        self._client = client
+        self._provider = provider
         self._outbox = outbox_repo
+        # One flush per project at a time, whoever calls it. The background
+        # mirror had a lock; a direct flush() bypassed it, so a manual flush
+        # could race the mirror and both would DELETE the same outbox row -
+        # DuckDB fails that with "Failed to delete all rows from index". The
+        # lock belongs HERE, where every flush passes, not at one call site.
+        self._flush_locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _flush_lock(self, slug: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._flush_locks.setdefault(slug, threading.Lock())
 
     @property
-    def client(self) -> AsoodeClient:
-        if self._client is None:
-            self._client = AsoodeClient.from_settings()
-        return self._client
+    def provider(self) -> TaskProvider:
+        """The platform this bridge talks to.
+
+        Built lazily and defaulting to asoode, which is the only implementation
+        today; the provider registry replaces this default with a per-link lookup
+        so one project can hold links to different platforms at once.
+        """
+        if self._provider is None:
+            from memory_mcp.providers import AsoodeProvider
+
+            self._provider = AsoodeProvider()
+        return self._provider
+
+    # Kept so existing callers and tests that say `.client` keep working; the
+    # bridge itself no longer uses it.
+    @property
+    def client(self) -> TaskProvider:
+        return self.provider
 
     # ---------- linking ----------
 
@@ -129,33 +143,28 @@ class AsoodeBridge:
         board = board_title or project.display_name or slug
 
         if reuse_project_id:
-            remote_project = self.client.fetch_project(reuse_project_id)
-            if not remote_project:
-                raise AsoodeError(f"no asoode project with id {reuse_project_id}")
+            space = next(
+                (s for s in self.provider.list_spaces() if s.id == reuse_project_id),
+                None,
+            )
+            if space is None:
+                raise ProviderError(f"no space with id {reuse_project_id}")
         else:
-            remote_project = self.client.find_project_by_title(title)
-            if remote_project is None:
-                remote_project = self.client.create_project(
-                    title, description=project.description or "",
-                )
-
-        project_id = remote_project.get("id")
-        if not project_id:
-            raise AsoodeError("asoode returned a project without an id")
+            space = self.provider.find_space(title) or self.provider.create_space(
+                title, description=project.description or "",
+            )
 
         # externalRef is what makes this re-runnable: the project's stable uid,
-        # so the same memory project always resolves to the same board.
+        # so the same memory project always resolves to the same container.
         ref = project.project_uid or slug
-        work_package = self.client.create_work_package(
-            project_id, board,
+        container = self.provider.create_container(
+            board,
             description=f"Tasks mirrored from the {slug} memory project.",
             external_ref=f"memory-mcp:{ref}",
+            space_id=space.id,
         )
-        package_id = work_package.get("id")
-        if not package_id:
-            raise AsoodeError("asoode returned a work package without an id")
-
-        state_map, default_list = build_state_list_map(work_package)
+        project_id, package_id = space.id, container.id
+        state_map, default_list = build_state_list_map(container)
         endpoints = get_endpoints()
         link = upsert_project_link(
             slug,
@@ -169,12 +178,9 @@ class AsoodeBridge:
         )
         return {
             "link": link,
-            "project": {"id": project_id, "title": remote_project.get("title")},
-            "work_package": {"id": package_id, "title": work_package.get("title")},
-            "lists": [
-                {"id": item.get("id"), "title": item.get("title")}
-                for item in _board_lists(work_package)
-            ],
+            "project": {"id": project_id, "title": space.title},
+            "work_package": {"id": package_id, "title": container.title},
+            "lists": [{"id": g.id, "title": g.title} for g in container.groups],
             "url": f"{endpoints.app_url}/projects/{project_id}",
         }
 
@@ -195,27 +201,25 @@ class AsoodeBridge:
         others (see upsert_project_link).
         """
         if not work_package_id and not external_ref:
-            raise AsoodeError("give work_package_id or external_ref")
+            raise ProviderError("give work_package_id or external_ref")
 
         if work_package_id:
-            board = self.client.fetch_work_package(work_package_id)
-            if not board:
-                raise AsoodeError(f"no asoode work package with id {work_package_id}")
+            container = self.provider.fetch_container(work_package_id)
         else:
-            board = self.client.find_work_package(external_ref)
-            if not board:
-                raise AsoodeError(
-                    f"no work package with externalRef {external_ref!r} is visible to "
-                    "this token. `memory-mcp asoode boards` lists what is."
+            found = self.provider.find_container(external_ref)
+            if not found:
+                raise ProviderError(
+                    f"no board with externalRef {external_ref!r} is visible to this "
+                    "credential. `memory-mcp asoode boards` lists what is."
                 )
-            board = self.client.fetch_work_package(board["id"])
+            container = self.provider.fetch_container(found.id)
 
-        package_id = board.get("id")
-        project_id = board.get("projectId") or board.get("project_id")
+        package_id = container.id
+        project_id = container.space_id
         if not package_id or not project_id:
-            raise AsoodeError("asoode returned a work package without ids")
+            raise ProviderError("the provider returned a container without ids")
 
-        state_map, default_list = build_state_list_map(board)
+        state_map, default_list = build_state_list_map(container)
         endpoints = get_endpoints()
         link = upsert_project_link(
             slug,
@@ -223,7 +227,7 @@ class AsoodeBridge:
             socket_url=endpoints.socket_url,
             remote_project_id=project_id,
             remote_work_package_id=package_id,
-            label=label or board.get("title") or package_id,
+            label=label or container.title or package_id,
             is_default=is_default,
             default_list_id=default_list,
             state_list_map=state_map,
@@ -231,13 +235,10 @@ class AsoodeBridge:
         )
         return {
             "link": link,
-            "work_package": {"id": package_id, "title": board.get("title"),
-                             "external_ref": board.get("externalRef")},
+            "work_package": {"id": package_id, "title": container.title,
+                             "external_ref": container.external_ref},
             "project": {"id": project_id},
-            "lists": [
-                {"id": item.get("id"), "title": item.get("title")}
-                for item in _board_lists(board)
-            ],
+            "lists": [{"id": g.id, "title": g.title} for g in container.groups],
             "url": f"{endpoints.app_url}/projects/{project_id}",
             "created": False,
         }
@@ -263,7 +264,7 @@ class AsoodeBridge:
         wanted = target.strip().lower()
         links = get_project_links(slug)
         if not links:
-            raise AsoodeError(
+            raise ProviderError(
                 f"'{slug}' is not linked to any asoode board, so it cannot target "
                 f"{target!r}. Attach one with memory_asoode_attach."
             )
@@ -274,7 +275,7 @@ class AsoodeBridge:
             if (link.get("remote_work_package_id") or "").lower() == wanted:
                 return link["id"]
         known = ", ".join(sorted(l.get("label") or "?" for l in links))
-        raise AsoodeError(
+        raise ProviderError(
             f"no board named {target!r} is linked to '{slug}'. Linked boards: {known}."
         )
 
@@ -292,7 +293,7 @@ class AsoodeBridge:
             # default rather than dropping the task on the floor.
         default = next((l for l in links if l["is_default"]), None)
         if default is None:
-            raise AsoodeError(
+            raise ProviderError(
                 f"'{slug}' has {len(links)} linked boards and no default, so a task "
                 "with no target cannot be routed. Re-attach one as the default."
             )
@@ -314,6 +315,10 @@ class AsoodeBridge:
         """
         if self._outbox is None:
             return {"flushed": 0, "failed": 0, "skipped": 0, "reason": "no outbox"}
+        with self._flush_lock(slug):
+            return self._flush_locked(slug, limit)
+
+    def _flush_locked(self, slug: str, limit: int) -> dict:
         pending = self._outbox.pending(slug, limit)
         if not pending:
             return {"flushed": 0, "failed": 0, "skipped": 0}
@@ -325,7 +330,7 @@ class AsoodeBridge:
             return {"flushed": 0, "failed": 0, "skipped": len(pending),
                     "reason": "project is not linked"}
 
-        flushed = failed = skipped = 0
+        flushed = failed = skipped = abandoned = 0
         for row in pending:
             try:
                 if self._flush_row(slug, row):
@@ -333,19 +338,23 @@ class AsoodeBridge:
                 else:
                     skipped += 1
                 self._outbox.resolve(slug, row["id"])
-            except AsoodeError as e:
-                self._outbox.fail(slug, row["id"], str(e))
+            except ProviderError as e:
+                given_up = self._outbox.fail(slug, row["id"], str(e))
                 failed += 1
+                if given_up:
+                    abandoned += 1
                 # Stop at the first failure: the remote is unreachable or the
                 # token is bad, and hammering it with the rest of the queue only
                 # multiplies the wait. The rows are still there for next time.
                 break
             except Exception as e:  # noqa: BLE001
-                self._outbox.fail(slug, row["id"], f"{type(e).__name__}: {e}")
+                given_up = self._outbox.fail(slug, row["id"], f"{type(e).__name__}: {e}")
                 failed += 1
+                if given_up:
+                    abandoned += 1
                 break
         return {"flushed": flushed, "failed": failed, "skipped": skipped,
-                "remaining": self._outbox.depth(slug)}
+                "abandoned": abandoned, "remaining": self._outbox.depth(slug)}
 
     def _flush_row(self, slug: str, row: dict) -> bool:
         """Mirror one outbox row. False when there is nothing to do."""
@@ -364,14 +373,14 @@ class AsoodeBridge:
             # lost mapping costs one call and can never duplicate.
             state_map = link.get("state_list_map") or {}
             list_id = state_map.get(task.state.value) or link.get("default_list_id")
-            remote = self.client.create_task(
-                list_id, task.title,
+            remote = self.provider.create_task(
+                link["remote_work_package_id"], list_id, task.title,
                 description=task.description or "",
                 external_ref=f"memory-mcp:{task.id}",
             )
-            remote_id = (remote or {}).get("id")
+            remote_id = remote.id
             if not remote_id:
-                raise AsoodeError("asoode returned a task without an id")
+                raise ProviderError("the provider returned a task without an id")
             self._outbox.remember(slug, task.id, link["id"], remote_id, task.state.value)
             if task.state.value == "todo":
                 return True  # created in ToDo already; no state call needed
@@ -379,19 +388,19 @@ class AsoodeBridge:
         op = row["op"]
         if op == "comment":
             body = (row.get("payload") or {}).get("body")
-            if body:
-                self.client.comment(remote_id, body)
+            if body and self.provider.capabilities.supports_comments:
+                self.provider.comment(remote_id, body)
             return True
         # create/state/update all reconcile to "make the remote match".
-        self.client.change_state(remote_id, task.state.value)
+        self.provider.set_state(remote_id, task.state.value)
         # asoode keeps state and column independent, so a Done card would sit in
         # To Do forever without this. Best-effort: the state is the truth, the
         # column is presentation, and failing to move it must not fail the flush.
         target_list = (link.get("state_list_map") or {}).get(task.state.value)
-        if target_list:
+        if target_list and self.provider.capabilities.supports_groups:
             try:
-                self.client.reposition(remote_id, target_list)
-            except AsoodeError:
+                self.provider.move(remote_id, target_list)
+            except ProviderError:
                 pass
         self._outbox.remember(slug, task.id, link["id"], remote_id, task.state.value)
         return True
@@ -413,57 +422,54 @@ class AsoodeBridge:
         # An import writes through TaskService, which queues a mirror for every
         # write - so importing 35 tasks would immediately push 35 of them back.
         # Suppress the outbox for the duration: these changes CAME FROM asoode.
-        board = self.client.fetch_work_package(link["remote_work_package_id"])
-        if not board:
-            raise AsoodeError(
-                f"work package {link['remote_work_package_id']} is not readable"
-            )
+        container = self.provider.fetch_container(
+            link["remote_work_package_id"], with_tasks=True,
+        )
         created, updated, skipped = [], [], 0
         suppressed = getattr(self._tasks, "_outbox", None)
         self._tasks._outbox = None
         try:
-            return self._import_rows(slug, link, board, limit)
+            return self._import_rows(slug, link, container, limit)
         finally:
             self._tasks._outbox = suppressed
 
-    def _import_rows(self, slug, link, board, limit) -> dict:
+    def _import_rows(self, slug, link, container, limit) -> dict:
         created, updated, skipped = [], [], 0
-        for board_list in _board_lists(board):
-            for remote in (board_list.get("tasks") or [])[:limit]:
-                remote_id = remote.get("id")
-                title = (remote.get("title") or "").strip()
-                if not remote_id or not title:
-                    skipped += 1
+        for remote in list(container.tasks)[:limit]:
+            remote_id = remote.id
+            title = (remote.title or "").strip()
+            if not remote_id or not title:
+                skipped += 1
+                continue
+            state = remote.state
+            local_id = self._outbox.local_id_for_remote(slug, link["id"], remote_id)
+
+            if local_id:
+                try:
+                    current = self._tasks.get(slug, local_id)
+                except Exception:  # noqa: BLE001 - deleted locally since
+                    current = None
+                if current is not None:
+                    if current.title != title or current.state.value != state:
+                        self._tasks.update(UpdateTaskRequest(
+                            project=slug, task_id=local_id, title=title,
+                            state=TaskState(state),
+                        ))
+                        updated.append({"task_id": local_id, "title": title})
                     continue
-                state = ORDINAL_TO_STATE.get(remote.get("state"), "todo")
-                local_id = self._outbox.local_id_for_remote(slug, link["id"], remote_id)
 
-                if local_id:
-                    try:
-                        current = self._tasks.get(slug, local_id)
-                    except Exception:  # noqa: BLE001 - deleted locally since
-                        current = None
-                    if current is not None:
-                        if current.title != title or current.state.value != state:
-                            self._tasks.update(UpdateTaskRequest(
-                                project=slug, task_id=local_id, title=title,
-                                state=TaskState(state),
-                            ))
-                            updated.append({"task_id": local_id, "title": title})
-                        continue
-
-                task = self._tasks.create(CreateTaskRequest(
-                    project=slug, title=title,
-                    description=remote.get("description") or None,
-                    source=TaskSource.ASOODE if hasattr(TaskSource, "ASOODE") else TaskSource.USER,
+            task = self._tasks.create(CreateTaskRequest(
+                project=slug, title=title,
+                description=remote.description or None,
+                source=TaskSource.ASOODE if hasattr(TaskSource, "ASOODE") else TaskSource.USER,
+            ))
+            if state != "todo":
+                self._tasks.update(UpdateTaskRequest(
+                    project=slug, task_id=task.id, state=TaskState(state),
                 ))
-                if state != "todo":
-                    self._tasks.update(UpdateTaskRequest(
-                        project=slug, task_id=task.id, state=TaskState(state),
-                    ))
-                self._tasks.set_link(slug, task.id, link["id"])
-                self._outbox.remember(slug, task.id, link["id"], remote_id, state)
-                created.append({"task_id": task.id, "title": title, "state": state})
+            self._tasks.set_link(slug, task.id, link["id"])
+            self._outbox.remember(slug, task.id, link["id"], remote_id, state)
+            created.append({"task_id": task.id, "title": title, "state": state})
 
         return {
             "board": link.get("label"),
@@ -476,12 +482,12 @@ class AsoodeBridge:
         """Pull every linked board into the local store."""
         links = get_project_links(slug)
         if not links:
-            raise AsoodeError(f"'{slug}' is not linked to any asoode board.")
+            raise ProviderError(f"'{slug}' is not linked to any board.")
         boards, failed = [], []
         for link in links:
             try:
                 boards.append(self.import_board(slug, link))
-            except AsoodeError as e:
+            except ProviderError as e:
                 failed.append({"board": link.get("label"), "error": str(e)})
         return {
             "slug": slug, "boards": boards, "failed": failed,
@@ -494,7 +500,11 @@ class AsoodeBridge:
 
     def boards(self, project_id: str | None = None) -> list[dict]:
         """Every board this token can see - what to attach to."""
-        return self.client.list_work_packages(project_id)
+        return [
+            {"id": c.id, "title": c.title, "external_ref": c.external_ref,
+             "project_id": c.space_id, "project_title": c.space_title}
+            for c in self.provider.list_containers(project_id)
+        ]
 
     def links(self, slug: str) -> list[dict]:
         return get_project_links(slug)
@@ -532,9 +542,10 @@ class AsoodeBridge:
             "remote_only": [],
         }
         try:
-            client = self._client or AsoodeClient.from_settings(timeout=timeout)
-            board = client.fetch_work_package(link["remote_work_package_id"])
-        except AsoodeError as e:
+            container = self.provider.fetch_container(
+                link["remote_work_package_id"], with_tasks=True,
+            )
+        except ProviderError as e:
             status["error"] = str(e)
             return status
         except Exception as e:  # noqa: BLE001 - session start must survive anything
@@ -542,13 +553,11 @@ class AsoodeBridge:
             return status
 
         status["reachable"] = True
-        # asoode states 3/6/7 are Done/Cancelled/Duplicate - closed work.
-        closed = {3, 6, 7}
+        # Closed work, in the shared vocabulary rather than one platform's ordinals.
+        closed = {"done", "cancelled", "duplicate"}
         remote_open = [
-            {"id": task.get("id"), "title": task.get("title"), "state": task.get("state")}
-            for board_list in _board_lists(board)
-            for task in (board_list.get("tasks") or [])
-            if task.get("state") not in closed
+            {"id": t.id, "title": t.title, "state": t.state}
+            for t in container.tasks if t.state not in closed
         ]
         status["remote_open"] = remote_open
 
@@ -575,7 +584,7 @@ class AsoodeBridge:
         cosmetic next to `state`, which is what the local store actually holds.
         """
         if not get_project_links(slug):
-            raise AsoodeError(
+            raise ProviderError(
                 f"'{slug}' is not linked to an asoode board yet - attach one with "
                 "memory_asoode_attach, or create one with memory_asoode_link."
             )
@@ -591,30 +600,30 @@ class AsoodeBridge:
             # across per-app boards, so one default for all of them is wrong.
             try:
                 link = self.route(slug, task)
-            except AsoodeError as e:
+            except ProviderError as e:
                 failed.append({"task_id": task.id, "title": task.title, "error": str(e)})
                 continue
             state_map = link.get("state_list_map") or {}
             default_list = link.get("default_list_id")
             list_id = state_map.get(task.state.value) or default_list
             try:
-                remote = self.client.create_task(
-                    list_id, task.title,
+                remote = self.provider.create_task(
+                    link["remote_work_package_id"], list_id, task.title,
                     description=task.description or "",
                     external_ref=f"memory-mcp:{task.id}",
                 )
-                remote_id = (remote or {}).get("id")
+                remote_id = remote.id
                 # asoode creates in ToDo; carry the real state over. Skipped for
                 # todo so a re-push of an unchanged list makes no extra calls.
                 if remote_id and task.state.value != "todo":
-                    self.client.change_state(remote_id, task.state.value)
+                    self.provider.set_state(remote_id, task.state.value)
                 pushed.append({
                     "task_id": task.id, "remote_id": remote_id,
                     "title": task.title, "state": task.state.value,
                     "board": link.get("label"),
                     "work_package_id": link["remote_work_package_id"],
                 })
-            except AsoodeError as e:
+            except ProviderError as e:
                 failed.append({"task_id": task.id, "title": task.title, "error": str(e)})
 
         return {

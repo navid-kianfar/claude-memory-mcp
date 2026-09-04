@@ -21,6 +21,8 @@ from typing import Any
 
 import httpx
 
+from memory_mcp.providers.base import ProviderAuthError, ProviderError
+
 from memory_mcp.asoode import get_endpoints, get_pat
 
 # asoode's BoardTemplate enum (app.enum.ts:80).
@@ -57,11 +59,16 @@ _STATUS_MESSAGE = {
 }
 
 
-class AsoodeError(Exception):
-    """An asoode call failed: unreachable, non-2xx, or a non-success envelope."""
+class AsoodeError(ProviderError):
+    """An asoode call failed: unreachable, non-2xx, or a non-success envelope.
+
+    Subclasses ProviderError so the flusher's retry logic treats every platform's
+    failures alike, while the many existing `except AsoodeError` sites keep
+    working unchanged.
+    """
 
 
-class AsoodeAuthError(AsoodeError):
+class AsoodeAuthError(AsoodeError, ProviderAuthError):
     """The PAT is missing, revoked, expired, or not accepted."""
 
 

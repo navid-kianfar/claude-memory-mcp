@@ -7,33 +7,26 @@ a missing direction.
 
 import pytest
 
-from memory_mcp.asoode_client import AsoodeError
+from memory_mcp.providers import ProviderError
 from memory_mcp.container import container
 from memory_mcp.db.registry import upsert_project_link
 from memory_mcp.models import TaskFilter
 from memory_mcp.services.asoode_bridge import AsoodeBridge
+from tests.providers.fakes import FakeProvider
 
 
-def board(tasks):
-    return {
-        "id": "wp1", "title": "Board",
-        "lists": [
-            {"id": "l-todo", "title": "To Do", "tasks": tasks},
-            {"id": "l-done", "title": "Done", "tasks": []},
-        ],
-    }
-
-
-class Client:
-    def __init__(self, b=None):
-        self.board = b if b is not None else board([
-            {"id": "r1", "title": "Made in asoode", "state": 1,
-             "description": "written by a human"},
-            {"id": "r2", "title": "Already finished", "state": 3},
-        ])
-
-    def fetch_work_package(self, package_id):
-        return self.board
+def _provider(tasks=None, fail=None):
+    """A board with two tasks: one open, one already finished in asoode."""
+    provider = FakeProvider(fail=fail)
+    provider.seed(
+        container_id="wp1", title="Board", space_id="p1",
+        groups=(("l-todo", "To Do"), ("l-done", "Done")),
+        tasks=[{"id": "r1", "title": "Made in asoode", "state": "todo",
+                "description": "written by a human", "group_id": "l-todo"},
+               {"id": "r2", "title": "Already finished", "state": "done",
+                "group_id": "l-done"}] if tasks is None else tasks,
+    )
+    return provider
 
 
 @pytest.fixture
@@ -50,7 +43,7 @@ def project():
 
 def _bridge(client=None):
     return AsoodeBridge(
-        container.project_service, container.task_service, client or Client(),
+        container.project_service, container.task_service, client or _provider(),
         outbox_repo=container.outbox_repo,
     )
 
@@ -91,10 +84,10 @@ class TestImport:
 
     def test_identity_is_the_remote_id_not_the_title(self, project):
         """A task created in asoode has no externalRef, so the id is all there is."""
-        client = Client()
-        bridge = _bridge(client)
+        provider = _provider()
+        bridge = _bridge(provider)
         bridge.import_all(project)
-        client.board["lists"][0]["tasks"][0]["title"] = "Renamed in asoode"
+        provider._tasks["r1"]["title"] = "Renamed in asoode"
         result = bridge.import_all(project)
 
         assert result["counts"]["created"] == 0, "a rename is not a new task"
@@ -104,10 +97,10 @@ class TestImport:
         assert "Renamed in asoode" in titles and "Made in asoode" not in titles
 
     def test_a_remote_state_change_updates_the_local_task(self, project):
-        client = Client()
-        bridge = _bridge(client)
+        provider = _provider()
+        bridge = _bridge(provider)
         bridge.import_all(project)
-        client.board["lists"][0]["tasks"][0]["state"] = 3
+        provider._tasks["r1"]["state"] = "done"
         bridge.import_all(project)
         tasks = {t.title: t for t in container.task_service.list_tasks(
             project, TaskFilter(include_done=True), limit=10).tasks}
@@ -121,8 +114,8 @@ class TestImport:
         assert container.outbox_repo.depth(project) == before
 
     def test_a_titleless_remote_row_is_skipped_not_crashed_on(self, project):
-        client = Client(board([{"id": "r9", "title": "   ", "state": 1}]))
-        result = _bridge(client).import_all(project)
+        provider = _provider(tasks=[{"id": "r9", "title": "   ", "state": "todo"}])
+        result = _bridge(provider).import_all(project)
         assert result["boards"][0]["skipped"] == 1
         assert result["counts"]["created"] == 0
 
@@ -131,7 +124,7 @@ class TestImport:
 
         for link in get_project_links(project):
             delete_project_link(link["id"])
-        with pytest.raises(AsoodeError, match="not linked"):
+        with pytest.raises(ProviderError, match="not linked"):
             _bridge().import_all(project)
 
     def test_one_unreadable_board_does_not_abort_the_rest(self, project):
@@ -140,12 +133,8 @@ class TestImport:
             remote_work_package_id="wp-broken", label="broken", is_default=False,
         )
 
-        class Partial(Client):
-            def fetch_work_package(self, package_id):
-                if package_id == "wp-broken":
-                    raise AsoodeError("403 forbidden")
-                return self.board
-
-        result = _bridge(Partial()).import_all(project)
+        # wp-broken is never seeded, so fetching it raises - the same shape as a
+        # board the credential cannot read.
+        result = _bridge(_provider()).import_all(project)
         assert result["counts"]["created"] == 2
         assert result["failed"][0]["board"] == "broken"

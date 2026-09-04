@@ -13,10 +13,12 @@ from memory_mcp.providers.base import (
     ProviderError,
     ProviderAuthError,
     RemoteTask,
+    SpaceRef,
     TaskProvider,
 )
 
 __all__ = [
+    "AsoodeProvider",
     "Capabilities",
     "Container",
     "ContainerRef",
@@ -24,5 +26,22 @@ __all__ = [
     "ProviderError",
     "ProviderAuthError",
     "RemoteTask",
+    "SpaceRef",
     "TaskProvider",
 ]
+
+
+def __getattr__(name: str):
+    """Platform modules are resolved lazily.
+
+    `asoode_client` imports ProviderError from `providers.base`, so importing a
+    platform module from this __init__ eagerly makes a cycle: client -> base ->
+    __init__ -> asoode -> client. PEP 562 lazy attribute access keeps the tidy
+    `from memory_mcp.providers import AsoodeProvider` surface without it, and the
+    registry that replaces this will resolve by name anyway.
+    """
+    if name == "AsoodeProvider":
+        from memory_mcp.providers.asoode import AsoodeProvider
+
+        return AsoodeProvider
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

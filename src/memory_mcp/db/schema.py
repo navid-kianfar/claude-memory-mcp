@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -104,7 +104,14 @@ _SYNC_DDL = (
     """,
     """
     CREATE TABLE IF NOT EXISTS task_outbox (
-        id         VARCHAR PRIMARY KEY,
+        -- Deliberately NOT a PRIMARY KEY. This is a queue: rows are inserted and
+        -- deleted constantly from more than one thread, and DuckDB's ART index
+        -- got into a state where a row could be read but never deleted ("Failed
+        -- to delete all rows from index"), so the flusher retried it forever and
+        -- re-posted its side effect each time. The table is small and always
+        -- addressed by id through the non-unique index below; the PK bought
+        -- nothing and cost that.
+        id         VARCHAR NOT NULL,
         task_id    VARCHAR NOT NULL,
         -- Null until a flush resolves which board the task routes to. The local
         -- store must not have to know about links to record that something
@@ -117,6 +124,7 @@ _SYNC_DDL = (
         last_error VARCHAR
     )
     """,
+    "CREATE INDEX IF NOT EXISTS idx_outbox_id ON task_outbox(id)",
     "CREATE INDEX IF NOT EXISTS idx_outbox_task ON task_outbox(task_id)",
     "CREATE INDEX IF NOT EXISTS idx_outbox_created ON task_outbox(created_at)",
 )
@@ -364,6 +372,55 @@ def migrate_v6_to_v7(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (7)")
 
 
+def migrate_v7_to_v8(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v7 -> v8: rebuild task_outbox without its PRIMARY KEY.
+
+    A live outbox reached a state where a row could be SELECTed but never
+    DELETEd - DuckDB's ART index reported "Failed to delete all rows from index.
+    Only deleted 0 out of 1 rows." The flusher therefore retried that row on
+    every pass, re-posting its comment each time, because the remote call
+    succeeded and only the local cleanup failed.
+
+    Rebuilding drops the index that could not be repaired and takes the
+    constraint off for good: this is a queue addressed by id through a plain
+    index, so uniqueness was never enforcing anything the code relied on. Rows
+    that survive the copy keep their place in the queue.
+    """
+    try:
+        existing = {r[0] for r in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()}
+        if "task_outbox" not in existing:
+            return
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS task_outbox_v8 (
+                id         VARCHAR NOT NULL,
+                task_id    VARCHAR NOT NULL,
+                link_id    INTEGER,
+                op         VARCHAR NOT NULL,
+                payload    VARCHAR,
+                created_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+                attempts   INTEGER NOT NULL DEFAULT 0,
+                last_error VARCHAR
+            )
+        """)
+        conn.execute("""
+            INSERT INTO task_outbox_v8
+            SELECT id, task_id, link_id, op, payload, created_at, attempts, last_error
+            FROM task_outbox
+        """)
+        conn.execute("DROP TABLE task_outbox")
+        conn.execute("ALTER TABLE task_outbox_v8 RENAME TO task_outbox")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_id ON task_outbox(id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_task ON task_outbox(task_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_created ON task_outbox(created_at)")
+    except Exception:
+        # A rebuild that fails must not stop the DB opening: the outbox is a
+        # queue, not the record. create_task_tables recreates it if it vanished.
+        pass
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (8)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -407,6 +464,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 7:
         migrate_v6_to_v7(conn)
         version = 7
+    if version < 8:
+        migrate_v7_to_v8(conn)
+        version = 8
     return version
 
 

@@ -13,29 +13,21 @@ from memory_mcp.db.registry import upsert_project_link
 from memory_mcp.models import CreateTaskRequest
 from memory_mcp.services.asoode_bridge import AsoodeBridge
 from memory_mcp.services.session_service import SessionService
+from tests.providers.fakes import FakeProvider
 
-BOARD = {
-    "id": "wp-1", "title": "Board",
-    "lists": [
-        {"id": "l-todo", "title": "To Do", "tasks": [
-            {"id": "r1", "title": "Local one", "state": 1},
-            {"id": "r2", "title": "Added in asoode", "state": 1},
-        ]},
-        {"id": "l-done", "title": "Done", "tasks": [
-            {"id": "r3", "title": "Finished", "state": 3},
-        ]},
-    ],
-}
-
-
-class Client:
-    def __init__(self, board=BOARD, error=None):
-        self._board, self._error = board, error
-
-    def fetch_work_package(self, package_id):
-        if self._error:
-            raise self._error
-        return self._board
+def _provider(error=None):
+    """A board holding one task that exists locally and one that does not."""
+    provider = FakeProvider(fail=error)
+    provider.seed(
+        container_id="wp-1", title="Board", space_id="p1",
+        groups=(("l-todo", "To Do"), ("l-done", "Done")),
+        tasks=[
+            {"id": "r1", "title": "Local one", "state": "todo", "group_id": "l-todo"},
+            {"id": "r2", "title": "Added in asoode", "state": "todo", "group_id": "l-todo"},
+            {"id": "r3", "title": "Finished", "state": "done", "group_id": "l-done"},
+        ],
+    )
+    return provider
 
 
 @pytest.fixture
@@ -53,7 +45,7 @@ def _service(slug, client=None, bind=True):
             remote_work_package_id="wp-1",
         )
     bridge = AsoodeBridge(
-        container.project_service, container.task_service, client or Client()
+        container.project_service, container.task_service, client or _provider()
     )
     return SessionService(
         container.session_repo, container.memory_repo, container.project_repo,
@@ -113,7 +105,7 @@ class TestBound:
 
 class TestFailureNeverBlocksASession:
     def test_unreachable_board_still_starts_the_session(self, project):
-        service = _service(project, Client(error=AsoodeError("connection refused")))
+        service = _service(project, _provider(error=AsoodeError("connection refused")))
         ctx = service.start(project)
         assert ctx.session_id
         assert ctx.asoode["reachable"] is False
@@ -121,17 +113,13 @@ class TestFailureNeverBlocksASession:
         assert "Do not treat this as a reason to stop" in ctx.task_instructions
 
     def test_an_unexpected_exception_is_contained(self, project):
-        class Exploding:
-            def fetch_work_package(self, package_id):
-                raise RuntimeError("something entirely unexpected")
-
-        ctx = _service(project, Exploding()).start(project)
+        ctx = _service(project, _provider(error=RuntimeError("entirely unexpected"))).start(project)
         assert ctx.session_id
         assert ctx.asoode["reachable"] is False
         assert "RuntimeError" in ctx.asoode["error"]
 
     def test_rules_and_context_still_load_when_asoode_is_down(self, project):
-        service = _service(project, Client(error=AsoodeError("down")))
+        service = _service(project, _provider(error=AsoodeError("down")))
         ctx = service.start(project)
         assert ctx.queued_tasks, "the local queue is the same queue, mirrored"
 
@@ -139,7 +127,7 @@ class TestFailureNeverBlocksASession:
 class TestQueueStatus:
     def test_returns_none_for_an_unbound_project(self, project):
         bridge = AsoodeBridge(
-            container.project_service, container.task_service, Client()
+            container.project_service, container.task_service, _provider()
         )
         assert bridge.queue_status(project) is None
 
@@ -150,7 +138,7 @@ class TestQueueStatus:
         )
         bridge = AsoodeBridge(
             container.project_service, container.task_service,
-            Client(error=AsoodeError("asoode rejected the PAT (401)")),
+            _provider(error=AsoodeError("asoode rejected the PAT (401)")),
         )
         status = bridge.queue_status(project)
         assert status["bound"] is True

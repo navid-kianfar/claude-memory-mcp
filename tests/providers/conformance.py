@@ -22,6 +22,7 @@ from memory_mcp.providers import (
     ContainerRef,
     ProviderError,
     RemoteTask,
+    SpaceRef,
     TaskProvider,
 )
 
@@ -31,7 +32,49 @@ LOCAL_STATES = {
 }
 
 
-class ProviderConformance:
+class SpaceConformance:
+    """The space level: what `bootstrap` needs to create a board somewhere.
+
+    Folded into ProviderConformance below, kept as its own class so a provider
+    with no space level can see exactly which promises that costs it.
+    """
+
+    def test_listing_spaces_is_always_answerable(self, provider):
+        """The level is always REACHABLE, which is the property shared code needs.
+
+        Not "always non-empty": a real account can legitimately have no projects
+        yet, and asserting otherwise made asoode fail a promise the interface
+        never needed. A platform with no space level returns one synthetic entry;
+        a platform with the level returns however many exist, including none.
+        """
+        spaces = provider.list_spaces()
+        assert isinstance(spaces, list)
+        assert all(isinstance(s, SpaceRef) for s in spaces)
+
+    def test_a_created_space_then_appears(self, provider):
+        created = provider.create_space("Listed Space")
+        assert created.id in {s.id for s in provider.list_spaces()}
+
+    def test_a_created_space_is_findable_by_title(self, provider):
+        created = provider.create_space("Conformance Space")
+        found = provider.find_space("Conformance Space")
+        assert found is not None and found.id == created.id
+
+    def test_find_space_is_case_insensitive(self, provider):
+        provider.create_space("Mixed Case Space")
+        assert provider.find_space("mixed case space") is not None
+
+    def test_find_space_returns_none_when_absent(self, provider):
+        assert provider.find_space("no space has this title") is None
+
+    def test_a_container_can_be_created_inside_a_space(self, provider):
+        space = provider.create_space("Holder")
+        container = provider.create_container("Inside", space_id=space.id)
+        assert container.id
+        assert container.id in {c.id for c in provider.list_containers(space.id)}
+
+
+class ProviderConformance(SpaceConformance):
     """Promises the bridge is built on. Subclass and provide `provider`."""
 
     @pytest.fixture
@@ -183,16 +226,20 @@ class ProviderConformance:
 
     # ---------- the container is never optional ----------
 
-    def test_a_container_always_exists_to_create_into(self, provider):
-        """The rule the whole interface is shaped around: a task lives inside a
-        container. A platform with an implicit one supplies it rather than
-        letting shared code ask 'is there a board?'."""
-        created = provider.create_container("Implicit check")
-        assert created.id
-        task = provider.create_task(
-            created.id,
-            (provider.fetch_container(created.id).groups or [None])[0]
-            and provider.fetch_container(created.id).groups[0].id,
-            "Inside a container",
-        )
+    def test_a_task_always_has_a_container_to_live_in(self, provider):
+        """The rule the whole interface is shaped around: space -> container ->
+        task, with the container required.
+
+        The space is passed explicitly because a real platform may require it -
+        asoode cannot hold a work package outside a project and rightly refuses.
+        A platform with no space level ignores the argument; one with it uses it.
+        Either way shared code follows one path, which is the point.
+        """
+        space = provider.create_space("Container Holder")
+        container = provider.create_container("Holds a task", space_id=space.id)
+        assert container.id
+
+        fetched = provider.fetch_container(container.id)
+        group_id = fetched.groups[0].id if fetched.groups else None
+        task = provider.create_task(container.id, group_id, "Inside a container")
         assert task.id

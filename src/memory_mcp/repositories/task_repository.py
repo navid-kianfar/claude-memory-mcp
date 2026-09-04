@@ -598,6 +598,13 @@ class TaskRepository:
         return int(row[0]) if row and row[0] is not None else 0
 
 
+# A row that keeps failing must eventually be given up on. The failure that
+# forced this posted its comment remotely and then failed the local cleanup, so
+# every retry duplicated the comment - an unbounded retry is not "eventually
+# consistent", it is a loop with a side effect.
+MAX_OUTBOX_ATTEMPTS = 5
+
+
 class OutboxRepository:
     """The bridge's durable half: what changed locally and has not been mirrored.
 
@@ -654,14 +661,27 @@ class OutboxRepository:
         with connect(project) as conn:
             conn.execute("DELETE FROM task_outbox WHERE id = ?", [row_id])
 
-    def fail(self, project: str, row_id: str, error: str) -> None:
-        """Mirroring failed. The row STAYS so the next flush retries it."""
+    def fail(self, project: str, row_id: str, error: str) -> bool:
+        """Mirroring failed. Returns True if the row was given up on.
+
+        The row stays so the next flush retries it - until MAX_OUTBOX_ATTEMPTS,
+        after which it is dropped. Retrying forever is worse than losing one
+        mirror: the call that failed may have already had its effect remotely,
+        so each retry repeats it.
+        """
         with connect(project) as conn:
             conn.execute(
                 "UPDATE task_outbox SET attempts = attempts + 1, last_error = ? "
                 "WHERE id = ?",
                 [error[:500], row_id],
             )
+            row = conn.execute(
+                "SELECT attempts FROM task_outbox WHERE id = ?", [row_id]
+            ).fetchone()
+            if row and row[0] >= MAX_OUTBOX_ATTEMPTS:
+                conn.execute("DELETE FROM task_outbox WHERE id = ?", [row_id])
+                return True
+        return False
 
     def depth(self, project: str) -> int:
         try:

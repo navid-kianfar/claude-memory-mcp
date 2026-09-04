@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Columns3, List, ListTodo, RefreshCw, Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Archive, Columns3, List, ListTodo, RefreshCw, Search } from "lucide-react";
 import type { Task, TaskRowMeta, TaskState } from "../types";
 import { api } from "../lib/api";
 import { useToast } from "./ui/Toast";
@@ -10,6 +10,7 @@ import { Switch } from "./ui/Switch";
 import { TaskListView } from "./TaskListView";
 import { TaskBoardView } from "./TaskBoardView";
 import { TaskDialog } from "./TaskDialog";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 export interface TasksTabProps {
   projectSlug: string;
@@ -35,6 +36,11 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState<Set<TaskState>>(new Set());
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  // `visible` is computed below; the clear callback reads it through a ref
+  // so it does not have to be declared after it.
+  const visibleRef = useRef<Task[]>([]);
   // Board or list. Kept per project in localStorage rather than in state alone:
   // the choice is a working preference, and losing it on every reload is the
   // kind of small friction that stops a view being used at all.
@@ -152,6 +158,40 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
     [projectSlug, refresh, fail]
   );
 
+  /** Clear = ARCHIVE what is currently shown. Never delete.
+   *
+   *  Archived tasks stay findable and each archive mirrors to the board, so an
+   *  accidental clear is recoverable - which a delete would not be.
+   *
+   *  Sends the ids it can SEE, not "everything": a task created between the
+   *  render and the click must not be swept up in a clear the user never saw.
+   */
+  const clearVisible = useCallback(async () => {
+    const ids = visibleRef.current.map((t) => t.id);
+    if (!ids.length) return;
+    setClearing(true);
+    try {
+      const res = await api.archiveTasks(projectSlug, ids);
+      const failed = Object.keys(res.failed ?? {}).length;
+      toast({
+        title: failed
+          ? `Archived ${res.archived}, ${failed} failed`
+          : `Archived ${res.archived} task${res.archived === 1 ? "" : "s"}`,
+        description: failed
+          ? "The rest were archived. Refresh to see what is left."
+          : "Archived, not deleted — they stay findable.",
+        variant: failed ? "error" : undefined,
+      });
+      setConfirmClear(false);
+      await refresh();
+      onChanged?.();
+    } catch (e) {
+      fail(e, "Could not clear the tasks");
+    } finally {
+      setClearing(false);
+    }
+  }, [projectSlug, refresh, toast, fail, onChanged]);
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return tasks;
@@ -163,6 +203,34 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
         (task.assignee ?? "").toLowerCase().includes(q)
     );
   }, [tasks, query]);
+
+  visibleRef.current = visible;
+
+  // How many of the tasks about to be cleared are still OPEN. That is the part
+  // worth hesitating over: clearing finished work is tidying, clearing unfinished
+  // work is hiding requirements someone still needs.
+  const openInVisible = useMemo(
+    () => visible.filter((t) => t.state !== "done" && t.state !== "cancelled").length,
+    [visible]
+  );
+
+  const clearDescription = useMemo(() => {
+    const filtered = visible.length !== tasks.length;
+    const scope = filtered
+      ? "the tasks matching your current filter"
+      : showDone
+        ? "every task in this project, finished ones included"
+        : "every unfinished task in this project";
+    const open =
+      openInVisible > 0
+        ? ` ${openInVisible} of them ${openInVisible === 1 ? "is" : "are"} still open — that is unfinished work, not just tidying up.`
+        : "";
+    return (
+      `This archives ${scope}.${open}` +
+      " Archiving is reversible: they stay findable and nothing is deleted." +
+      " The change is mirrored to the linked board."
+    );
+  }, [visible.length, tasks.length, showDone, openInVisible]);
 
   const toggleState = (state: TaskState) =>
     setCollapsed((prev) => {
@@ -213,6 +281,19 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
             <Columns3 className="size-3.5" />
           </Button>
         </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          title={
+            visible.length
+              ? `Clear — archive the ${visible.length} task${visible.length === 1 ? "" : "s"} shown`
+              : "Nothing to clear"
+          }
+          disabled={!visible.length || clearing}
+          onClick={() => setConfirmClear(true)}
+        >
+          <Archive className="size-4" />
+        </Button>
         <Button variant="ghost" size="icon" title="Refresh" onClick={() => void refresh()}>
           <RefreshCw className="size-4" />
         </Button>
@@ -261,6 +342,17 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
           </Card>
         </>
       )}
+
+      <ConfirmDialog
+        open={confirmClear}
+        title={`Archive ${visible.length} task${visible.length === 1 ? "" : "s"}?`}
+        description={clearDescription}
+        confirmLabel={clearing ? "Archiving…" : "Archive them"}
+        destructive={openInVisible > 0}
+        busy={clearing}
+        onConfirm={() => void clearVisible()}
+        onClose={() => setConfirmClear(false)}
+      />
 
       {openTaskId && (
         <TaskDialog

@@ -530,6 +530,18 @@ export const api = {
     );
   },
 
+  /** Archive many at once - the Clear button. Ids, not a filter, so it clears
+   *  exactly what the user was shown. Archive is reversible; this never deletes. */
+  archiveTasks(
+    slug: string,
+    ids: string[]
+  ): Promise<{ status: string; archived: number; failed: Record<string, string> }> {
+    return request(`/api/projects/${encodeURIComponent(slug)}/tasks/archive`, {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+  },
+
   reorderTasks(slug: string, ids: string[]): Promise<{ status: string; reordered: number }> {
     return request(`/api/projects/${encodeURIComponent(slug)}/tasks/reorder`, {
       method: "POST",

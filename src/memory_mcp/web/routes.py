@@ -1173,6 +1173,37 @@ def _task_release(params, body, query):
     return {"status": "ok", "task": task.model_dump(mode="json")}
 
 
+def _task_archive_bulk(params, body, query):
+    """Archive many tasks at once - the UI's Clear button.
+
+    ARCHIVE, NOT DELETE. TaskService.delete's own docstring says archiving is the
+    reversible option and stays the default in the UI; a button that empties a
+    list in one click is the last place to make an exception. Archived tasks stay
+    findable and each one mirrors its archive to the board.
+
+    Takes explicit IDS rather than a filter on purpose. The caller clears exactly
+    what it showed the user - a task created between rendering the list and
+    pressing the button is not swept up in it.
+
+    Reports per-id outcomes instead of failing the batch: with 40 tasks, one bad
+    id should not undo the other 39, and the caller needs to know which.
+    """
+    slug = params["slug"]
+    container.project_service.get(slug)
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        raise ValueError("ids must be a non-empty list of task ids")
+
+    archived, failed = [], {}
+    for task_id in ids:
+        try:
+            container.task_service.archive(slug, task_id)
+            archived.append(task_id)
+        except Exception as e:  # noqa: BLE001 - one bad id must not lose the rest
+            failed[task_id] = str(e)
+    return {"status": "ok", "archived": len(archived), "failed": failed}
+
+
 def _task_archive(params, body, query):
     task = container.task_service.archive(params["slug"], params["tid"])
     return {"status": "ok", "task": task.model_dump(mode="json")}
@@ -1444,6 +1475,7 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/tasks", _api(_task_list), methods=["GET"]),
         Route("/api/projects/{slug}/tasks", _api(_task_create), methods=["POST"]),
         Route("/api/projects/{slug}/tasks/reorder", _api(_task_reorder), methods=["POST"]),
+        Route("/api/projects/{slug}/tasks/archive", _api(_task_archive_bulk), methods=["POST"]),
         Route("/api/projects/{slug}/tasks/{tid}", _api(_task_get), methods=["GET"]),
         Route("/api/projects/{slug}/tasks/{tid}", _api(_task_update), methods=["PUT"]),
         Route("/api/projects/{slug}/tasks/{tid}/comments", _api(_task_comment), methods=["POST"]),

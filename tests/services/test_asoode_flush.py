@@ -303,3 +303,89 @@ class TestConcurrentFlushes:
 
         assert errors == []
         assert outbox.depth(project) == 0
+
+
+class TestTimeTrackingIsMirrored:
+    """Time spent was recorded locally and never sent, so every board task read
+    0 minutes while the local store held real work."""
+
+    def _timed_task(self, tasks, project, minutes=30):
+        from datetime import datetime, timedelta, timezone
+
+        task = tasks.create(CreateTaskRequest(project=project, title="Timed work"))
+        tasks.start(project, task.id)
+        # Backdate the open entry so the stretch has a real duration.
+        from memory_mcp.db.connection import connect
+
+        begin = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE task_time_entries SET begin_at = ? WHERE task_id = ?",
+                [begin, task.id],
+            )
+        return task
+
+    def test_a_stopped_clock_reaches_the_provider(self, project):
+        tasks, bridge, _ = _stack(project, _provider())
+        task = self._timed_task(tasks, project)
+        tasks.stop(project, task.id)
+        bridge.flush(project)
+
+        assert bridge.provider_for(None).time_logs, "the stretch must be sent"
+        logged_task, begin, end = bridge.provider_for(None).time_logs[0]
+        assert begin is not None and end is not None
+
+    def test_completing_a_task_sends_its_time(self, project):
+        tasks, bridge, _ = _stack(project, _provider())
+        task = self._timed_task(tasks, project)
+        tasks.done(project, task.id)
+        bridge.flush(project)
+        assert bridge.provider_for(None).time_logs
+
+    def test_an_open_stretch_is_not_sent(self, project):
+        """It has no duration yet; sending it would mean correcting the remote."""
+        tasks, bridge, _ = _stack(project, _provider())
+        self._timed_task(tasks, project)          # started, never stopped
+        bridge.flush(project)
+        assert bridge.provider_for(None).time_logs == []
+
+    def test_time_is_never_sent_twice(self, project):
+        """A time entry has no externalRef, so a retried flush would double-count.
+        Over-reporting hours is worse than a delay."""
+        tasks, bridge, _ = _stack(project, _provider())
+        task = self._timed_task(tasks, project)
+        tasks.stop(project, task.id)
+
+        bridge.flush(project)
+        first = len(bridge.provider_for(None).time_logs)
+        container.outbox_repo.enqueue(project, task.id, "time", {})
+        bridge.flush(project)
+
+        assert len(bridge.provider_for(None).time_logs) == first, "sent once, only once"
+
+    def test_a_provider_without_time_tracking_keeps_the_entries(self, project):
+        """Not a loss: the local record stands and can be sent if the platform
+        ever gains the capability."""
+        from memory_mcp.providers import Capabilities
+
+        provider = _provider()
+        provider.__class__.capabilities = property(
+            lambda self: Capabilities(supports_external_ref=True, states=STATES_ALL)
+        )
+        try:
+            tasks, bridge, _ = _stack(project, provider)
+            task = self._timed_task(tasks, project)
+            tasks.stop(project, task.id)
+            bridge.flush(project)
+            assert provider.time_logs == []
+            assert container.outbox_repo.unmirrored_time(project, task.id), (
+                "the entry is still there to send later"
+            )
+        finally:
+            del provider.__class__.capabilities
+
+
+STATES_ALL = (
+    "todo", "in_progress", "done", "paused", "blocked",
+    "cancelled", "duplicate", "incomplete", "blocker",
+)

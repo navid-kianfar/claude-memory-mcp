@@ -45,6 +45,8 @@ _CAPABILITIES = Capabilities(
     supports_groups=True,
     # asoode keeps `state` and `listId` separate - see translation 2 above.
     supports_independent_state=True,
+    # POST /tasks/:id/spend-time {begin, end}
+    supports_time_tracking=True,
     states=tuple(STATE_TO_ORDINAL),
 )
 
@@ -174,6 +176,14 @@ class AsoodeProvider:
 
     def comment(self, task_id: str, body: str) -> None:
         self.client.comment(task_id, body)
+
+    def log_time(self, task_id: str, begin, end=None) -> None:
+        """asoode takes ISO instants; a datetime is what the local store holds."""
+        self.client.spend_time(
+            task_id,
+            begin.isoformat() if hasattr(begin, "isoformat") else str(begin),
+            (end.isoformat() if hasattr(end, "isoformat") else end) if end else None,
+        )
 
     # ---------- translation ----------
 

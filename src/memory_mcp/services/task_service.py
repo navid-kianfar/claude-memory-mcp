@@ -447,6 +447,11 @@ class TaskService:
             self._task_repo.stop_entry(project, running.id)
             self._touch_lease(project, task_id)
             self._record(project, task_id, "task_stop", {"entry_id": running.id})
+            # Inside the branch: stopping a clock that was never running closes
+            # nothing, so there is no stretch to send. Only a CLOSED stretch is
+            # worth sending - an open one has no duration and would have to be
+            # corrected remotely later.
+            self._enqueue(project, task_id, "time", {"entry_id": running.id})
         return self.detail(project, task_id)
 
     def _stop_running(self, project: str, task_id: str) -> TaskTimeEntry | None:
@@ -475,6 +480,8 @@ class TaskService:
             {"state_from": task.state.value, "note": bool(note)},
         )
         self._enqueue(project, task_id, "state", {"state": TaskState.DONE.value})
+        # done() stops the clock too, so the stretch it just closed needs sending.
+        self._enqueue(project, task_id, "time", {})
         return self.detail(project, task_id)
 
     def convert_to_task(self, project: str, task_id: str) -> Task:

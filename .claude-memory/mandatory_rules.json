@@ -29,6 +29,35 @@
     "approved_at": null,
     "approved_by": null,
     "category": "mandatory_rules",
+    "content": "When a platform supports a field, USE IT - do not settle for the local copy. Time spent is the one that was missed repeatedly: memory_task_start/stop/done record time entries locally, and none of it reached asoode, so every task on the board read 0 minutes while the local store held real work. asoode has POST /tasks/:id/spend-time {begin, end}; the interface must expose time tracking as a capability and the flusher must mirror it like any other mutation.\n\nThe general rule: if the local store records something and the provider can represent it, mirroring it is part of the feature, not an enhancement. Check the platform's DTOs for what is representable before deciding what to send.",
+    "created_at": "2026-09-04T03:38:26.014554",
+    "created_by": null,
+    "entities": [
+      "IT",
+      "POST",
+      "USE"
+    ],
+    "expires_at": null,
+    "id": "28939ad0-447c-4be1-b1cb-59cf65f9a600",
+    "metadata": null,
+    "priority": 3,
+    "related_ids": [],
+    "source": "user",
+    "status": "active",
+    "summary": "When a platform supports a field, USE IT - do not settle for the local copy",
+    "tags": [
+      "providers",
+      "time-tracking",
+      "mirroring"
+    ],
+    "title": "Mirror everything the provider can hold, time tracking included",
+    "updated_at": "2026-09-04T03:38:26.014554"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "mandatory_rules",
     "content": "When this project is bound to an asoode work package, WORK ITS QUEUE - do not just report it.\n\nThe loop, one task at a time:\n1. Read the bound board at session start. If tasks are waiting, take the highest-priority\n   actionable one (state todo or in_progress). Do not ask which - pick and go.\n2. Move it to in_progress on BOTH sides, and start time tracking.\n3. Do the work. Record what comes up as it comes up: comments on the task, and anything\n   that outlives it as a rule/decision/architecture memory.\n4. Mark it done on both sides, stop the clock, then take the next one.\n\nDo NOT auto-start a task whose state is blocked, blocker, paused, or cancelled, and stop to\nask when the work needs a decision only the user can make (an API choice, a product call, a\ncredential). Say which task you are on before starting it, so it can be redirected.\n\nThis deliberately OVERRIDES the default 'a queued task is a requirement, not an instruction'\ncontract for asoode-bound projects. That default still holds everywhere else: it protects the\ncapture case, where the user parks a requirement mid-session and does not want the session\nderailed. Binding a project to an asoode board is the explicit opt-in to the loop.",
     "created_at": "2026-09-04T00:02:28.357963",
     "created_by": null,
@@ -84,6 +113,37 @@
     ],
     "title": "Never merge, move or cross-link data between memory projects",
     "updated_at": "2026-09-04T02:51:06.929255"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "mandatory_rules",
+    "content": "A task is the unit of work someone would pick up, review, or hand over. When part of one carries enough detail to be worked, argued about, or completed on its own, it should be a SUB-TASK (memory_task_add with parent_id, or memory_task_plan with parent_index) rather than a paragraph inside a description.\n\nThe test: could this part be assigned to someone else, or finished on a different day, without the parent being finished? Then it is a sub-task. Sub-tasks do not clutter the top-level list - it hides them the way a board does - so the cost of making one is near zero and the cost of burying real work in prose is that nobody sees it.\n\nStill decompose by DELIVERABLE, not by step: 'write the test' is not a sub-task of 'add the endpoint', it is part of doing it.",
+    "created_at": "2026-09-04T03:38:26.144865",
+    "created_by": null,
+    "entities": [
+      "DELIVERABLE",
+      "SUB",
+      "TASK",
+      "add the endpoint",
+      "write the test"
+    ],
+    "expires_at": null,
+    "id": "d0a5552d-82c1-450b-a031-a752a61f7032",
+    "metadata": null,
+    "priority": 3,
+    "related_ids": [],
+    "source": "user",
+    "status": "active",
+    "summary": "A task is the unit of work someone would pick up, review, or hand over",
+    "tags": [
+      "tasks",
+      "quality",
+      "workflow"
+    ],
+    "title": "Decompose a task into sub-tasks when a part deserves its own record",
+    "updated_at": "2026-09-04T03:38:26.144865"
   },
   {
     "approval_status": "approved",

@@ -218,6 +218,7 @@ def memory_asoode_attach(
     work_package_id: str | None = None,
     label: str | None = None,
     is_default: bool = True,
+    provider: str | None = None,
     project: str | None = None,
 ) -> dict:
     """Link this project to an asoode board that ALREADY EXISTS. Creates nothing.
@@ -230,26 +231,33 @@ def memory_asoode_attach(
     Identify the board by `external_ref` (its externalRef, e.g. "asoode-worker")
     or by `work_package_id`. memory_asoode_boards lists what is available.
 
-    One project attaches to MANY boards. `is_default` picks the one a task with
-    no explicit target routes to; promoting a link demotes the others.
+    One project attaches to MANY boards, and they may be on DIFFERENT platforms:
+    `provider` names which (memory_asoode_status lists them), defaulting to
+    asoode. `is_default` picks the board a task with no explicit target routes
+    to; promoting a link demotes the others.
     """
     def _run():
         slug = _resolve(project)
         return container.asoode_bridge.attach(
             slug, external_ref=external_ref, work_package_id=work_package_id,
-            label=label, is_default=is_default,
+            label=label, is_default=is_default, provider=provider,
         )
     return _safe(_run)
 
 
 @mcp.tool()
-def memory_asoode_boards(asoode_project_id: str | None = None) -> dict:
-    """List the asoode boards this token can see, to pick one to attach to.
+def memory_asoode_boards(
+    asoode_project_id: str | None = None, provider: str | None = None,
+) -> dict:
+    """List the boards a platform's credential can see, to pick one to attach to.
 
-    Returns each board's id, title, externalRef and owning project. Read-only.
+    Returns each board's id, title, externalRef and owning project. `provider`
+    picks the platform (default asoode). Read-only.
     """
     def _run():
-        return {"boards": container.asoode_bridge.boards(asoode_project_id)}
+        return {
+            "boards": container.asoode_bridge.boards(asoode_project_id, provider),
+        }
     return _safe(_run)
 
 
@@ -359,8 +367,13 @@ def memory_asoode_status() -> dict:
     (a hidden prompt) or the Integrations screen in the UI.
     """
     from memory_mcp import asoode
+    from memory_mcp.providers import available
 
-    return asoode.status()
+    status = asoode.status()
+    # Which platforms this build can talk to. A link names one; asoode is the
+    # default for every link written before the column was read.
+    status["providers"] = available()
+    return status
 
 
 @mcp.tool()

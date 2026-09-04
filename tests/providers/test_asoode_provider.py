@@ -24,6 +24,7 @@ class FakeAsoodeClient:
         self.tasks: dict[str, dict] = {}
         self.repositions: list[tuple[str, str]] = []
         self.comments: list[tuple[str, str]] = []
+        self.spent: list[tuple[str, str, str | None]] = []
         self._n = 0
 
     def _next(self, prefix):
@@ -117,6 +118,11 @@ class FakeAsoodeClient:
             raise AsoodeError(f"no task {task_id}")
         self.comments.append((task_id, message))
 
+    def spend_time(self, task_id, begin, end=None):
+        if task_id not in self.tasks:
+            raise AsoodeError(f"no task {task_id}")
+        self.spent.append((task_id, begin, end))
+
 
 class TestAsoodeConformance(ProviderConformance):
     """asoode against the shared contract."""
@@ -188,12 +194,29 @@ class TestAsoodeSpecificTranslation:
         fetched = provider.fetch_container(board.id, with_tasks=True)
         assert fetched.tasks[0].external_ref == "ref-9"
 
+    def test_time_is_sent_as_iso_instants(self, provider, board):
+        """SpendTimeDto takes {begin, end} as dates; the local store holds
+        datetimes, so the adapter is what serialises them."""
+        from datetime import datetime, timedelta, timezone
+
+        task = provider.create_task(board.id, board.groups[0].id, "Timed")
+        end = datetime.now(timezone.utc)
+        provider.log_time(task.id, end - timedelta(minutes=45), end)
+
+        sent_task, sent_begin, sent_end = provider._client.spent[0]
+        assert sent_task == task.id
+        assert isinstance(sent_begin, str) and "T" in sent_begin
+        assert isinstance(sent_end, str)
+
     def test_capabilities_match_what_asoode_actually_does(self):
         assert _CAPABILITIES.supports_external_ref is True
         assert _CAPABILITIES.supports_independent_state is True, (
             "asoode keeps state and listId separate - that is why set_state also moves"
         )
         assert len(_CAPABILITIES.states) == 9
+        assert _CAPABILITIES.supports_time_tracking is True, (
+            "asoode has POST /tasks/:id/spend-time - time must be mirrored, not dropped"
+        )
 
     def test_asoode_errors_are_provider_errors(self):
         """So the flusher's retry logic never learns one platform's error shape."""

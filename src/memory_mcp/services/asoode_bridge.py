@@ -108,17 +108,31 @@ class AsoodeBridge:
 
     @property
     def provider(self) -> TaskProvider:
-        """The platform this bridge talks to.
+        """The provider for calls that are not scoped to a link.
 
-        Built lazily and defaulting to asoode, which is the only implementation
-        today; the provider registry replaces this default with a per-link lookup
-        so one project can hold links to different platforms at once.
+        `boards()` and a first `bootstrap` have no link to route by, so they use
+        this. An explicitly injected provider wins - that is how a test drives
+        the whole bridge with one fake - and otherwise the registry's default
+        answers.
         """
-        if self._provider is None:
-            from memory_mcp.providers import AsoodeProvider
+        if self._provider is not None:
+            return self._provider
+        from memory_mcp.providers import get_provider
 
-            self._provider = AsoodeProvider()
-        return self._provider
+        return get_provider()
+
+    def provider_for(self, link: dict | None) -> TaskProvider:
+        """The provider a LINK routes to - the point of the registry.
+
+        One memory project holds links to different platforms at once, so which
+        implementation to use is a per-link question. An injected provider still
+        overrides, so a fake stays a fake for every link in a test.
+        """
+        if self._provider is not None:
+            return self._provider
+        from memory_mcp.providers import provider_for_link
+
+        return provider_for_link(link)
 
     # Kept so existing callers and tests that say `.client` keep working; the
     # bridge itself no longer uses it.
@@ -131,6 +145,7 @@ class AsoodeBridge:
     def bootstrap(
         self, slug: str, *, project_title: str | None = None,
         board_title: str | None = None, reuse_project_id: str | None = None,
+        provider: str | None = None,
     ) -> dict:
         """Create (or find) the asoode project + board for a memory project.
 
@@ -142,22 +157,23 @@ class AsoodeBridge:
         title = project_title or project.display_name or slug
         board = board_title or project.display_name or slug
 
+        impl = self.provider_for({"provider": provider} if provider else None)
         if reuse_project_id:
             space = next(
-                (s for s in self.provider.list_spaces() if s.id == reuse_project_id),
+                (s for s in impl.list_spaces() if s.id == reuse_project_id),
                 None,
             )
             if space is None:
                 raise ProviderError(f"no space with id {reuse_project_id}")
         else:
-            space = self.provider.find_space(title) or self.provider.create_space(
+            space = impl.find_space(title) or impl.create_space(
                 title, description=project.description or "",
             )
 
         # externalRef is what makes this re-runnable: the project's stable uid,
         # so the same memory project always resolves to the same container.
         ref = project.project_uid or slug
-        container = self.provider.create_container(
+        container = impl.create_container(
             board,
             description=f"Tasks mirrored from the {slug} memory project.",
             external_ref=f"memory-mcp:{ref}",
@@ -175,6 +191,7 @@ class AsoodeBridge:
             label=board,
             default_list_id=default_list,
             state_list_map=state_map,
+            provider=impl.name,
         )
         return {
             "link": link,
@@ -188,6 +205,7 @@ class AsoodeBridge:
         self, slug: str, *, work_package_id: str | None = None,
         external_ref: str | None = None, label: str | None = None,
         is_default: bool = True, match_paths: list | None = None,
+        provider: str | None = None,
     ) -> dict:
         """Link a memory project to a board that ALREADY EXISTS. Creates nothing.
 
@@ -203,16 +221,19 @@ class AsoodeBridge:
         if not work_package_id and not external_ref:
             raise ProviderError("give work_package_id or external_ref")
 
+        # Resolve against the platform this link will belong to, not the default:
+        # attaching a Trello board must not look for it in asoode.
+        impl = self.provider_for({"provider": provider} if provider else None)
         if work_package_id:
-            container = self.provider.fetch_container(work_package_id)
+            container = impl.fetch_container(work_package_id)
         else:
-            found = self.provider.find_container(external_ref)
+            found = impl.find_container(external_ref)
             if not found:
                 raise ProviderError(
                     f"no board with externalRef {external_ref!r} is visible to this "
                     "credential. `memory-mcp asoode boards` lists what is."
                 )
-            container = self.provider.fetch_container(found.id)
+            container = impl.fetch_container(found.id)
 
         package_id = container.id
         project_id = container.space_id
@@ -232,6 +253,7 @@ class AsoodeBridge:
             default_list_id=default_list,
             state_list_map=state_map,
             match_paths=match_paths,
+            provider=impl.name,
         )
         return {
             "link": link,
@@ -373,7 +395,8 @@ class AsoodeBridge:
             # lost mapping costs one call and can never duplicate.
             state_map = link.get("state_list_map") or {}
             list_id = state_map.get(task.state.value) or link.get("default_list_id")
-            remote = self.provider.create_task(
+            provider = self.provider_for(link)
+            remote = provider.create_task(
                 link["remote_work_package_id"], list_id, task.title,
                 description=task.description or "",
                 external_ref=f"memory-mcp:{task.id}",
@@ -386,20 +409,24 @@ class AsoodeBridge:
                 return True  # created in ToDo already; no state call needed
 
         op = row["op"]
+        if op == "time":
+            return self._flush_time(slug, task, link, remote_id)
         if op == "comment":
             body = (row.get("payload") or {}).get("body")
-            if body and self.provider.capabilities.supports_comments:
-                self.provider.comment(remote_id, body)
+            provider = self.provider_for(link)
+            if body and provider.capabilities.supports_comments:
+                provider.comment(remote_id, body)
             return True
         # create/state/update all reconcile to "make the remote match".
-        self.provider.set_state(remote_id, task.state.value)
+        provider = self.provider_for(link)
+        provider.set_state(remote_id, task.state.value)
         # asoode keeps state and column independent, so a Done card would sit in
         # To Do forever without this. Best-effort: the state is the truth, the
         # column is presentation, and failing to move it must not fail the flush.
         target_list = (link.get("state_list_map") or {}).get(task.state.value)
-        if target_list and self.provider.capabilities.supports_groups:
+        if target_list and provider.capabilities.supports_groups:
             try:
-                self.provider.move(remote_id, target_list)
+                provider.move(remote_id, target_list)
             except ProviderError:
                 pass
         self._outbox.remember(slug, task.id, link["id"], remote_id, task.state.value)
@@ -422,7 +449,7 @@ class AsoodeBridge:
         # An import writes through TaskService, which queues a mirror for every
         # write - so importing 35 tasks would immediately push 35 of them back.
         # Suppress the outbox for the duration: these changes CAME FROM asoode.
-        container = self.provider.fetch_container(
+        container = self.provider_for(link).fetch_container(
             link["remote_work_package_id"], with_tasks=True,
         )
         created, updated, skipped = [], [], 0
@@ -498,12 +525,34 @@ class AsoodeBridge:
             },
         }
 
-    def boards(self, project_id: str | None = None) -> list[dict]:
-        """Every board this token can see - what to attach to."""
+    def _flush_time(self, slug: str, task, link: dict, remote_id: str) -> bool:
+        """Send every closed, unsent stretch of work for this task.
+
+        Marked one at a time rather than in a batch: if the third of five fails,
+        the first two must stay marked or the retry sends them again and the
+        remote total drifts upward. Over-reporting time is worse than a delay.
+        """
+        provider = self.provider_for(link)
+        if not provider.capabilities.supports_time_tracking:
+            return False
+        entries = self._outbox.unmirrored_time(slug, task.id)
+        if not entries:
+            return False
+        for entry in entries:
+            provider.log_time(remote_id, entry["begin_at"], entry["end_at"])
+            self._outbox.mark_time_mirrored(slug, entry["id"])
+        return True
+
+    def boards(
+        self, project_id: str | None = None, provider: str | None = None,
+    ) -> list[dict]:
+        """Every board a platform's credential can see - what to attach to."""
+        impl = self.provider_for({"provider": provider} if provider else None)
         return [
             {"id": c.id, "title": c.title, "external_ref": c.external_ref,
-             "project_id": c.space_id, "project_title": c.space_title}
-            for c in self.provider.list_containers(project_id)
+             "project_id": c.space_id, "project_title": c.space_title,
+             "provider": impl.name}
+            for c in impl.list_containers(project_id)
         ]
 
     def links(self, slug: str) -> list[dict]:
@@ -542,7 +591,7 @@ class AsoodeBridge:
             "remote_only": [],
         }
         try:
-            container = self.provider.fetch_container(
+            container = self.provider_for(link).fetch_container(
                 link["remote_work_package_id"], with_tasks=True,
             )
         except ProviderError as e:
@@ -607,7 +656,7 @@ class AsoodeBridge:
             default_list = link.get("default_list_id")
             list_id = state_map.get(task.state.value) or default_list
             try:
-                remote = self.provider.create_task(
+                remote = self.provider_for(link).create_task(
                     link["remote_work_package_id"], list_id, task.title,
                     description=task.description or "",
                     external_ref=f"memory-mcp:{task.id}",
@@ -616,7 +665,7 @@ class AsoodeBridge:
                 # asoode creates in ToDo; carry the real state over. Skipped for
                 # todo so a re-push of an unchanged list makes no extra calls.
                 if remote_id and task.state.value != "todo":
-                    self.provider.set_state(remote_id, task.state.value)
+                    self.provider_for(link).set_state(remote_id, task.state.value)
                 pushed.append({
                     "task_id": task.id, "remote_id": remote_id,
                     "title": task.title, "state": task.state.value,

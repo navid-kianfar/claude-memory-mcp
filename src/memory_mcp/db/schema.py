@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -76,7 +76,11 @@ _TASK_DDL = (
         task_id  VARCHAR NOT NULL,
         begin_at TIMESTAMP NOT NULL,
         end_at   TIMESTAMP,
-        manual   BOOLEAN DEFAULT FALSE
+        manual   BOOLEAN DEFAULT FALSE,
+        -- When this stretch was mirrored to the remote platform. A time entry
+        -- has no externalRef to make the send idempotent, so "already sent" has
+        -- to be remembered here or a retried flush double-counts the work.
+        mirrored_at TIMESTAMP
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks (state)",
@@ -421,6 +425,23 @@ def migrate_v7_to_v8(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (8)")
 
 
+def migrate_v8_to_v9(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v8 -> v9: remember which time entries have been mirrored.
+
+    Time spent was recorded locally and never sent, so every task on the board
+    read 0 minutes. Sending it needs a guard the other mirrors get for free: a
+    task carries an externalRef, so re-sending it returns the existing row, but a
+    time entry has no such key and a retried flush would add the hours twice.
+    `mirrored_at` is that guard. NULL on every existing row, which is correct -
+    none of them has been sent.
+    """
+    try:
+        conn.execute("ALTER TABLE task_time_entries ADD COLUMN mirrored_at TIMESTAMP")
+    except Exception:
+        pass
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (9)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -467,6 +488,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 8:
         migrate_v7_to_v8(conn)
         version = 8
+    if version < 9:
+        migrate_v8_to_v9(conn)
+        version = 9
     return version
 
 

@@ -218,6 +218,24 @@ class ProviderConformance(SpaceConformance):
             container.id, self._group(provider, container), "Commentable")
         provider.comment(task.id, "a note")
 
+    def test_time_can_be_logged_when_declared(self, provider, container):
+        from datetime import datetime, timedelta, timezone
+
+        if not provider.capabilities.supports_time_tracking:
+            pytest.skip("provider cannot record time")
+        task = provider.create_task(
+            container.id, self._group(provider, container), "Timed")
+        end = datetime.now(timezone.utc)
+        provider.log_time(task.id, end - timedelta(minutes=30), end)
+
+    def test_logging_time_on_an_unknown_task_raises(self, provider):
+        from datetime import datetime, timezone
+
+        if not provider.capabilities.supports_time_tracking:
+            pytest.skip("provider cannot record time")
+        with pytest.raises(ProviderError):
+            provider.log_time("no-such-task", datetime.now(timezone.utc))
+
     def test_commenting_on_an_unknown_task_raises(self, provider):
         if not provider.capabilities.supports_comments:
             pytest.skip("provider has no comments")

@@ -74,6 +74,9 @@ class Capabilities:
     #: A task carries a state independent of the group it sits in. False for
     #: Trello, where the list IS the state - moving the card is the state change.
     supports_independent_state: bool = True
+    #: Time spent can be logged against a remote task. When False the flusher
+    #: keeps the local entries and sends nothing, rather than losing them.
+    supports_time_tracking: bool = False
     #: Local task states this platform can represent. A state outside this set is
     #: mapped to the nearest one by the provider, never dropped silently.
     states: tuple[str, ...] = ()
@@ -226,3 +229,13 @@ class TaskProvider(Protocol):
 
     def comment(self, task_id: str, body: str) -> None:
         """Post a comment. Only called when `supports_comments`."""
+
+    def log_time(self, task_id: str, begin, end=None) -> None:
+        """Record a stretch of work against a task. Only called when
+        `supports_time_tracking`.
+
+        `begin` and `end` are datetimes; `end` is None for a stretch still
+        running, which a platform may reject - the flusher only sends CLOSED
+        entries, because an open one has no duration to report and would have to
+        be corrected later.
+        """

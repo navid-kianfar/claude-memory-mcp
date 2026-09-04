@@ -17,8 +17,25 @@ from memory_mcp.providers.base import (
     TaskProvider,
 )
 
+from memory_mcp.providers.registry import (
+    DEFAULT_PROVIDER,
+    available,
+    get_provider,
+    provider_for_link,
+    register,
+    reset_cache,
+    unregister,
+)
+
 __all__ = [
     "AsoodeProvider",
+    "DEFAULT_PROVIDER",
+    "available",
+    "get_provider",
+    "provider_for_link",
+    "register",
+    "reset_cache",
+    "unregister",
     "Capabilities",
     "Container",
     "ContainerRef",

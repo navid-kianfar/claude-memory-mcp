@@ -44,6 +44,7 @@ class FakeProvider:
         self.states: list[tuple[str, str]] = []
         self.moves: list[tuple[str, str]] = []
         self.comments: list[tuple[str, str]] = []
+        self.time_logs: list[tuple[str, object, object]] = []
         self.created_spaces: list[str] = []
         self._n = 0
 
@@ -101,7 +102,8 @@ class FakeProvider:
     def capabilities(self):
         return Capabilities(
             supports_external_ref=True, supports_comments=True, supports_groups=True,
-            supports_independent_state=True, states=STATES,
+            supports_independent_state=True, supports_time_tracking=True,
+            states=STATES,
         )
 
     def list_spaces(self):
@@ -203,3 +205,7 @@ class FakeProvider:
     def comment(self, task_id, body):
         self._require_task(task_id)
         self.comments.append((task_id, body))
+
+    def log_time(self, task_id, begin, end=None):
+        self._require_task(task_id)
+        self.time_logs.append((task_id, begin, end))

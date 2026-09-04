@@ -690,6 +690,34 @@ class OutboxRepository:
         except Exception:
             return 0
 
+    def unmirrored_time(self, project: str, task_id: str) -> list[dict]:
+        """Closed time entries for a task that have not been sent yet.
+
+        Closed only: an open stretch has no duration to report, and sending it
+        would mean correcting the remote later. Unmirrored only: a time entry has
+        no externalRef, so re-sending one double-counts the work.
+        """
+        try:
+            with connect(project) as conn:
+                rows = conn.execute(
+                    "SELECT id, begin_at, end_at FROM task_time_entries "
+                    "WHERE task_id = ? AND end_at IS NOT NULL AND mirrored_at IS NULL "
+                    "ORDER BY begin_at ASC",
+                    [task_id],
+                ).fetchall()
+        except Exception:
+            return []
+        return [{"id": r[0], "begin_at": r[1], "end_at": r[2]} for r in rows]
+
+    def mark_time_mirrored(self, project: str, entry_id: str) -> None:
+        from datetime import datetime, timezone
+
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE task_time_entries SET mirrored_at = ? WHERE id = ?",
+                [datetime.now(timezone.utc), entry_id],
+            )
+
     # ---------- the local task -> remote task map ----------
 
     def remote_id(self, project: str, task_id: str, link_id: int) -> str | None:

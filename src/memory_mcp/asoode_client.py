@@ -277,6 +277,13 @@ class AsoodeClient:
             f"/tasks/{task_id}/change-description", {"description": description}
         )
 
+    def spend_time(self, task_id: str, begin: str, end: str | None = None) -> Any:
+        """Log a stretch of work. SpendTimeDto is {begin, end?} (task.dto.ts:116)."""
+        body: dict = {"begin": begin}
+        if end:
+            body["end"] = end
+        return self._post(f"/tasks/{task_id}/spend-time", body)
+
     def set_dates(self, task_id: str, **dates) -> Any:
         """`beginAt` / `endAt` / `dueAt`, ISO strings. Omitted fields are untouched."""
         body = {k: v for k, v in dates.items() if v is not None}

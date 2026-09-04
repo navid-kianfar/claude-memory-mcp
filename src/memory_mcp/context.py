@@ -83,6 +83,46 @@ def forget_session_project(session_id: str) -> None:
         _session_projects.pop(session_id, None)
 
 
+# ---------- which MEMORY session an MCP session is running ----------
+#
+# memory_session_start hands back a session id that memory_session_end and
+# memory_task_claim_next take explicitly. The clock and the claim need it too -
+# a task started by a session must be handed back and stopped by that session's
+# end - and asking the agent to thread it through every memory_task_start is
+# one more thing to forget. So the MCP session remembers it.
+_memory_sessions: "OrderedDict[str, str]" = OrderedDict()
+
+
+def remember_memory_session(memory_session_id: str) -> None:
+    session_id = current_session_id()
+    if not session_id or not memory_session_id:
+        return
+    with _lock:
+        _memory_sessions[session_id] = memory_session_id
+        _memory_sessions.move_to_end(session_id)
+        while len(_memory_sessions) > _SESSION_LIMIT:
+            _memory_sessions.popitem(last=False)
+
+
+def current_memory_session() -> str | None:
+    """The memory session this MCP session started, or None."""
+    session_id = current_session_id()
+    if not session_id:
+        return None
+    with _lock:
+        return _memory_sessions.get(session_id)
+
+
+def forget_memory_session(memory_session_id: str | None = None) -> None:
+    """Drop the mapping when a memory session ends."""
+    session_id = current_session_id()
+    with _lock:
+        if session_id and (
+            memory_session_id is None or _memory_sessions.get(session_id) == memory_session_id
+        ):
+            _memory_sessions.pop(session_id, None)
+
+
 @dataclass(frozen=True)
 class RequestUser:
     """The authenticated caller for the current request (server mode)."""

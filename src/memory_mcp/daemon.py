@@ -50,7 +50,8 @@ def _all_links() -> list:
 
     with registry_conn() as conn:
         rows = conn.execute(
-            "SELECT slug, remote_work_package_id FROM project_links WHERE active = 1"
+            "SELECT slug, remote_work_package_id, provider FROM project_links "
+            "WHERE active = 1"
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -101,9 +102,19 @@ def build_app() -> Starlette:
         except Exception as e:  # noqa: BLE001 - never block the daemon starting
             log.warning("update poller did not start: %s", e)
 
+        # Drain what the previous process left behind, then keep looking. A
+        # mutation nudges its own flush, but a row stranded by an outage, a
+        # restart mid-flush or a CLI that exited early has nobody to nudge it.
+        try:
+            container.start_outbox_sweeper()
+        except Exception as e:  # noqa: BLE001 - never block the daemon starting
+            log.warning("outbox sweeper did not start: %s", e)
+
         async with mcp_app.lifespan(app):
             yield
 
+        with contextlib.suppress(Exception):
+            container.stop_outbox_sweeper()
         with contextlib.suppress(Exception):
             await subscriber.stop()
         with contextlib.suppress(Exception):

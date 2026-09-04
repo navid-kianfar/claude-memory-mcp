@@ -571,3 +571,13 @@ def delete_project_link(link_id: int) -> bool:
     with registry_conn() as conn:
         cur = conn.execute("DELETE FROM project_links WHERE id = ?", (link_id,))
     return cur.rowcount > 0
+
+
+def linked_slugs() -> list[str]:
+    """Every project with at least one active link - what a machine-wide
+    outbox sweep or catch-up iterates."""
+    with registry_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT slug FROM project_links WHERE active = 1 ORDER BY slug"
+        ).fetchall()
+    return [r[0] for r in rows]

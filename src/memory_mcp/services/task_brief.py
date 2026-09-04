@@ -23,11 +23,12 @@ _STEPS = (
     "2. Do NOT start any of them. The user decides what gets picked up and "
     "when; a task appearing here is not permission to begin it. Carry on with "
     "whatever this session is actually for, and wait to be asked.",
-    "3. When the user does pick one: memory_task_start(task_id) clocks on and "
-    "moves it to in_progress; memory_task_done(task_id) closes it and stops the "
-    "clock. memory_task_stop(task_id) only stops the clock - it deliberately "
-    "leaves the state alone, so say explicitly whether the work is paused, "
-    "blocked, or finished with memory_task_update(task_id, state=...).",
+    "3. When the user does pick one: memory_task_start(task_id) clocks on, "
+    "claims it for this session and moves it to in_progress. When you stop "
+    "working on it, say how: memory_task_done(task_id) finishes it and stops "
+    "the clock; memory_task_update(task_id, state='paused'|'blocked') stops the "
+    "clock and says why; memory_task_stop(task_id) stops the clock and leaves "
+    "the state alone. Never end a session with a task still clocking.",
     "4. Record what the work turns up on the task itself: "
     "memory_task_comment(task_id, body, kind='note'|'rule'|'decision'|"
     "'reminder'). Anything that outlives the task - a project rule, a decision "
@@ -74,8 +75,10 @@ _BOUND_STEPS = (
     "1. Take the highest-priority actionable task (state todo or in_progress). "
     "Say which one you are starting before you start it, in one line, so the "
     "user can redirect you - but do not ask permission to begin.",
-    "2. memory_task_start(task_id) moves it to in_progress and clocks on. Mirror "
-    "the state to asoode so the board matches what is actually happening.",
+    "2. memory_task_start(task_id) claims it, clocks on and moves it to "
+    "in_progress - on the board too, in the same call. Every later change "
+    "(comments, fields, attachments, time, done) mirrors on its own; there is "
+    "nothing extra to call.",
     "3. Do the work. Comment on the task as you go with "
     "memory_task_comment(task_id, body, kind=...): the decision taken and what "
     "it was chosen over, the trap found, what turned out to be wrong. A task "
@@ -89,7 +92,9 @@ _BOUND_STEPS = (
     "6. Do NOT auto-start a task whose state is blocked, blocker, paused or "
     "cancelled - those are waiting on something. And stop to ask when the work "
     "needs a decision only the user can make: an API they own, a product call, "
-    "a credential. Queue what you cannot finish rather than guessing.",
+    "a credential - and when you stop, stop the clock: "
+    "memory_task_update(task_id, state='blocked') says why and stops it. Queue "
+    "what you cannot finish rather than guessing.",
     "7. Work you notice but are not doing now goes in the same list with "
     "memory_task_add(title, description=..., source='claude'). Give it a "
     "description that states the requirement in full - a bare title loses the "

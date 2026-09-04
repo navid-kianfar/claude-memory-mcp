@@ -325,6 +325,8 @@ export interface Task {
   position: number;
   source: string;
   triage: boolean;
+  /** Which agent role this task is for ("backend", "frontend", ...); null means anyone. */
+  role: string | null;
   /** Which session is holding this task; null means free. */
   claimed_by: string | null;
   claimed_at: string | null;
@@ -402,6 +404,7 @@ export interface TaskInput {
   estimated_minutes?: number | null;
   parent_id?: string | null;
   source?: string;
+  role?: string | null;
 }
 
 export interface TaskUpdate {
@@ -415,6 +418,8 @@ export interface TaskUpdate {
   begin_at?: string | null;
   end_at?: string | null;
   estimated_minutes?: number | null;
+  /** "" clears the role; omit to leave it alone. */
+  role?: string;
 }
 
 export type LoadFromFolderSource =

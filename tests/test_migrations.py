@@ -367,3 +367,37 @@ def test_tasks_table_matches_between_fresh_and_migrated_at_v12(tmp_path):
     finally:
         fresh.close()
         migrated.close()
+
+
+def test_v13_adds_session_id_to_time_entries_and_the_tombstone_table(tmp_path):
+    """A clock remembers who started it, so a session end can stop exactly its
+    own; a deleted task leaves a tombstone so its card cannot re-import it."""
+    db = tmp_path / "v13.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        run_migrations(conn)
+        columns = {r[1] for r in conn.execute("PRAGMA table_info('task_time_entries')").fetchall()}
+        assert "session_id" in columns
+        tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+        assert "task_tombstones" in tables
+        assert get_schema_version(conn) == CURRENT_SCHEMA_VERSION >= 13
+    finally:
+        conn.close()
+
+
+def test_v13_tables_match_between_fresh_and_migrated(tmp_path):
+    fresh = duckdb.connect(str(tmp_path / "fresh13.duckdb"))
+    migrated_path = tmp_path / "migrated13.duckdb"
+    _make_v1_db(migrated_path)
+    migrated = duckdb.connect(str(migrated_path))
+    try:
+        create_schema(fresh)
+        run_migrations(migrated)
+        for table in ("task_time_entries", "task_tombstones"):
+            a = [(r[1], r[2]) for r in fresh.execute(f"PRAGMA table_info('{table}')").fetchall()]
+            b = [(r[1], r[2]) for r in migrated.execute(f"PRAGMA table_info('{table}')").fetchall()]
+            assert a == b, table
+    finally:
+        fresh.close()
+        migrated.close()

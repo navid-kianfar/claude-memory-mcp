@@ -220,54 +220,97 @@ class SocketSubscriber:
         links = self._safe(self._get_links) or []
         slugs = sorted({link["slug"] for link in links if link.get("slug")})
 
-        narrowed = await asyncio.to_thread(self._changed_slugs, links)
+        # Outbound first: what this side could not send while deaf goes out
+        # before the board is read, so the read sees our own changes landed.
+        for slug in slugs:
+            try:
+                await asyncio.to_thread(self._flush, slug)
+            except Exception as e:  # noqa: BLE001 - a catch-up must not kill the socket
+                self.last_error = f"catch-up flush {slug}: {e}"
+
+        narrowed, watermark = await asyncio.to_thread(self._changed_slugs, links)
         if narrowed is not None:
             slugs = sorted(narrowed)
             self.delta_catch_ups += 1
 
+        failed = False
         for slug in slugs:
             try:
                 await asyncio.to_thread(self._bridge.reconcile, slug)
                 self.catch_ups += 1
             except Exception as e:  # noqa: BLE001 - a catch-up must not kill the socket
                 self.last_error = f"catch-up {slug}: {e}"
+                failed = True
 
+        # The watermark moves only once everything it covers has actually been
+        # read. Advancing it first meant a board that failed that pass was never
+        # looked at again - the next delta started after it.
         if narrowed is None:
             self._seed_watermark()
+        elif watermark and not failed:
+            from memory_mcp.db.registry import set_setting
 
-    def _changed_slugs(self, links: list[dict]) -> set[str] | None:
-        """Slugs worth reconciling, or None to sweep everything.
+            with contextlib.suppress(Exception):
+                set_setting(CATCH_UP_WATERMARK_KEY, watermark)
+
+    def _flush(self, slug: str) -> None:
+        flush = getattr(self._bridge, "flush", None)
+        if flush is not None:
+            flush(slug)
+
+    def _changed_slugs(self, links: list[dict]) -> tuple[set[str] | None, str | None]:
+        """(slugs worth reconciling, new watermark), or (None, None) to sweep
+        everything.
 
         None is the honest answer whenever we cannot be sure: no watermark, no
         change feed, or the call failed. Returning an empty set on doubt would
         silently stop syncing and look identical to being up to date.
+
+        The watermark is RETURNED, not stored: the caller stores it once the
+        reconciles it covers have succeeded. A truncated crawl returns None for
+        it, so the next sweep starts from the same instant.
+
+        Each platform is asked once about ITS links: a link routes to its own
+        provider, and one platform's change feed knows nothing about another's
+        boards.
         """
-        from memory_mcp.db.registry import get_setting, set_setting
+        from memory_mcp.db.registry import get_setting
 
         try:
             since = get_setting(CATCH_UP_WATERMARK_KEY)
             if not since:
-                return None  # first run: nothing to be incremental about
+                return None, None  # first run: nothing to be incremental about
+            if not links:
+                return set(), None
 
-            provider = self._bridge.provider_for(links[0]) if links else None
-            if provider is None or not provider.capabilities.supports_change_feed:
-                return None
+            by_provider: dict[str, list[dict]] = {}
+            for link in links:
+                by_provider.setdefault(link.get("provider") or "", []).append(link)
 
-            containers, watermark = provider.changed_containers_since(since)
-            # Map changed containers back to the projects that link them.
-            slugs = {
-                link["slug"] for link in links
-                if link.get("remote_work_package_id") in containers
-                and link.get("slug")
-            }
-            # Only advance the watermark once the pages were exhausted, or a
-            # truncated crawl would skip everything it did not reach.
-            if watermark:
-                set_setting(CATCH_UP_WATERMARK_KEY, watermark)
-            return slugs
+            slugs: set[str] = set()
+            watermark: str | None = None
+            complete = True
+            for group in by_provider.values():
+                provider = self._bridge.provider_for(group[0])
+                if provider is None or not provider.capabilities.supports_change_feed:
+                    return None, None
+                containers, mark = provider.changed_containers_since(since)
+                # Map changed containers back to the projects that link them.
+                slugs.update(
+                    link["slug"] for link in group
+                    if link.get("remote_work_package_id") in containers
+                    and link.get("slug")
+                )
+                # Only advance once the pages were exhausted, or a truncated
+                # crawl would skip everything it did not reach.
+                if mark:
+                    watermark = mark if watermark is None else min(watermark, mark)
+                else:
+                    complete = False
+            return slugs, (watermark if complete else None)
         except Exception as e:  # noqa: BLE001
             self.last_error = f"catch-up delta: {e}"
-            return None
+            return None, None
 
     def _seed_watermark(self) -> None:
         """Record where a full sweep got to, so the next one can be a delta."""

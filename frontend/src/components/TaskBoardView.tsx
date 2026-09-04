@@ -116,6 +116,16 @@ export function TaskBoardView({
                     </span>
                   </div>
 
+                  {task.role && (
+                    <div className="mt-1.5">
+                      <span
+                        title={`Routed to the ${task.role} agent`}
+                        className="rounded border border-primary/30 px-1 py-0.5 text-[9px] font-semibold text-primary"
+                      >
+                        agent:{task.role}
+                      </span>
+                    </div>
+                  )}
                   {task.labels.length > 0 && (
                     <div className="mt-1.5 flex flex-wrap gap-1">
                       {task.labels.slice(0, 3).map((l) => (

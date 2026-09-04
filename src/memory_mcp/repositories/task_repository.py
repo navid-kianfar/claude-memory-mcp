@@ -43,7 +43,7 @@ def _role_clause(role: str | None) -> tuple[str, list]:
     return (f" AND {ROLE_SQL}", [role]) if role else ("", [])
 
 COMMENT_COLUMNS = "id, task_id, body, kind, author, created_at"
-TIME_ENTRY_COLUMNS = "id, task_id, begin_at, end_at, manual"
+TIME_ENTRY_COLUMNS = "id, task_id, begin_at, end_at, manual, session_id"
 
 # What is still waiting. Mirrors OPEN_TASK_STATES in models.py; kept as a SQL
 # literal so the ordering below and this filter can never disagree.
@@ -109,6 +109,7 @@ def _row_to_entry(row) -> TaskTimeEntry:
     return TaskTimeEntry(
         id=row[0], task_id=row[1], begin_at=row[2], end_at=row[3],
         manual=bool(row[4]) if row[4] is not None else False,
+        session_id=row[5] if len(row) > 5 else None,
     )
 
 
@@ -368,6 +369,18 @@ class TaskRepository:
                     conn.execute(f"DELETE FROM {table} WHERE task_id = ?", [task_id])
                 except Exception:  # noqa: BLE001 - table absent on an old schema
                     pass
+            # The tombstone outlives the row: it is how the inbound reconcile
+            # tells this card from one created on another machine.
+            try:
+                title = conn.execute(
+                    "SELECT title FROM tasks WHERE id = ?", [task_id],
+                ).fetchone()
+                conn.execute(
+                    "INSERT OR IGNORE INTO task_tombstones (task_id, title) VALUES (?, ?)",
+                    [task_id, title[0] if title else None],
+                )
+            except Exception:  # noqa: BLE001 - table absent on an old schema
+                pass
             conn.execute("DELETE FROM tasks WHERE id = ?", [task_id])
 
     def archive(self, project: str, task_id: str) -> Task:
@@ -525,15 +538,18 @@ class TaskRepository:
 
     # ---------- Time entries ----------
 
-    def start_entry(self, project: str, entry_id: str, task_id: str) -> TaskTimeEntry:
+    def start_entry(
+        self, project: str, entry_id: str, task_id: str, session_id: str | None = None,
+    ) -> TaskTimeEntry:
         """Open a running entry (end_at NULL) from the DB clock. `manual` stays
         FALSE: it marks a stretch typed in by hand rather than clocked, which
-        nothing does yet."""
+        nothing does yet. `session_id` says who clocked on, so that session's
+        end can close it."""
         with connect(project) as conn:
             conn.execute(
-                "INSERT INTO task_time_entries (id, task_id, begin_at, manual) "
-                "VALUES (?, ?, current_timestamp, FALSE)",
-                [entry_id, task_id],
+                "INSERT INTO task_time_entries (id, task_id, begin_at, manual, session_id) "
+                "VALUES (?, ?, current_timestamp, FALSE, ?)",
+                [entry_id, task_id, session_id],
             )
             row = conn.execute(
                 f"SELECT {TIME_ENTRY_COLUMNS} FROM task_time_entries WHERE id = ?",
@@ -562,6 +578,72 @@ class TaskRepository:
                 [entry_id],
             ).fetchone()
         return _row_to_entry(row)
+
+    def stop_all_entries(self, project: str, task_id: str) -> list[TaskTimeEntry]:
+        """Close EVERY open entry on a task, returning the ones closed.
+
+        Every close path used to close one entry - the newest - and `start` has
+        no lock, so two concurrent starts left the older entry open forever and
+        counting. Closing all of them is both the fix and the repair: any entry
+        already orphaned in a live database is closed the next time its task is
+        stopped, finished, released or archived.
+        """
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"SELECT {TIME_ENTRY_COLUMNS} FROM task_time_entries "
+                f"WHERE task_id = ? AND end_at IS NULL",
+                [task_id],
+            ).fetchall()
+            if not rows:
+                return []
+            conn.execute(
+                "UPDATE task_time_entries SET end_at = current_timestamp "
+                "WHERE task_id = ? AND end_at IS NULL",
+                [task_id],
+            )
+            closed = conn.execute(
+                f"SELECT {TIME_ENTRY_COLUMNS} FROM task_time_entries "
+                f"WHERE id IN ({', '.join('?' for _ in rows)})",
+                [r[0] for r in rows],
+            ).fetchall()
+        return [_row_to_entry(r) for r in closed]
+
+    def running_task_ids_for_session(self, project: str, session_id: str) -> list[str]:
+        """Tasks whose open clock was started by this session."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT task_id FROM task_time_entries "
+                "WHERE session_id = ? AND end_at IS NULL",
+                [session_id],
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def expired_claims(self, project: str) -> list[Task]:
+        """Tasks still marked as held by a session whose lease has run out.
+
+        The claim itself is checked lazily by every claim attempt, so an expired
+        holder never blocks anyone; what nothing checked until now is the clock
+        that holder left running. Session start sweeps these.
+        """
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"SELECT {TASK_COLUMNS} FROM tasks WHERE claimed_by IS NOT NULL "
+                f"AND lease_expires_at IS NOT NULL "
+                f"AND lease_expires_at < current_timestamp::TIMESTAMP",
+            ).fetchall()
+        return [_row_to_task(r) for r in rows]
+
+    # ---------- tombstones ----------
+
+    def is_tombstoned(self, project: str, task_id: str) -> bool:
+        try:
+            with connect(project) as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM task_tombstones WHERE task_id = ?", [task_id],
+                ).fetchone()
+        except Exception:  # noqa: BLE001 - table absent on an old schema
+            return False
+        return row is not None
 
     def list_meta(self, project: str) -> dict[str, dict]:
         """Per-task row metadata for the list view, in four grouped queries.
@@ -817,19 +899,24 @@ class OutboxRepository:
         with connect(project) as conn:
             conn.execute("DELETE FROM task_outbox WHERE id = ?", [row_id])
 
-    def fail(self, project: str, row_id: str, error: str) -> bool:
+    def fail(self, project: str, row_id: str, error: str, *, count: bool = True) -> bool:
         """Mirroring failed. Returns True if the row was given up on.
 
         The row stays so the next flush retries it - until MAX_OUTBOX_ATTEMPTS,
         after which it is dropped. Retrying forever is worse than losing one
         mirror: the call that failed may have already had its effect remotely,
         so each retry repeats it.
+
+        `count=False` records the error without spending an attempt. That is
+        for an outage - unreachable, 5xx - where the call had no effect at all
+        and retrying is the only right answer. Five mutations during one outage
+        used to burn a row's five attempts and drop the pending change.
         """
         with connect(project) as conn:
             conn.execute(
-                "UPDATE task_outbox SET attempts = attempts + 1, last_error = ? "
+                "UPDATE task_outbox SET attempts = attempts + ?, last_error = ? "
                 "WHERE id = ?",
-                [error[:500], row_id],
+                [1 if count else 0, error[:500], row_id],
             )
             row = conn.execute(
                 "SELECT attempts FROM task_outbox WHERE id = ?", [row_id]
@@ -851,14 +938,17 @@ class OutboxRepository:
         try:
             with connect(project) as conn:
                 rows = conn.execute(
-                    "SELECT id, body FROM task_comments "
+                    "SELECT id, body, kind, author FROM task_comments "
                     "WHERE task_id = ? AND mirrored_at IS NULL "
                     "ORDER BY created_at ASC",
                     [task_id],
                 ).fetchall()
         except Exception:
             return []
-        return [{"id": r[0], "body": r[1]} for r in rows]
+        return [
+            {"id": r[0], "body": r[1], "kind": r[2] or "note", "author": r[3]}
+            for r in rows
+        ]
 
     def mark_comment_mirrored(self, project: str, comment_id: str) -> None:
         from datetime import datetime, timezone
@@ -898,6 +988,24 @@ class OutboxRepository:
             )
 
     # ---------- the local task -> remote task map ----------
+
+    def remote_ids_for(self, project: str, task_id: str) -> dict[int, str]:
+        """Every remote task a local one maps to, keyed by link id.
+
+        Read BEFORE a hard delete, which drops the task_sync rows: a delete op
+        carries these in its payload because by the time the flusher runs there
+        is no task row left to route from.
+        """
+        try:
+            with connect(project) as conn:
+                rows = conn.execute(
+                    "SELECT link_id, remote_task_id FROM task_sync "
+                    "WHERE task_id = ? AND remote_task_id IS NOT NULL",
+                    [task_id],
+                ).fetchall()
+        except Exception:
+            return {}
+        return {int(r[0]): r[1] for r in rows}
 
     def remote_id(self, project: str, task_id: str, link_id: int) -> str | None:
         try:

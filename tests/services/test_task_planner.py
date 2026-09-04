@@ -133,8 +133,8 @@ class TestMirroring:
             def links(self, slug):
                 return []
 
-            def push(self, slug):  # pragma: no cover - must not be reached
-                raise AssertionError("must not push an unbound project")
+            def flush(self, slug):  # pragma: no cover - must not be reached
+                raise AssertionError("must not mirror an unbound project")
 
         planner = TaskPlanner(container.task_service, Bridge())
         assert planner.plan(project, REQUEST, ITEMS)["mirrored"] is False
@@ -144,27 +144,33 @@ class TestMirroring:
             project, base_url="https://api.asoode.com", remote_project_id="p1",
             remote_work_package_id="wp1",
         )
-        pushed = {}
+        flushed = {}
 
         class Bridge:
             def links(self, slug):
                 return [{"id": 1}]
 
-            def push(self, slug):
-                pushed["slug"] = slug
-                return {"counts": {"pushed": 3, "failed": 0, "considered": 3}}
+            def flush(self, slug):
+                # The OUTBOX carries the plan: each create queued its own row
+                # with every field. A full push re-POSTed the whole project.
+                flushed["slug"] = slug
+                return {"flushed": 3, "failed": 0, "remaining": 0}
+
+            def push(self, slug):  # pragma: no cover - must not be reached
+                raise AssertionError("a plan drains the outbox, never pushes")
 
         planner = TaskPlanner(container.task_service, Bridge())
         result = planner.plan(project, REQUEST, ITEMS)
         assert result["mirrored"] is True
-        assert pushed["slug"] == project
+        assert flushed["slug"] == project
+        assert result["mirror_counts"] == {"flushed": 3, "failed": 0, "remaining": 0}
 
     def test_a_failed_mirror_never_loses_the_plan(self, project):
         class Bridge:
             def links(self, slug):
                 return [{"id": 1}]
 
-            def push(self, slug):
+            def flush(self, slug):
                 raise RuntimeError("asoode down")
 
         planner = TaskPlanner(container.task_service, Bridge())

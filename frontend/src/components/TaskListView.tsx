@@ -384,6 +384,14 @@ function TaskRow({
             ))}
           </div>
         )}
+        {task.role && (
+          <span
+            title={`Routed to the ${task.role} agent`}
+            className="shrink-0 rounded border border-primary/30 px-1.5 py-0.5 text-[0.6rem] font-semibold text-primary"
+          >
+            agent:{task.role}
+          </span>
+        )}
         {task.source === "claude" && (
           <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-primary">
             claude

@@ -43,9 +43,10 @@ class TaskPlanner:
     ) -> dict:
         """Create the tasks for one request, in the order given.
 
-        `items` carry title, description, and optionally priority, labels and
-        parent_index - an index EARLIER in the same list, so a plan can express
-        "this deliverable has these steps" without a second round trip.
+        `items` carry title, description, and optionally priority, labels, role
+        (which agent the task is for) and parent_index - an index EARLIER in the
+        same list, so a plan can express "this deliverable has these steps"
+        without a second round trip.
 
         Order is dependency order: `position` follows the list, so the queue can
         be worked top-down. Every task records the verbatim request as its first
@@ -102,6 +103,7 @@ class TaskPlanner:
                         labels=list(item.get("labels") or []),
                         parent_id=ids[parent_index] if parent_index is not None else None,
                         source=TaskSource.CLAUDE,
+                        role=(item.get("role") or "").strip() or None,
                     ))
                     ids.append(task.id)
                     # The request verbatim, on every task it produced: a title gets
@@ -135,12 +137,21 @@ class TaskPlanner:
         }
         # Straight onto the board: a plan the user cannot see outside the session
         # has solved half the problem. Never fatal - the local queue is the record.
+        #
+        # Through the OUTBOX, not `push`: every create above already queued its
+        # own row, so draining the queue sends exactly these tasks with every
+        # field they carry. `push` re-POSTed the whole project - one call per
+        # task, twenty-five for a seven-task plan - and skipped their fields.
         if mirror and self._bridge is not None:
             try:
                 if self._bridge.links(project):
-                    push = self._bridge.push(project)
+                    flushed = self._bridge.flush(project)
                     result["mirrored"] = True
-                    result["mirror_counts"] = push["counts"]
+                    result["mirror_counts"] = {
+                        "flushed": flushed.get("flushed", 0),
+                        "failed": flushed.get("failed", 0),
+                        "remaining": flushed.get("remaining", 0),
+                    }
             except Exception as e:  # noqa: BLE001
                 result["mirror_error"] = f"{type(e).__name__}: {e}"
         return result

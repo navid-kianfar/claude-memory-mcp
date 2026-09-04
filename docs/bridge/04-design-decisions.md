@@ -59,7 +59,11 @@ never argv.
 
 Every local mutation that needs mirroring appends to a `task_outbox` row and returns immediately. A
 flusher drains the outbox, in order per task, whenever asoode is reachable. Connection loss is a normal
-state, not an error. On reconnect: drain outbox, then reconcile inbound.
+state, not an error. On reconnect: drain outbox, then reconcile inbound — `SocketSubscriber._catch_up`
+does exactly that, and the daemon also sweeps every linked project's outbox on start and every minute,
+so a row nobody nudged still goes out. An outage never spends a row's retry budget
+(`TransientProviderError`). Every mutation the board can hold is an op: state, fields, labels,
+assignee, parent, comments, attachments, time, archive, delete.
 
 ### D4 — inbound via live socket subscription, with a reconcile poll as the safety net
 
@@ -67,9 +71,11 @@ Chosen over polling. **This makes asoode's socket auth a hard blocker, not a nic
 gateway trusts an unverified `?userId=` query param (`01-asoode-analysis.md` §4.3), and it mis-targets
 recipients so project-level members receive nothing (§4.2).
 
-The subscription lives in an **asyncio task in `daemon.build_app()`'s lifespan** (`daemon.py:20-42`, whose docstring records the shape) —
-no such mechanism exists today, it must be built. It only talks HTTP/WS, so the macOS TCC constraint
-that forces `sync_cli` into Claude's process does **not** apply to it.
+The subscription lives in an **asyncio task in `daemon.build_app()`'s lifespan** — built:
+`services/socket_subscriber.py`, started by `daemon.py`. The auth blocker was fixed on the asoode side
+by exchanging the PAT for a signed socket ticket (`POST /account/socket-token`) on every connect. It
+only talks HTTP/WS, so the macOS TCC constraint that forces `sync_cli` into Claude's process does
+**not** apply to it.
 
 A reconcile poll runs on every (re)connect to catch anything missed while disconnected, since socket
 delivery is not durable.

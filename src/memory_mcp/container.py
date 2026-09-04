@@ -4,7 +4,9 @@ Wires together repositories and services in a single place so the
 server layer can pull the composed graph without knowing construction details.
 """
 
+import atexit
 import threading
+import time
 
 from memory_mcp.repositories import (
     MemoryRepository, ProjectRepository, SessionRepository, ProvenanceRepository,
@@ -16,6 +18,13 @@ from memory_mcp.services import (
     ExportImportService, ModelService, UpdateService, ClaudeMdService,
     TaskService, TemplateService, SyncService, TaskBridge, TaskPlanner,
 )
+
+
+#: How often the daemon looks for outbox rows nobody nudged. Cheap: one depth
+#: query per linked project, no network unless something is pending.
+OUTBOX_SWEEP_SECONDS = 60.0
+#: How long a short-lived process waits for its own mirrors before exiting.
+MIRROR_EXIT_GRACE_SECONDS = 30.0
 
 
 class Container:
@@ -36,6 +45,12 @@ class Container:
         self.rules_cache = RulesCache()
         self._flush_lock = threading.Lock()
         self._flushing: dict[str, bool] = {}
+        # Projects nudged while their flush was already running. The running
+        # flush goes round once more for them instead of the nudge being lost.
+        self._dirty: set[str] = set()
+        self._flush_threads: dict[str, threading.Thread] = {}
+        self._sweeper: threading.Thread | None = None
+        self._sweeper_stop = threading.Event()
 
         # Services
         self.rules_service = RulesService(self.memory_repo, self.rules_cache)
@@ -103,24 +118,103 @@ class Container:
             return
         with self._flush_lock:
             if self._flushing.get(project):
+                # A flush is in flight. It may already have read its batch, so
+                # the row this nudge is for would sit until the next mutation -
+                # done() queues two rows back to back and hit exactly that.
+                # Mark the project and let the running flush go round again.
+                self._dirty.add(project)
                 return
             self._flushing[project] = True
 
         def _run():
-            try:
-                self.task_bridge.flush(project)
-                # Then pull anything added on the board. Only NEW remote tasks -
-                # see TaskBridge.reconcile - so this can never overwrite local
-                # work, which is what makes it safe to run unattended.
-                self.task_bridge.reconcile(project)
-            except Exception:  # noqa: BLE001 - a mirror can never break a local write
-                pass
-            finally:
+            while True:
+                try:
+                    self.task_bridge.flush(project)
+                    # Then pull anything added on the board. Only NEW remote
+                    # tasks - see TaskBridge.reconcile - so this can never
+                    # overwrite local work, which is what makes it safe to run
+                    # unattended.
+                    self.task_bridge.reconcile(project)
+                except Exception:  # noqa: BLE001 - a mirror can never break a local write
+                    pass
                 with self._flush_lock:
+                    if project in self._dirty:
+                        self._dirty.discard(project)
+                        continue
                     self._flushing.pop(project, None)
+                    self._flush_threads.pop(project, None)
+                    return
 
-        threading.Thread(target=_run, name=f"asoode-flush-{project}", daemon=True).start()
+        thread = threading.Thread(target=_run, name=f"asoode-flush-{project}", daemon=True)
+        with self._flush_lock:
+            self._flush_threads[project] = thread
+        thread.start()
+
+    # ---------- draining what a nudge could not ----------
+    #
+    # A nudge only fires from a mutation in THIS process. Rows left behind by an
+    # outage, a crash mid-flush, or a write from a process that exited before
+    # its flush thread finished would otherwise wait for the next unrelated
+    # mutation of that project - possibly forever.
+
+    def sweep_outboxes(self) -> list[str]:
+        """Nudge every linked project that has something pending. Returns them."""
+        from memory_mcp.db.registry import linked_slugs
+
+        nudged = []
+        try:
+            slugs = linked_slugs()
+        except Exception:  # noqa: BLE001 - no registry, nothing to sweep
+            return nudged
+        for slug in slugs:
+            try:
+                if self.outbox_repo.depth(slug) > 0:
+                    self._mirror_soon(slug)
+                    nudged.append(slug)
+            except Exception:  # noqa: BLE001 - one bad project must not stop the sweep
+                continue
+        return nudged
+
+    def start_outbox_sweeper(self, interval: float = OUTBOX_SWEEP_SECONDS) -> None:
+        """Sweep once now and then every `interval` seconds, until stopped."""
+        if self._sweeper is not None and self._sweeper.is_alive():
+            return
+        self._sweeper_stop.clear()
+
+        def _loop():
+            while not self._sweeper_stop.is_set():
+                try:
+                    self.sweep_outboxes()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._sweeper_stop.wait(interval)
+
+        self._sweeper = threading.Thread(target=_loop, name="outbox-sweeper", daemon=True)
+        self._sweeper.start()
+
+    def stop_outbox_sweeper(self) -> None:
+        self._sweeper_stop.set()
+
+    def wait_for_mirrors(self, timeout: float = MIRROR_EXIT_GRACE_SECONDS) -> None:
+        """Give in-flight flush threads a chance to finish. For a short-lived
+        process - the CLI, stdio mode - whose daemon threads would otherwise be
+        killed mid-request when the interpreter exits."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._flush_lock:
+                alive = [t for t in self._flush_threads.values() if t.is_alive()]
+            if not alive:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            alive[0].join(timeout=remaining)
 
 
 # Module-level singleton
 container = Container()
+
+# A process that exits with a flush still in flight loses that mirror - the
+# thread is a daemon thread and dies with the interpreter. Bounded, so a hung
+# network cannot hold the exit hostage.
+atexit.register(container.wait_for_mirrors)

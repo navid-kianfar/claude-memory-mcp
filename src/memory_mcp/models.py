@@ -249,6 +249,9 @@ class TaskTimeEntry(BaseModel):
     begin_at: datetime
     end_at: datetime | None = None
     manual: bool = False
+    # The memory session that clocked on, so a session end can stop exactly the
+    # clocks it started. None for a clock started from the UI.
+    session_id: str | None = None
 
 
 # --- Request Models ---
@@ -450,6 +453,10 @@ class SessionContext(BaseModel):
     active_sprint: list[Memory]
     recent_decisions: list[Memory]
     orphaned_sessions_closed: int = 0
+    # Tasks a session that never came back was holding: released, and the clocks
+    # it left running stopped, at this session's start.
+    expired_claims_released: int = 0
+    stale_clocks_stopped: int = 0
     # Rules imported from other projects, waiting to be rewritten for this one.
     # They are NOT in mandatory_rules/forbidden_rules above and are not in force.
     pending_adaptations: list[Memory] = Field(default_factory=list)

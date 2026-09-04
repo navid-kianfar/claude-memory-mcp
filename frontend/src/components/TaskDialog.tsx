@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Archive,
+  Bot,
   Calendar,
   CalendarClock,
   Check,
@@ -553,6 +554,12 @@ function TaskDialogMain({
           {PRIORITY_LABELS[task.priority] ?? `P${task.priority}`}
         </PropPill>
 
+        {task.role && (
+          <PropPill icon={<Bot className="size-3.5" />}>
+            <span title="The agent role this task is routed to">agent:{task.role}</span>
+          </PropPill>
+        )}
+
         <PropPill
           icon={<Calendar className="size-3.5" />}
           className={overdue ? "border-destructive text-destructive" : undefined}
@@ -843,6 +850,8 @@ function TaskDialogSidebar({
   const task = detail.task;
   const [editingAssignee, setEditingAssignee] = useState(false);
   const [assigneeDraft, setAssigneeDraft] = useState(task.assignee ?? "");
+  const [editingRole, setEditingRole] = useState(false);
+  const [roleDraft, setRoleDraft] = useState(task.role ?? "");
   const [editingLabels, setEditingLabels] = useState(false);
   const [labelDraft, setLabelDraft] = useState("");
   const [editingDates, setEditingDates] = useState(false);
@@ -948,6 +957,46 @@ function TaskDialogSidebar({
           </div>
         ) : (
           <EmptyHint>Nobody assigned</EmptyHint>
+        )}
+      </SidebarSection>
+
+      {/* Agent role */}
+      <SidebarSection
+        label="Agent"
+        action={
+          <AddButton
+            onClick={() => {
+              setRoleDraft(task.role ?? "");
+              setEditingRole((v) => !v);
+            }}
+            icon={editingRole ? <X className="size-3" /> : <Pencil className="size-3" />}
+          />
+        }
+      >
+        {editingRole ? (
+          <Input
+            autoFocus
+            value={roleDraft}
+            placeholder="backend, frontend, test... (empty = anyone)"
+            onChange={(e) => setRoleDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                // "" clears it: the task goes back to being claimable by any agent.
+                void onPatch({ role: roleDraft.trim() }, "Failed to set agent role").then(
+                  () => setEditingRole(false)
+                );
+              }
+              if (e.key === "Escape") setEditingRole(false);
+            }}
+            className="h-7 text-[0.78rem]"
+          />
+        ) : task.role ? (
+          <div className="flex items-center gap-2 text-[0.8rem]">
+            <Bot className="size-4 text-muted-foreground" />
+            <span className="truncate">agent:{task.role}</span>
+          </div>
+        ) : (
+          <EmptyHint>Any agent can claim it</EmptyHint>
         )}
       </SidebarSection>
 

@@ -31,16 +31,25 @@ id>`. asoode returns the existing task for a repeated key, which makes the same
 call serve as both create and lookup - so no local mapping table is needed to
 stay idempotent, and a re-push after a crash cannot double anything.
 
-What this is NOT, yet: the inbound half. Nothing here reads asoode back into the
-local store, so a change made in asoode does not reach the task list. That is the
-socket subscription plus the `updatedSince` reconcile poll, and it belongs in the
-daemon's lifespan (see daemon.build_app).
+The flusher (`flush` / `_flush_row`) is the outbound half: every local mutation
+lands in the outbox as an op, and each op maps onto the provider calls that make
+the remote card match - state, fields, labels, assignee, parent, comments,
+attachments, time, archive, delete. A card created by the flusher gets EVERY
+field the local task already has, not just its title.
+
+The inbound half is `reconcile` / `import_board` below, driven by the daemon's
+socket subscription and its catch-up sweep. It only CREATES: a task on both
+sides is never overwritten, because that needs the two-sided conflict policy
+that is still an open decision. `import_all` is the explicit path that does
+overwrite title and state.
 """
 
 import threading
 
 from memory_mcp.asoode import get_endpoints
-from memory_mcp.providers import Container, ProviderError, TaskProvider
+from memory_mcp.providers import (
+    Container, ProviderError, TaskProvider, TransientProviderError,
+)
 from memory_mcp.services.echo_log import EchoLog
 from memory_mcp.db.registry import (
     get_default_project_link,
@@ -50,6 +59,16 @@ from memory_mcp.db.registry import (
 from memory_mcp.models import (
     CreateTaskRequest, TaskFilter, TaskSource, TaskState, UpdateTaskRequest,
 )
+
+# How many batches one flush call will drain before handing back. Bounded so a
+# project that is being written to continuously cannot pin the flusher thread.
+_MAX_FLUSH_PASSES = 20
+
+# Task fields `update_fields` carries, in the shared vocabulary.
+_FIELD_KEYS = frozenset({
+    "title", "description", "priority", "due_at", "begin_at", "end_at",
+    "estimated_minutes",
+})
 
 # Board-list titles a state maps onto, in preference order. asoode's Kanban
 # template names its columns in English; anything unmatched falls back to the
@@ -65,6 +84,23 @@ _LIST_ALIASES = {
     "incomplete": ("incomplete",),
     "blocker": ("blocker",),
 }
+
+
+def _comment_text(comment: dict) -> str:
+    """What the board shows for a local comment.
+
+    A rule or a decision pinned to a task must not read as chatter there any
+    more than it does here, and the author matters when several agents write
+    to one card.
+    """
+    body = comment.get("body") or ""
+    kind = (comment.get("kind") or "note").strip().lower()
+    if kind and kind != "note":
+        body = f"[{kind}] {body}"
+    author = (comment.get("author") or "").strip()
+    if author:
+        body = f"{body}\n\n— {author}"
+    return body
 
 
 def build_state_list_map(board: Container) -> tuple[dict[str, str], str | None]:
@@ -95,6 +131,11 @@ def build_state_list_map(board: Container) -> tuple[dict[str, str], str | None]:
                 mapping[state] = by_title[alias]
                 break
     return mapping, default_id
+
+
+#: `_resolve_local`'s answer for a card whose externalRef names a task that was
+#: deleted HERE - distinct from None ("never seen"), which creates.
+_DELETED_HERE = "__deleted_here__"
 
 
 class TaskBridge:
@@ -357,7 +398,21 @@ class TaskBridge:
         if self._outbox is None:
             return {"flushed": 0, "failed": 0, "skipped": 0, "reason": "no outbox"}
         with self._flush_lock(slug):
-            return self._flush_locked(slug, limit)
+            # Keep going while there is more and progress is being made. A row
+            # enqueued while a batch was in flight used to wait for the NEXT
+            # mutation to nudge the flusher - done() queues two rows back to
+            # back and hit that every time.
+            total: dict = {"flushed": 0, "failed": 0, "skipped": 0, "abandoned": 0}
+            for _ in range(_MAX_FLUSH_PASSES):
+                result = self._flush_locked(slug, limit)
+                for key in total:
+                    total[key] += result.get(key, 0)
+                if result.get("reason"):
+                    total["reason"] = result["reason"]
+                if result.get("failed") or not result.get("remaining"):
+                    break
+            total["remaining"] = self._outbox.depth(slug)
+            return total
 
     def _flush_locked(self, slug: str, limit: int) -> dict:
         pending = self._outbox.pending(slug, limit)
@@ -379,6 +434,12 @@ class TaskBridge:
                 else:
                     skipped += 1
                 self._outbox.resolve(slug, row["id"])
+            except TransientProviderError as e:
+                # An outage is not the row's fault: keep it, note the error,
+                # spend no attempt. The change is still pending, not failing.
+                self._outbox.fail(slug, row["id"], str(e), count=False)
+                failed += 1
+                break
             except ProviderError as e:
                 given_up = self._outbox.fail(slug, row["id"], str(e))
                 failed += 1
@@ -399,6 +460,11 @@ class TaskBridge:
 
     def _flush_row(self, slug: str, row: dict) -> bool:
         """Mirror one outbox row. False when there is nothing to do."""
+        op = row["op"]
+        payload = row.get("payload") or {}
+        if op == "delete":
+            # The local row is gone; the payload carries where the card lives.
+            return self._flush_delete(slug, payload)
         try:
             task = self._tasks.get(slug, row["task_id"])
         except Exception:  # noqa: BLE001 - deleted locally before the flush ran
@@ -406,58 +472,158 @@ class TaskBridge:
         link = self.route(slug, task)
         if link is None:
             return False
+        provider = self.provider_for(link)
+        caps = provider.capabilities
+        container_id = link["remote_work_package_id"]
 
-        remote_id = self._outbox.remote_id(slug, task.id, link["id"])
-        created_here = False
-        if not remote_id:
-            # create_task with the task's externalRef is BOTH create and lookup:
-            # asoode returns the existing row for a repeated ref, so recovering a
-            # lost mapping costs one call and can never duplicate.
-            state_map = link.get("state_list_map") or {}
-            list_id = state_map.get(task.state.value) or link.get("default_list_id")
-            provider = self.provider_for(link)
-            remote = provider.create_task(
-                link["remote_work_package_id"], list_id, task.title,
-                description=task.description or "",
-                external_ref=f"memory-mcp:{task.id}",
-            )
-            remote_id = remote.id
-            if not remote_id:
-                raise ProviderError("the provider returned a task without an id")
-            self._outbox.remember(slug, task.id, link["id"], remote_id, task.state.value)
-            created_here = True
-
+        remote_id, created_here = self._ensure_remote(slug, task, link, provider)
         # Everything from here on is a write WE make, and asoode will broadcast
         # it straight back to us. Noted before the call so the echo cannot beat
         # the record home.
         self.echo.note(remote_id)
-        if created_here and task.state.value == "todo":
-            return True  # created in ToDo already; no state call needed
 
-        op = row["op"]
         if op == "role":
-            provider = self.provider_for(link)
-            if not provider.capabilities.supports_labels:
-                return False  # keep the local role, send nothing
-            provider.set_role_label(remote_id, link["remote_work_package_id"], task.role)
+            if created_here or not caps.supports_labels:
+                return created_here  # a new card already carries its role
+            provider.set_role_label(remote_id, container_id, task.role)
             return True
         if op == "archive":
-            provider = self.provider_for(link)
-            if not provider.capabilities.supports_archive:
+            if not caps.supports_archive:
                 # Keep the local archive, send nothing. A platform without the
                 # feature must not fail a local operation.
                 return False
-            payload = row.get("payload") or {}
             provider.archive(remote_id, bool(payload.get("archived", True)))
             return True
         if op == "attachment":
             return self._flush_attachments(slug, task, link, remote_id)
+        if op == "detach":
+            if not caps.supports_attachments or not payload.get("filename"):
+                return False
+            provider.remove_attachment(remote_id, payload["filename"])
+            return True
         if op == "time":
             return self._flush_time(slug, task, link, remote_id)
         if op == "comment":
             return self._flush_comments(slug, task, link, remote_id)
-        # create/state/update all reconcile to "make the remote match".
-        provider = self.provider_for(link)
+        if op == "parent":
+            if not caps.supports_subtasks or created_here:
+                return created_here
+            if payload.get("parent_id") is None:
+                provider.promote(remote_id)
+                return True
+            return False  # re-parenting an existing card has no route yet
+        if op == "update" and not created_here:
+            changed = set(payload.get("changed") or [])
+            self._apply_fields(task, link, provider, remote_id, changed, payload)
+            if "state" in changed:
+                self._apply_state(slug, task, link, provider, remote_id)
+            return True
+        # create / state, or an update on a card that was just created with
+        # everything it has: reconcile the state and the column.
+        if created_here:
+            return True
+        self._apply_state(slug, task, link, provider, remote_id)
+        return True
+
+    def _ensure_remote(self, slug: str, task, link: dict, provider) -> tuple[str, bool]:
+        """The remote id for a task, creating the card when there is none.
+
+        Returns (remote_id, created_here). create_task with the task's
+        externalRef is BOTH create and lookup: asoode returns the existing row
+        for a repeated ref, so recovering a lost mapping costs one call and can
+        never duplicate. A card created here is then brought up to date with
+        EVERY field the local task has - priority, dates, estimate, labels,
+        assignee, role, state - because the create route only carries a title
+        and a description.
+
+        A sub-task's parent is created first when the board has not seen it
+        yet, so nesting survives even if the parent's own row was lost.
+        """
+        # No outbox (a bare bridge in a test, or a push before Phase 2 wired
+        # one): create-by-externalRef is still a lookup, just without a cache.
+        remote_id = (
+            self._outbox.remote_id(slug, task.id, link["id"]) if self._outbox else None
+        )
+        if remote_id:
+            return remote_id, False
+
+        parent_remote = None
+        if task.parent_id and provider.capabilities.supports_subtasks:
+            try:
+                parent = self._tasks.get(slug, task.parent_id)
+                parent_remote, _ = self._ensure_remote(slug, parent, link, provider)
+            except Exception:  # noqa: BLE001 - parent gone; create it flat
+                parent_remote = None
+
+        state_map = link.get("state_list_map") or {}
+        list_id = state_map.get(task.state.value) or link.get("default_list_id")
+        remote = provider.create_task(
+            link["remote_work_package_id"], list_id, task.title,
+            description=task.description or "",
+            external_ref=f"memory-mcp:{task.id}",
+            parent_id=parent_remote,
+        )
+        remote_id = remote.id
+        if not remote_id:
+            raise ProviderError("the provider returned a task without an id")
+        self._remember(slug, task.id, link["id"], remote_id, task.state.value)
+        self.echo.note(remote_id)
+        self._sync_new_card(slug, task, link, provider, remote_id)
+        return remote_id, True
+
+    def _remember(self, slug: str, task_id: str, link_id: int, remote_id: str,
+                  state: str) -> None:
+        if self._outbox is not None:
+            self._outbox.remember(slug, task_id, link_id, remote_id, state)
+
+    def _sync_new_card(self, slug: str, task, link: dict, provider, remote_id: str) -> None:
+        """Send everything a freshly created card is missing."""
+        caps = provider.capabilities
+        container_id = link["remote_work_package_id"]
+        fields = {}
+        if task.priority:
+            fields["priority"] = task.priority
+        for key in ("due_at", "begin_at", "end_at"):
+            if getattr(task, key) is not None:
+                fields[key] = getattr(task, key)
+        if task.estimated_minutes:
+            fields["estimated_minutes"] = task.estimated_minutes
+        if fields and caps.supports_fields:
+            provider.update_fields(remote_id, fields)
+        if task.labels and caps.supports_labels:
+            provider.sync_labels(remote_id, container_id, list(task.labels), [])
+        if task.assignee and caps.supports_assignees:
+            provider.set_assignee(remote_id, container_id, task.assignee, None)
+        if task.role and caps.supports_labels:
+            provider.set_role_label(remote_id, container_id, task.role)
+        if task.state.value != "todo":
+            self._apply_state(slug, task, link, provider, remote_id)
+        if task.archived_at is not None and caps.supports_archive:
+            provider.archive(remote_id, True)
+
+    def _apply_fields(
+        self, task, link: dict, provider, remote_id: str, changed: set, payload: dict,
+    ) -> None:
+        """Send the fields an update changed, from the task's CURRENT values so
+        several queued updates converge on what the local store holds now."""
+        caps = provider.capabilities
+        container_id = link["remote_work_package_id"]
+        keys = _FIELD_KEYS & changed
+        if keys and caps.supports_fields:
+            provider.update_fields(remote_id, {k: getattr(task, k) for k in keys})
+        if "labels" in changed and caps.supports_labels:
+            before = set(payload.get("labels_before") or [])
+            now = set(task.labels)
+            add, remove = sorted(now - before), sorted(before - now)
+            if add or remove:
+                provider.sync_labels(remote_id, container_id, add, remove)
+        if "assignee" in changed and caps.supports_assignees:
+            provider.set_assignee(
+                remote_id, container_id, task.assignee, payload.get("assignee_before"),
+            )
+
+    def _apply_state(self, slug: str, task, link: dict, provider, remote_id: str) -> None:
+        """Make the remote state - and the column - match the local one."""
         provider.set_state(remote_id, task.state.value)
         # asoode keeps state and column independent, so a Done card would sit in
         # To Do forever without this. Best-effort: the state is the truth, the
@@ -468,8 +634,28 @@ class TaskBridge:
                 provider.move(remote_id, target_list)
             except ProviderError:
                 pass
-        self._outbox.remember(slug, task.id, link["id"], remote_id, task.state.value)
-        return True
+        self._remember(slug, task.id, link["id"], remote_id, task.state.value)
+
+    def _flush_delete(self, slug: str, payload: dict) -> bool:
+        """A task deleted locally: archive its card(s). asoode has no delete
+        route, and a card that stays live for a task nobody has is the shape
+        that re-imports itself."""
+        remotes = payload.get("remote") or {}
+        if not remotes:
+            return False
+        links = {link["id"]: link for link in get_project_links(slug)}
+        sent = False
+        for link_id, remote_id in remotes.items():
+            link = links.get(int(link_id))
+            if link is None or not remote_id:
+                continue
+            provider = self.provider_for(link)
+            if not provider.capabilities.supports_archive:
+                continue
+            self.echo.note(remote_id)
+            provider.archive(remote_id, True)
+            sent = True
+        return sent
 
     # ---------- inbound ----------
 
@@ -489,24 +675,25 @@ class TaskBridge:
         """
         # An import writes through TaskService, which queues a mirror for every
         # write - so importing 35 tasks would immediately push 35 of them back.
-        # Suppress the outbox for the duration: these changes CAME FROM asoode.
+        # Suppress mirroring for the duration: these changes CAME FROM asoode.
+        # Scoped to this context, never the shared service: blanking the
+        # service's outbox dropped every concurrent tool call's mirror too.
         container = self.provider_for(link).fetch_container(
             link["remote_work_package_id"], with_tasks=True,
         )
-        created, updated, skipped = [], [], 0
-        suppressed = getattr(self._tasks, "_outbox", None)
-        self._tasks._outbox = None
-        try:
+        with self._tasks.suppress_mirroring():
             return self._import_rows(slug, link, container, limit, update_existing)
-        finally:
-            self._tasks._outbox = suppressed
 
     def _import_rows(self, slug, link, container, limit, update_existing=True) -> dict:
         created, updated, skipped = [], [], 0
-        # Fallback identity, built once per board. See _resolve_local.
+        # Fallback identity, built once per board. See _resolve_local. Archived
+        # tasks included: one whose mapping was lost must match by title too,
+        # or it comes back as a new open task.
         existing_by_title: dict[str, str] = {}
         for task in self._tasks.list_tasks(
-            slug, TaskFilter(include_done=True, include_subtasks=True), limit=1000,
+            slug,
+            TaskFilter(include_done=True, include_subtasks=True, include_archived=True),
+            limit=1000,
         ).tasks:
             existing_by_title.setdefault(task.title.strip().lower(), task.id)
 
@@ -517,6 +704,11 @@ class TaskBridge:
                 continue
             state = remote.state
             local_id = self._resolve_local(slug, link, remote, existing_by_title)
+            if local_id is _DELETED_HERE:
+                # Our own card, for a task deleted locally. Its archive is on
+                # its way (or landed); importing it would resurrect the task.
+                skipped += 1
+                continue
 
             if local_id:
                 if not update_existing:
@@ -583,6 +775,8 @@ class TaskBridge:
         ref = (remote.external_ref or "")
         if ref.startswith("memory-mcp:"):
             candidate = ref.split(":", 1)[1]
+            if self._tombstoned(slug, candidate):
+                return _DELETED_HERE
         if candidate is None:
             candidate = existing_by_title.get((remote.title or "").strip().lower())
         if not candidate:
@@ -593,6 +787,15 @@ class TaskBridge:
             return None
         self._outbox.remember(slug, candidate, link["id"], remote_id, remote.state)
         return candidate
+
+    def _tombstoned(self, slug: str, task_id: str) -> bool:
+        repo = getattr(self._tasks, "_task_repo", None)
+        if repo is None or not hasattr(repo, "is_tombstoned"):
+            return False
+        try:
+            return bool(repo.is_tombstoned(slug, task_id))
+        except Exception:  # noqa: BLE001
+            return False
 
     def reconcile(self, slug: str) -> dict:
         """Pull tasks that exist remotely but NOT locally. Never overwrites.
@@ -684,7 +887,7 @@ class TaskBridge:
         if not pending:
             return False
         for comment in pending:
-            provider.comment(remote_id, comment["body"])
+            provider.comment(remote_id, _comment_text(comment))
             self._outbox.mark_comment_mirrored(slug, comment["id"])
         return True
 
@@ -851,28 +1054,18 @@ class TaskBridge:
             except ProviderError as e:
                 failed.append({"task_id": task.id, "title": task.title, "error": str(e)})
                 continue
-            state_map = link.get("state_list_map") or {}
-            default_list = link.get("default_list_id")
-            # Creating needs SOME column even for a state with none of its own.
-            list_id = state_map.get(task.state.value) or default_list
             try:
-                remote = self.provider_for(link).create_task(
-                    link["remote_work_package_id"], list_id, task.title,
-                    description=task.description or "",
-                    external_ref=f"memory-mcp:{task.id}",
-                )
-                remote_id = remote.id
+                provider = self.provider_for(link)
+                # The flusher's own path: create-or-look-up by externalRef, a
+                # new card gets every field, and the mapping is remembered.
+                # Without the mapping a pushed task looks unmirrored to the
+                # backfill count and NEW to reconcile - the 54-duplicate shape.
+                remote_id, created = self._ensure_remote(slug, task, link, provider)
                 self.echo.note(remote_id)
-                # Remember the mapping, exactly as the flusher does. Without it a
-                # pushed task looks unmirrored to the backfill count and looks NEW
-                # to reconcile - which is how 54 duplicates were created.
-                if remote_id and self._outbox is not None:
-                    self._outbox.remember(
-                        slug, task.id, link["id"], remote_id, task.state.value)
-                # asoode creates in ToDo; carry the real state over. Skipped for
-                # todo so a re-push of an unchanged list makes no extra calls.
-                if remote_id and task.state.value != "todo":
-                    self.provider_for(link).set_state(remote_id, task.state.value)
+                # An existing card: carry the real state and column over.
+                # Skipped for todo so a re-push of an unchanged list is cheap.
+                if not created and task.state.value != "todo":
+                    self._apply_state(slug, task, link, provider, remote_id)
                 pushed.append({
                     "task_id": task.id, "remote_id": remote_id,
                     "title": task.title, "state": task.state.value,

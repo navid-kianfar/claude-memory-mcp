@@ -54,6 +54,16 @@ fi
 # Nothing approved and nothing changed: the common case, and it costs one curl.
 [ "$APPROVED" != "apply" ] && [ -z "$SRC_CHANGED" ] && [ -z "$FE_CHANGED" ] && exit 0
 
+# Uncommitted edits are work in progress, not a release. Installing them put a
+# half-written change into the daemon every Claude session on this machine
+# depends on, and restarted that daemon mid-session - three times in one
+# session on 2026-09-04, dropping every live MCP connection each time. Only
+# COMMITTED source auto-installs; while editing, install deliberately with
+# `uv run memory-mcp-setup`. An approved remote update still applies.
+if [ "$APPROVED" != "apply" ] && git -C "$REPO" status --porcelain -- src frontend/src 2>/dev/null | grep -q .; then
+  exit 0
+fi
+
 # Clear a stale lock left by a crashed run (older than 15 minutes).
 [ -d "$LOCK" ] && find "$LOCK" -maxdepth 0 -mmin +15 -exec rmdir {} \; 2>/dev/null
 # Single-flight: two installs would race on the runtime directory.

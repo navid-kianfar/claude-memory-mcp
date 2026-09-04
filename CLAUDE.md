@@ -81,12 +81,25 @@ project holds MANY links (a monorepo has one board per app); `memory_task_add`'s
 - `memory_asoode_boards` lists what can be attached.
 - `memory_asoode_import` pulls board tasks into the local list.
 
-Mirroring is automatic in both directions. Out: every create/update/completion/
-comment/time-entry/attachment queues to an outbox and flushes off-thread, so a
-local write never waits on the network. In: a Socket.IO subscription reconciles
-within seconds of a board change, backed by a poll so a dropped socket only costs
-promptness. Every connect also sweeps each linked project once, because asoode
-replays nothing that happened while the socket was down.
+Mirroring is automatic. OUT, everything the board can hold: every create, state
+change (memory_task_start included), field edit (title, description, priority,
+assignee, labels, dates, estimate), comment, attachment, time entry, archive,
+delete and sub-task parent queues to an outbox and flushes off-thread, so a local
+write never waits on the network. A nudge that lands mid-flush makes the flusher
+go round again, the daemon sweeps every linked project's outbox on start and
+every minute, and an outage never spends a row's retry budget. IN: a Socket.IO
+subscription reconciles within seconds of a board change, backed by a poll so a
+dropped socket only costs promptness. Every connect also drains the outbox and
+sweeps each linked project once, because asoode replays nothing that happened
+while the socket was down.
+
+THE CLOCK: memory_task_start claims the task for the session, opens a time entry
+and mirrors in_progress. Every path that ends the work closes it and mirrors the
+stretch - memory_task_done, memory_task_update to any state other than
+in_progress, memory_task_stop, memory_task_release, memory_session_end, archive.
+A session that ends with a task still clocking has that clock stopped for it and
+the count reported; a session that never comes back has its expired claims and
+clocks swept at the next session start.
 
 The subscriber ignores the echo of our OWN writes. asoode broadcasts to every
 member without excluding the actor, and drops the actor id before the client
@@ -101,7 +114,9 @@ CLI write means adding its route too.
 
 **Inbound only CREATES.** A task on both sides is never overwritten — that needs
 a conflict policy nobody has decided. `memory_asoode_import` is the explicit path
-that does overwrite, so do not describe the two sides as "in sync".
+that does overwrite (title and state), so do not describe the two sides as "in
+sync": say what each direction carries. A task deleted locally leaves a tombstone
+so its (archived) card can never re-import it.
 
 `memory_task_attach(task_id, path)` puts evidence on a task — a screenshot of a
 working fix, a failing log — and mirrors it to the board.
@@ -119,8 +134,9 @@ Both are **idempotent via `externalRef`** (the project uid and the task id), so
 re-running pushes changes rather than duplicating. Both create real objects on the
 user's account — ask before the first link, and say what was created afterwards.
 
-**The bridge is one-way today.** Nothing reads asoode back into the local store,
-so never tell the user the two are in sync.
+**What comes back is create-only, by design.** Edits made on the board to a task
+that exists on both sides stay on the board until the conflict policy is decided
+(a blocked task on this project's own board).
 
 ### Session Lifecycle
 - At conversation start → `memory_session_start()`
@@ -188,6 +204,10 @@ Agents installed mid-session are not dispatchable until Claude Code restarts.
 uv sync --all-extras
 uv run pytest -v
 ```
+
+The full suite runs once before every commit: `.githooks/pre-commit` (enable it
+with `git config core.hooksPath .githooks`). Iterate with a narrow selection;
+the hook is the gate, not the feedback loop.
 
 ## Tech Stack
 - Python + FastMCP

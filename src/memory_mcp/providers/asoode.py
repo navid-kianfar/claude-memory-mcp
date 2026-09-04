@@ -26,6 +26,7 @@ import contextlib
 
 from memory_mcp.asoode_client import (
     ORDINAL_TO_STATE,
+    PRIORITY_TO_OBJECTIVE,
     STATE_TO_ORDINAL,
     AsoodeClient,
     AsoodeError,
@@ -54,6 +55,13 @@ _CAPABILITIES = Capabilities(
     supports_labels=True,
     # POST /tasks/:taskId/attach, multipart
     supports_attachments=True,
+    # change-title / change-description / change-priority / set-date / estimated
+    supports_fields=True,
+    # POST /tasks/:id/member/add {recordId, isGroup}, resolved against the
+    # project's members by email, username or full name.
+    supports_assignees=True,
+    # parentId on create, and convert-to-task to promote.
+    supports_subtasks=True,
     states=tuple(STATE_TO_ORDINAL),
 )
 
@@ -167,10 +175,12 @@ class AsoodeProvider:
     def create_task(
         self, container_id: str, group_id: str | None, title: str, *,
         description: str = "", external_ref: str | None = None,
+        parent_id: str | None = None,
     ) -> RemoteTask:
         list_id = group_id or self._first_group(container_id)
         remote = self.client.create_task(
             list_id, title, description=description, external_ref=external_ref,
+            parent_id=parent_id,
         )
         remote_id = (remote or {}).get("id")
         if not remote_id:
@@ -192,6 +202,131 @@ class AsoodeProvider:
 
     def comment(self, task_id: str, body: str) -> None:
         self.client.comment(task_id, body)
+
+    def update_fields(self, task_id: str, fields: dict) -> None:
+        """One route per field - asoode has no general task update.
+
+        A failure partway leaves the earlier fields applied, which is fine:
+        every route here is idempotent, so the retried flush re-applies the
+        lot and lands on the same result. Dates are only ever SET: SetDateDto
+        takes optional dates and `set_dates` drops None, so clearing a planned
+        date stays local. That is a platform limit, noted rather than faked.
+        """
+        if fields.get("title"):
+            self.client.change_title(task_id, fields["title"])
+        if "description" in fields:
+            self.client.change_description(task_id, fields["description"] or "")
+        if fields.get("priority") is not None:
+            self.client.change_priority(
+                task_id, PRIORITY_TO_OBJECTIVE.get(int(fields["priority"]), 1),
+            )
+        dates = {}
+        for local, remote in (("begin_at", "beginAt"), ("end_at", "endAt"), ("due_at", "dueAt")):
+            value = fields.get(local)
+            if value is not None:
+                dates[remote] = value.isoformat() if hasattr(value, "isoformat") else str(value)
+        if dates:
+            self.client.set_dates(task_id, **dates)
+        if "estimated_minutes" in fields:
+            self.client.set_estimate(task_id, int(fields["estimated_minutes"] or 0))
+
+    def sync_labels(
+        self, task_id: str, container_id: str, add: list[str], remove: list[str],
+    ) -> None:
+        """Labels are board entities attached by id, exactly as role labels are,
+        so this resolves each title on the board and creates it only when absent.
+        Role labels carry the `agent:` prefix and are never touched here."""
+        add = [l.strip() for l in add if l and l.strip() and not l.startswith(ROLE_LABEL_PREFIX)]
+        remove = [l.strip() for l in remove if l and l.strip() and not l.startswith(ROLE_LABEL_PREFIX)]
+        if not add and not remove:
+            return
+        board = self.client.fetch_work_package(container_id) or {}
+        existing = {
+            (lbl.get("title") or "").strip().lower(): lbl.get("id")
+            for lbl in (board.get("labels") or [])
+            if lbl.get("id")
+        }
+        for title in remove:
+            label_id = existing.get(title.lower())
+            if label_id:
+                with contextlib.suppress(AsoodeError):
+                    self.client.remove_task_label(task_id, label_id)
+        for title in add:
+            label_id = existing.get(title.lower())
+            if not label_id:
+                created = self.client.create_label(container_id, title) or {}
+                label_id = created.get("id") or (created.get("data") or {}).get("id")
+                if label_id:
+                    existing[title.lower()] = label_id
+            if not label_id:
+                continue
+            try:
+                self.client.add_task_label(task_id, label_id)
+            except AsoodeError as e:
+                # TaskLabel is unique per (task, label): a retried flush lands
+                # on "already exists", which is the state we wanted.
+                if "already exists" not in str(e):
+                    raise
+
+    def set_assignee(
+        self, task_id: str, container_id: str, assignee: str | None,
+        previous: str | None = None,
+    ) -> None:
+        """Resolve a free-text assignee against the project's members.
+
+        The local store holds a name; asoode wants a user id. The match is by
+        id, email, username or full name, case-insensitively, against
+        `POST /projects/:id/fetch`'s members. Nobody matching means nothing is
+        sent - a local assignee asoode does not know is not a failure.
+        """
+        members = self._members(container_id) if (assignee or previous) else []
+        wanted = _match_member(members, assignee) if assignee else None
+        if previous:
+            old = _match_member(members, previous)
+            if old and old != wanted:
+                with contextlib.suppress(AsoodeError):
+                    self.client.remove_task_member(task_id, old)
+        if wanted:
+            self.client.add_task_member(task_id, wanted)
+
+    def promote(self, task_id: str) -> None:
+        """POST /tasks/:id/convert-to-task."""
+        self.client.convert_to_task(task_id)
+
+    def remove_attachment(self, task_id: str, filename: str) -> None:
+        """Attach returns no id, so the detail is read and matched by title."""
+        wanted = (filename or "").strip().lower()
+        if not wanted:
+            return
+        detail = self.client.task_detail(task_id) or {}
+        for attachment in detail.get("attachments") or []:
+            if (attachment.get("title") or "").strip().lower() == wanted and attachment.get("id"):
+                self.client.remove_attachment(attachment["id"])
+
+    def _members(self, container_id: str) -> list[dict]:
+        """The people who can be assigned on this board's project."""
+        board = self.client.fetch_work_package(container_id) or {}
+        project_id = board.get("projectId")
+        if not project_id:
+            return []
+        project = self.client.fetch_project(project_id) or {}
+        people = []
+        for member in project.get("members") or []:
+            if member.get("isGroup"):
+                continue
+            user = member.get("user") or member.get("member") or {}
+            record_id = member.get("recordId") or user.get("id")
+            if not record_id:
+                continue
+            people.append({
+                "id": record_id,
+                "email": user.get("email"),
+                "username": user.get("username"),
+                "name": " ".join(
+                    part for part in (user.get("firstName"), user.get("lastName")) if part
+                ),
+            })
+        return people
 
     def attach(self, task_id: str, filename: str, content: bytes,
                content_type: str | None = None) -> None:
@@ -320,3 +455,16 @@ class AsoodeProvider:
             ),
             tasks=tuple(tasks),
         )
+
+
+def _match_member(members: list[dict], text: str | None) -> str | None:
+    """The recordId whose id, email, username or full name equals `text`."""
+    wanted = (text or "").strip().lower()
+    if not wanted:
+        return None
+    for person in members:
+        for key in ("id", "email", "username", "name"):
+            value = (person.get(key) or "").strip().lower()
+            if value and value == wanted:
+                return person["id"]
+    return None

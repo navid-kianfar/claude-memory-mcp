@@ -1078,9 +1078,13 @@ def _task_create(params, body, query):
         labels=body.get("labels") or [],
         assignee=body.get("assignee"),
         due_at=body.get("due_at"),
+        begin_at=body.get("begin_at"),
+        end_at=body.get("end_at"),
         estimated_minutes=body.get("estimated_minutes"),
         parent_id=body.get("parent_id"),
         source=TaskSource(source),
+        role=(body.get("role") or "").strip() or None,
+        target=body.get("target"),
     )
     task = container.task_service.create(req)
     return {"status": "ok", "task": task.model_dump(mode="json")}
@@ -1114,6 +1118,8 @@ def _task_update(params, body, query):
         begin_at=body.get("begin_at"),
         end_at=body.get("end_at"),
         estimated_minutes=body.get("estimated_minutes"),
+        # "" clears the role; absent leaves it alone - same contract as the tool.
+        role=body["role"] if "role" in body else None,
     )
     task, changed = container.task_service.update(req)
     return {"status": "ok", "task": task.model_dump(mode="json"), "changed": changed}

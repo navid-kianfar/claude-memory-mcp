@@ -21,7 +21,9 @@ from typing import Any
 
 import httpx
 
-from memory_mcp.providers.base import ProviderAuthError, ProviderError
+from memory_mcp.providers.base import (
+    ProviderAuthError, ProviderError, TransientProviderError,
+)
 
 from memory_mcp.asoode import get_endpoints, get_pat
 
@@ -43,6 +45,13 @@ STATE_TO_ORDINAL = {
     "blocker": 9,
 }
 ORDINAL_TO_STATE = {v: k for k, v in STATE_TO_ORDINAL.items()}
+
+# Local priority (0 = normal .. 3 = highest) onto asoode's five-step
+# WorkPackageTaskObjectiveValue (app.enum.ts:301, 1 = BarelyValuable .. 5 =
+# ExtremelyValuable). 0 maps to asoode's own default (schema.prisma: @default(1))
+# so an untouched local task and an untouched remote one agree.
+PRIORITY_TO_OBJECTIVE = {0: 1, 1: 2, 2: 4, 3: 5}
+OBJECTIVE_TO_PRIORITY = {1: 0, 2: 1, 3: 1, 4: 2, 5: 3}
 
 # OperationResult.status (app.enum.ts) - 2 is Success; the rest are why not.
 _STATUS_MESSAGE = {
@@ -70,6 +79,10 @@ class AsoodeError(ProviderError):
 
 class AsoodeAuthError(AsoodeError, ProviderAuthError):
     """The PAT is missing, revoked, expired, or not accepted."""
+
+
+class AsoodeTransientError(AsoodeError, TransientProviderError):
+    """asoode could not be reached, or answered 5xx. Retry later; do not count it."""
 
 
 class AsoodeClient:
@@ -106,13 +119,17 @@ class AsoodeClient:
             with httpx.Client(timeout=self._timeout) as client:
                 resp = client.post(self._base + path, json=body or {}, headers=headers)
         except httpx.HTTPError as e:
-            raise AsoodeError(f"asoode unreachable ({self._base}): {e}") from e
+            raise AsoodeTransientError(f"asoode unreachable ({self._base}): {e}") from e
 
         if resp.status_code in (401, 403):
             raise AsoodeAuthError(
                 f"asoode rejected the PAT ({resp.status_code}) on {path}. "
                 "It may be revoked or expired - reissue it in Profile → Access "
                 "Tokens and store it with `memory-mcp asoode set-pat`."
+            )
+        if resp.status_code >= 500:
+            raise AsoodeTransientError(
+                f"asoode {resp.status_code} on {path}: {resp.text[:300]}"
             )
         if resp.status_code >= 400:
             raise AsoodeError(f"asoode {resp.status_code} on {path}: {resp.text[:300]}")
@@ -277,6 +294,58 @@ class AsoodeClient:
             f"/tasks/{task_id}/change-description", {"description": description}
         )
 
+    def change_title(self, task_id: str, title: str) -> Any:
+        """POST /tasks/:id/change-title {title} (tasks.controller.ts:101)."""
+        return self._post(f"/tasks/{task_id}/change-title", {"title": title})
+
+    def set_estimate(self, task_id: str, minutes: int) -> Any:
+        """POST /tasks/:id/estimated {estimatedTime} - MINUTES, which is what
+        the board's formatMinutes() renders (WpBoardCard.tsx:298)."""
+        return self._post(f"/tasks/{task_id}/estimated", {"estimatedTime": int(minutes)})
+
+    def task_detail(self, task_id: str) -> dict:
+        """POST /tasks/:id/detail - the full view model: members, labels,
+        attachments, timeSpents, subTasks, externalRef."""
+        return self._post(f"/tasks/{task_id}/detail") or {}
+
+    def find_task_by_external_ref(self, package_id: str, external_ref: str) -> dict | None:
+        """POST /tasks/by-external-ref {packageId, externalRef}, or None."""
+        try:
+            return self._post(
+                "/tasks/by-external-ref",
+                {"packageId": package_id, "externalRef": external_ref},
+            ) or None
+        except AsoodeError as e:
+            if "not found" in str(e):
+                return None
+            raise
+
+    def convert_to_task(self, task_id: str) -> Any:
+        """POST /tasks/:id/convert-to-task - a sub-task becomes top-level."""
+        return self._post(f"/tasks/{task_id}/convert-to-task")
+
+    def add_task_member(self, task_id: str, record_id: str, is_group: bool = False) -> Any:
+        """POST /tasks/:id/member/add {recordId, isGroup}. A repeat is
+        reported as `already exists` by the service, which callers treat as done."""
+        try:
+            return self._post(
+                f"/tasks/{task_id}/member/add",
+                {"recordId": record_id, "isGroup": bool(is_group)},
+            )
+        except AsoodeError as e:
+            if "already exists" in str(e):
+                return None
+            raise
+
+    def remove_task_member(self, task_id: str, record_id: str) -> Any:
+        """POST /tasks/:taskId/member/:id/remove - `:id` is the user/group
+        recordId, not the TaskMember row (tasks.service.ts, BUG-MEMBER-01)."""
+        return self._post(f"/tasks/{task_id}/member/{record_id}/remove")
+
+    def remove_attachment(self, attachment_id: str) -> Any:
+        """POST /tasks/attachment/:id/remove."""
+        return self._post(f"/tasks/attachment/{attachment_id}/remove")
+
     def attach(self, task_id: str, filename: str, content: bytes,
                content_type: str | None = None) -> Any:
         """POST /tasks/:taskId/attach - multipart, and the field is `files`.
@@ -293,9 +362,11 @@ class AsoodeClient:
                     f"{self._base}/tasks/{task_id}/attach", files=files, headers=headers,
                 )
         except httpx.HTTPError as e:
-            raise AsoodeError(f"asoode unreachable ({self._base}): {e}") from e
+            raise AsoodeTransientError(f"asoode unreachable ({self._base}): {e}") from e
         if resp.status_code in (401, 403):
             raise AsoodeAuthError(f"asoode rejected the PAT ({resp.status_code}) on attach")
+        if resp.status_code >= 500:
+            raise AsoodeTransientError(f"asoode {resp.status_code} on attach: {resp.text[:200]}")
         if resp.status_code >= 400:
             raise AsoodeError(f"asoode {resp.status_code} on attach: {resp.text[:200]}")
         return resp.json() if resp.content else {}

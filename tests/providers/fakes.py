@@ -51,6 +51,11 @@ class FakeProvider:
         self.change_queries: list[object] = []
         self.role_labels: list[tuple] = []
         self.created_spaces: list[str] = []
+        self.field_updates: list[tuple[str, dict]] = []
+        self.label_syncs: list[tuple[str, str, list, list]] = []
+        self.assignees: list[tuple[str, str | None, str | None]] = []
+        self.promoted: list[str] = []
+        self.attachments_removed: list[tuple[str, str]] = []
         self._n = 0
 
     # ---------- seeding ----------
@@ -110,6 +115,7 @@ class FakeProvider:
             supports_independent_state=True, supports_time_tracking=True,
             supports_attachments=True, supports_archive=True,
             supports_change_feed=True, supports_labels=True,
+            supports_fields=True, supports_assignees=True, supports_subtasks=True,
             states=STATES,
         )
 
@@ -178,7 +184,8 @@ class FakeProvider:
         }
         return self.fetch_container(cid)
 
-    def create_task(self, container_id, group_id, title, *, description="", external_ref=None):
+    def create_task(self, container_id, group_id, title, *, description="", external_ref=None,
+                    parent_id=None):
         self._require_container(container_id)
         if external_ref:
             for t in self._tasks.values():
@@ -191,10 +198,11 @@ class FakeProvider:
         self._tasks[tid] = {
             "id": tid, "container": container_id, "group": group, "title": title,
             "description": description, "state": "todo", "ref": external_ref,
+            "parent": parent_id, "labels": set(), "assignee": None,
         }
         self.created_tasks.append({"container_id": container_id, "list_id": group,
                                    "title": title, "external_ref": external_ref,
-                                   "description": description})
+                                   "description": description, "parent_id": parent_id})
         return RemoteTask(id=tid, title=title, state="todo", description=description,
                           group_id=group, external_ref=external_ref)
 
@@ -228,6 +236,36 @@ class FakeProvider:
     def set_role_label(self, task_id, container_id, role):
         self._require_task(task_id)["role_label"] = role
         self.role_labels.append((task_id, container_id, role))
+
+    def update_fields(self, task_id, fields):
+        task = self._require_task(task_id)
+        if fields.get("title"):
+            task["title"] = fields["title"]
+        if "description" in fields:
+            task["description"] = fields["description"] or ""
+        for key in ("priority", "due_at", "begin_at", "end_at", "estimated_minutes"):
+            if key in fields:
+                task[key] = fields[key]
+        self.field_updates.append((task_id, dict(fields)))
+
+    def sync_labels(self, task_id, container_id, add, remove):
+        task = self._require_task(task_id)
+        labels = task.setdefault("labels", set())
+        labels.difference_update(remove)
+        labels.update(add)
+        self.label_syncs.append((task_id, container_id, list(add), list(remove)))
+
+    def set_assignee(self, task_id, container_id, assignee, previous=None):
+        self._require_task(task_id)["assignee"] = assignee
+        self.assignees.append((task_id, assignee, previous))
+
+    def promote(self, task_id):
+        self._require_task(task_id)["parent"] = None
+        self.promoted.append(task_id)
+
+    def remove_attachment(self, task_id, filename):
+        self._require_task(task_id)
+        self.attachments_removed.append((task_id, filename))
 
     def changed_containers_since(self, since):
         """Everything, always - a fake has no clock worth trusting."""

@@ -44,10 +44,19 @@ class SessionService:
     def start(self, project: str) -> SessionContext:
         session_id = str(uuid.uuid4())
 
-        # Auto-close orphans
+        # Auto-close orphans. Bookkeeping only: a session with no ended_at may
+        # be a crashed one OR a live one on another client of this daemon, and
+        # this cannot tell them apart. What it can tell apart is a claim whose
+        # lease has run out - a live session refreshes its lease on every
+        # mutation - so the tasks and clocks of a session that truly never came
+        # back are released and stopped below, and nobody else's are touched.
         orphans = self._session_repo.orphaned(project)
         for orphan_id in orphans:
             self._session_repo.end(project, orphan_id, AUTO_CLOSE_SUMMARY, 0, 0)
+        try:
+            swept = self._task_service.sweep_expired(project)
+        except Exception:  # noqa: BLE001 - a sweep must never stop a session starting
+            swept = {"released": [], "clocks_stopped": []}
 
         self._session_repo.insert(project, session_id)
         self._project_repo.touch(project)
@@ -96,6 +105,8 @@ class SessionService:
             active_sprint=active_sprint,
             recent_decisions=recent_decisions,
             orphaned_sessions_closed=len(orphans),
+            expired_claims_released=len(swept["released"]),
+            stale_clocks_stopped=len(swept["clocks_stopped"]),
             pending_adaptations=pending,
             pending_instructions=adaptation_brief(project, pending),
             queued_tasks=queued_tasks,
@@ -156,11 +167,14 @@ class SessionService:
     ) -> dict:
         self._session_repo.end(project, session_id, summary, memories_created, memories_accessed)
         # Hand back whatever this session was holding, so its tasks are
-        # available immediately instead of waiting out the claim lease.
-        released = self._task_service.release_session(project, session_id)
+        # available immediately instead of waiting out the claim lease - and
+        # stop every clock it started, so ending a session can never leave a
+        # task clocking. The stretches are mirrored like any other.
+        ended = self._task_service.end_session(project, session_id)
         return {
             "status": "ok",
             "session_id": session_id,
             "summary": summary,
-            "tasks_released": released,
+            "tasks_released": ended["released"],
+            "clocks_stopped": ended["clocks_stopped"],
         }

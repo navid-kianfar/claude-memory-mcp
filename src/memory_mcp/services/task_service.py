@@ -9,8 +9,21 @@ That prompt-contract is the feature; the storage is the easy part.
 Everything here works with no external system attached. Phase 2 mirrors tasks to
 an asoode board through an outbox, but a missing or unreachable asoode may only
 ever mean "mirroring is paused" - never a degraded local task store.
+
+THE MIRROR CONTRACT, stated once because it was missed one layer at a time: the
+local write happens first and always; then, when the project is bound, EVERY
+mutation the platform can represent enqueues an outbox op - state, fields,
+labels, assignee, parent, comments, attachments, time, archive, delete. A
+mutation that the board cannot see is a gap, not a simplification.
+
+THE CLOCK CONTRACT, same reason: every path that ends a stretch of work closes
+the open time entry and queues it for mirroring - stop, done, any state change
+away from in_progress, release, session end, archive. A clock that only the
+explicit `stop` could close was how a finished task kept ticking for hours.
 """
 
+import contextlib
+import contextvars
 import threading
 import uuid
 
@@ -36,6 +49,23 @@ CLAIM_LEASE_MINUTES = 30
 
 # How many candidates claim_next will try before giving up for this call.
 _CLAIM_ATTEMPTS = 10
+
+# Fields a change to which is worth a remote call. Position, claim and lease are
+# local bookkeeping; everything else here has a field on the board.
+_MIRRORED_FIELDS = frozenset({
+    "state", "title", "description", "priority", "assignee", "labels",
+    "due_at", "begin_at", "end_at", "estimated_minutes",
+})
+
+# Set while an INBOUND write is being applied, so it is not mirrored straight
+# back out. A contextvar rather than an attribute on the service: the service is
+# a process-wide singleton, and blanking its outbox for the duration of an
+# import silently dropped the mirror of every concurrent tool call on every
+# project - and, when two imports interleaved, left mirroring dead until the
+# daemon restarted.
+_MIRROR_SUPPRESSED: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "mirror_suppressed", default=0,
+)
 
 
 class TaskService:
@@ -167,7 +197,7 @@ class TaskService:
         - the exact shape that produced 54 duplicates once already. So the nudge
         waits for the commit.
         """
-        if self._outbox is None:
+        if self._outbox is None or _MIRROR_SUPPRESSED.get():
             return
         try:
             self._outbox.enqueue(project, task_id, op, payload)
@@ -185,6 +215,19 @@ class TaskService:
         # False means there is no transaction to wait for - mirror now, as ever.
         if not after_commit(_nudge, key=("mirror", project)):
             _nudge()
+
+    @contextlib.contextmanager
+    def suppress_mirroring(self):
+        """Apply inbound writes without mirroring them back out.
+
+        Scoped to the calling context - the importer's own thread - so a tool
+        call landing on another thread meanwhile keeps its mirror. Re-entrant.
+        """
+        token = _MIRROR_SUPPRESSED.set(_MIRROR_SUPPRESSED.get() + 1)
+        try:
+            yield
+        finally:
+            _MIRROR_SUPPRESSED.reset(token)
 
     def _resolve_target(self, project: str, target: str | None) -> int | None:
         """A task's board, or None for the project's default. Raises if the name
@@ -289,9 +332,11 @@ class TaskService:
 
         task = self._task_repo.update(request.project, request.task_id, fields)
 
+        state_changed = request.state is not None and request.state != before.state
+        closed: list = []
         # done_at follows the state, and is stamped from the DB clock so every
         # timestamp in the file comes from one source.
-        if request.state is not None and request.state != before.state:
+        if state_changed:
             if request.state == TaskState.DONE and task.done_at is None:
                 task = self._task_repo.mark_done(
                     request.project, request.task_id, TaskState.DONE.value,
@@ -300,6 +345,15 @@ class TaskService:
                 task = self._task_repo.update(
                     request.project, request.task_id, {"done_at": None},
                 )
+            # Leaving in_progress - to done, paused, blocked, anything - is the
+            # work stopping, so the clock stops with it. This was the reported
+            # bug: a task moved to done through update kept clocking forever,
+            # because only `stop` and `done` knew about the clock.
+            if before.state == TaskState.IN_PROGRESS:
+                closed = self._stop_running(request.project, request.task_id)
+            # A finished task is nobody's work any more, whichever verb finished it.
+            if request.state == TaskState.DONE:
+                self._task_repo.release(request.project, request.task_id, None)
 
         changed = sorted(fields.keys())
         self._touch_lease(request.project, request.task_id)
@@ -309,14 +363,22 @@ class TaskService:
                 "changed": changed,
                 "state_from": before.state.value,
                 "state_to": task.state.value,
+                "clock_stopped": bool(closed),
             },
         )
-        # Only what asoode can actually represent. A local-only edit (position,
-        # claim, lease) must not queue a mirror that would be a no-op round trip.
-        if {"state", "title", "description"} & set(changed):
-            self._enqueue(request.project, request.task_id, "update", {
-                "state": task.state.value, "changed": changed,
-            })
+        # Every field the board can hold. A local-only edit (position, claim,
+        # lease) must not queue a mirror that would be a no-op round trip. The
+        # payload carries the previous labels and assignee so the flusher can
+        # take off what was removed without touching what a human added.
+        if _MIRRORED_FIELDS & set(changed):
+            payload: dict = {"state": task.state.value, "changed": changed}
+            if "labels" in changed:
+                payload["labels_before"] = list(before.labels)
+            if "assignee" in changed:
+                payload["assignee_before"] = before.assignee
+            self._enqueue(request.project, request.task_id, "update", payload)
+        if closed:
+            self._enqueue(request.project, request.task_id, "time", {})
         if role_changed:
             # Its own op: the update op reconciles state, and the role label is a
             # separate remote call that must retry on its own if it fails.
@@ -405,9 +467,14 @@ class TaskService:
         return self._attachments.list_for(project, task_id)
 
     def detach(self, project: str, attachment_id: str) -> bool:
-        """Remove an attachment. The blob goes only when nothing else uses it."""
+        """Remove an attachment. The blob goes only when nothing else uses it.
+
+        The remote copy goes too: an attachment removed here and still on the
+        board is the same divergence as one never sent.
+        """
         if self._attachments is None:
             return False
+        found = self._attachments.get(project, attachment_id)
         orphan = self._attachments.delete(project, attachment_id)
         if orphan:
             from pathlib import Path as _Path
@@ -416,6 +483,13 @@ class TaskService:
                 _Path(orphan).unlink(missing_ok=True)
             except OSError:
                 pass
+        if found is not None:
+            attachment = found[0]
+            self._record(project, attachment.task_id, "task_detach",
+                         {"filename": attachment.filename})
+            self._enqueue(project, attachment.task_id, "detach", {
+                "filename": attachment.filename, "attachment_id": attachment.id,
+            })
         return True
 
     def set_link(self, project: str, task_id: str, link_id: int | None) -> Task:
@@ -478,19 +552,38 @@ class TaskService:
             return None
 
     def release(self, project: str, task_id: str, session_id: str | None = None) -> Task:
-        """Give a claim back so another session can take the task."""
+        """Give a claim back so another session can take the task.
+
+        Handing a task back means not working on it, so its clock stops and the
+        stretch is mirrored. The state is left alone: an in_progress task with
+        no holder and no running clock is exactly what "abandoned mid-way" looks
+        like, and the next session picks it up as actionable.
+        """
         self._require(project, task_id)
         if session_id:
             self._session_repo.touch(project, session_id)
         released = self._task_repo.release(project, task_id, session_id)
         if released:
-            self._record(project, task_id, "task_release", {"session_id": session_id})
+            closed = self._stop_running(project, task_id)
+            self._record(project, task_id, "task_release",
+                         {"session_id": session_id, "clock_stopped": bool(closed)})
+            if closed:
+                self._enqueue(project, task_id, "time", {})
         return self._require(project, task_id)
 
     def release_session(self, project: str, session_id: str) -> int:
         """Release everything a session holds. Called when the session ends, so a
         session that stops without releasing does not park its tasks until the
-        lease runs out."""
+        lease runs out.
+
+        Stops that session's clocks too - the ones on tasks it holds AND the ones
+        it started without claiming - so ending a session can never leave a task
+        clocking. Each closed stretch is mirrored like any other."""
+        return self.end_session(project, session_id)["released"]
+
+    def end_session(self, project: str, session_id: str) -> dict:
+        """release_session, reporting both halves: claims released and the task
+        ids whose clocks were stopped."""
         held = self._task_repo.claimed_by_session(project, session_id)
         count = self._task_repo.release_session(project, session_id)
         for task in held:
@@ -498,7 +591,49 @@ class TaskService:
                 project, task.id, "task_release",
                 {"session_id": session_id, "reason": "session_end"},
             )
-        return count
+        stopped = self.stop_session_clocks(project, session_id, extra=[t.id for t in held])
+        return {"released": count, "clocks_stopped": stopped}
+
+    def stop_session_clocks(
+        self, project: str, session_id: str, extra: list[str] | None = None,
+    ) -> list[str]:
+        """Close every clock this session started. Returns the task ids stopped."""
+        task_ids = list(dict.fromkeys(
+            self._task_repo.running_task_ids_for_session(project, session_id)
+            + list(extra or []),
+        ))
+        stopped = []
+        for task_id in task_ids:
+            closed = self._stop_running(project, task_id)
+            if not closed:
+                continue
+            stopped.append(task_id)
+            self._record(project, task_id, "task_stop",
+                         {"session_id": session_id, "reason": "session_end",
+                          "entries": [e.id for e in closed]})
+            self._enqueue(project, task_id, "time", {})
+        return stopped
+
+    def sweep_expired(self, project: str) -> dict:
+        """Clean up after sessions that never came back.
+
+        A claim whose lease has run out is already ignored by the next claim,
+        but the clock its holder left running was not - it kept counting, and
+        was never mirrored because only a closed stretch is sent. Called at
+        session start. Only EXPIRED leases: a live session refreshes its lease
+        on every mutation, so nothing here can touch a task someone is on.
+        """
+        released, clocks = [], []
+        for task in self._task_repo.expired_claims(project):
+            closed = self._stop_running(project, task.id)
+            self._task_repo.release(project, task.id, None)
+            self._record(project, task.id, "task_lease_expired",
+                         {"session_id": task.claimed_by, "clock_stopped": bool(closed)})
+            released.append(task.id)
+            if closed:
+                clocks.append(task.id)
+                self._enqueue(project, task.id, "time", {})
+        return {"released": released, "clocks_stopped": clocks}
 
     def _touch_lease(self, project: str, task_id: str) -> None:
         """Push out the lease of a claimed task whenever it is worked on.
@@ -539,19 +674,36 @@ class TaskService:
 
     # ---------- time tracking ----------
 
-    def start(self, project: str, task_id: str) -> TaskDetail:
+    def start(
+        self, project: str, task_id: str, session_id: str | None = None,
+    ) -> TaskDetail:
         """Clock on. Moves the task to in_progress, reopening it if it was closed.
 
         Idempotent: a task that is already running keeps its existing entry
         rather than opening a second, overlapping one.
+
+        With a `session_id`, starting IS claiming: the session that clocks on
+        holds the task, so its end hands the task back and stops the clock.
+        Never steals - a task held by another session on a live lease stays
+        theirs, and this session's clock still runs against it.
+
+        The state change is mirrored like any other. It was not, once: the board
+        showed To Do for every task an agent was actively working, until done.
         """
         task = self._require(project, task_id)
 
         running = self._task_repo.running_entry(project, task_id)
         if running is None:
-            self._task_repo.start_entry(project, str(uuid.uuid4()), task_id)
+            self._task_repo.start_entry(project, str(uuid.uuid4()), task_id, session_id)
 
-        if task.state != TaskState.IN_PROGRESS:
+        if session_id:
+            with contextlib.suppress(Exception):
+                self._session_repo.touch(project, session_id)
+            if task.claimed_by != session_id:
+                self._task_repo.claim(project, task_id, session_id, CLAIM_LEASE_MINUTES)
+
+        state_changed = task.state != TaskState.IN_PROGRESS
+        if state_changed:
             fields: dict = {"state": TaskState.IN_PROGRESS.value}
             if task.state in _CLOSED_STATES:
                 fields["done_at"] = None
@@ -560,8 +712,13 @@ class TaskService:
         self._touch_lease(project, task_id)
         self._record(
             project, task_id, "task_start",
-            {"state_from": task.state.value, "resumed": running is not None},
+            {"state_from": task.state.value, "resumed": running is not None,
+             "session_id": session_id},
         )
+        if state_changed:
+            self._enqueue(project, task_id, "state", {
+                "state": TaskState.IN_PROGRESS.value,
+            })
         return self.detail(project, task_id)
 
     def stop(self, project: str, task_id: str) -> TaskDetail:
@@ -569,44 +726,46 @@ class TaskService:
         about whether the work is finished, paused, or blocked - the caller sets
         that explicitly."""
         self._require(project, task_id)
-        running = self._task_repo.running_entry(project, task_id)
-        if running is not None:
-            self._task_repo.stop_entry(project, running.id)
+        closed = self._stop_running(project, task_id)
+        if closed:
             self._touch_lease(project, task_id)
-            self._record(project, task_id, "task_stop", {"entry_id": running.id})
+            self._record(project, task_id, "task_stop",
+                         {"entries": [e.id for e in closed]})
             # Inside the branch: stopping a clock that was never running closes
             # nothing, so there is no stretch to send. Only a CLOSED stretch is
             # worth sending - an open one has no duration and would have to be
             # corrected remotely later.
-            self._enqueue(project, task_id, "time", {"entry_id": running.id})
+            self._enqueue(project, task_id, "time", {"entry_id": closed[0].id})
         return self.detail(project, task_id)
 
-    def _stop_running(self, project: str, task_id: str) -> TaskTimeEntry | None:
-        """Close an open entry, so a task can never be left clocking forever."""
-        running = self._task_repo.running_entry(project, task_id)
-        if running is None:
-            return None
-        return self._task_repo.stop_entry(project, running.id)
+    def _stop_running(self, project: str, task_id: str) -> list[TaskTimeEntry]:
+        """Close EVERY open entry, so a task can never be left clocking.
+
+        All of them, not the newest: two starts racing past each other opened
+        two, and closing one left the other counting for good.
+        """
+        return self._task_repo.stop_all_entries(project, task_id)
 
     # ---------- close ----------
 
     def done(self, project: str, task_id: str, note: str | None = None) -> TaskDetail:
         task = self._require(project, task_id)
-        self._stop_running(project, task_id)
+        closed = self._stop_running(project, task_id)
         self._task_repo.mark_done(project, task_id, TaskState.DONE.value)
-        if note and note.strip():
-            self._task_repo.add_comment(
-                project, str(uuid.uuid4()), task_id, note.strip(),
-                TaskCommentKind.NOTE.value, None,
-            )
         # A finished task is nobody's work any more: drop the claim rather than
         # letting it sit held until the lease runs out.
         self._task_repo.release(project, task_id, None)
         self._record(
             project, task_id, "task_done",
-            {"state_from": task.state.value, "note": bool(note)},
+            {"state_from": task.state.value, "note": bool(note),
+             "clock_stopped": bool(closed)},
         )
         self._enqueue(project, task_id, "state", {"state": TaskState.DONE.value})
+        if note and note.strip():
+            # Through comment(), so the note reaches the board like any other
+            # comment. Written straight to the table, it sat unmirrored until
+            # some later comment on the same task happened to flush it.
+            self.comment(project, task_id, note, kind=TaskCommentKind.NOTE.value)
         # done() stops the clock too, so the stretch it just closed needs sending.
         self._enqueue(project, task_id, "time", {})
         return self.detail(project, task_id)
@@ -627,6 +786,7 @@ class TaskService:
         self._record(
             project, task_id, "task_convert", {"was_child_of": task.parent_id},
         )
+        self._enqueue(project, task_id, "parent", {"parent_id": None})
         return promoted
 
     def delete(self, project: str, task_id: str) -> dict:
@@ -641,17 +801,32 @@ class TaskService:
             project, task_id, "task_delete",
             {"title": task.title, "state": task.state.value},
         )
+        # Where the card lives, read BEFORE the delete takes the mapping with
+        # it. asoode has no delete route, so the card is archived - it must not
+        # stay on the board as a live task nobody has locally.
+        remotes = self._outbox.remote_ids_for(project, task_id) if self._outbox else {}
         self._task_repo.hard_delete(project, task_id)
+        if remotes:
+            # After the delete: hard_delete clears the task's outbox rows.
+            self._enqueue(project, task_id, "delete", {
+                "remote": {str(link_id): rid for link_id, rid in remotes.items()},
+                "title": task.title,
+            })
         return {"status": "ok", "deleted": task_id, "title": task.title}
 
     def archive(self, project: str, task_id: str) -> Task:
         """Take a task out of the list. Never deleted, matching the memory
         store's soft delete, so an archived requirement can still be found."""
         self._require(project, task_id)
-        self._stop_running(project, task_id)
+        closed = self._stop_running(project, task_id)
         self._task_repo.release(project, task_id, None)
         task = self._task_repo.archive(project, task_id)
-        self._record(project, task_id, "task_archive", {"title": task.title})
+        self._record(project, task_id, "task_archive",
+                     {"title": task.title, "clock_stopped": bool(closed)})
+        # The stretch just closed goes first: archive is terminal, so nothing
+        # later would re-queue the minutes it left behind.
+        if closed:
+            self._enqueue(project, task_id, "time", {})
         # The board keeps showing it otherwise: archived tasks are hidden from
         # the local list, so the two sides would diverge where nobody looks.
         self._enqueue(project, task_id, "archive", {"archived": True})

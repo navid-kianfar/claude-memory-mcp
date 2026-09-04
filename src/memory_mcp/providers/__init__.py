@@ -15,6 +15,7 @@ from memory_mcp.providers.base import (
     RemoteTask,
     SpaceRef,
     TaskProvider,
+    TransientProviderError,
 )
 
 from memory_mcp.providers.registry import (
@@ -42,6 +43,7 @@ __all__ = [
     "Group",
     "ProviderError",
     "ProviderAuthError",
+    "TransientProviderError",
     "RemoteTask",
     "SpaceRef",
     "TaskProvider",

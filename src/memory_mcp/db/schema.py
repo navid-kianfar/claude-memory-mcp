@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 13
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -89,7 +89,11 @@ _TASK_DDL = (
         -- When this stretch was mirrored to the remote platform. A time entry
         -- has no externalRef to make the send idempotent, so "already sent" has
         -- to be remembered here or a retried flush double-counts the work.
-        mirrored_at TIMESTAMP
+        mirrored_at TIMESTAMP,
+        -- Which memory session clocked on (v13). NULL for a clock started from
+        -- the UI or a caller with no session. This is what lets a session end
+        -- stop exactly the clocks it started and no other session's.
+        session_id VARCHAR
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks (state)",
@@ -120,6 +124,18 @@ _TASK_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_task_attach_task ON task_attachments (task_id)",
     "CREATE INDEX IF NOT EXISTS idx_task_attach_id ON task_attachments (id)",
     "CREATE INDEX IF NOT EXISTS idx_task_time_task ON task_time_entries (task_id)",
+    # A task deleted here must not come back from the board (v13). The remote
+    # card is archived by the flusher, but until that lands - and forever, if
+    # the board fetch ever includes archived cards - a reconcile would see a
+    # card whose externalRef names a task it cannot find and treat it as new.
+    # The tombstone is how it tells "deleted here" from "created elsewhere".
+    """
+    CREATE TABLE IF NOT EXISTS task_tombstones (
+        task_id    VARCHAR PRIMARY KEY,
+        title      VARCHAR,
+        deleted_at TIMESTAMP DEFAULT current_timestamp
+    )
+    """,
 )
 
 
@@ -492,6 +508,40 @@ def migrate_v11_to_v12(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (12)")
 
 
+def migrate_v12_to_v13(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v12 -> v13: a clock remembers who started it, and a deleted
+    task leaves a tombstone.
+
+    `task_time_entries.session_id` is what lets memory_session_end stop exactly
+    the clocks its own session opened. Without it a session that started a task
+    and ended without finishing left the clock running forever - the reported
+    bug - because nothing could tell whose clock it was. Nullable: a clock
+    started from the UI has no session, and every existing row predates the
+    column.
+
+    `task_tombstones` records a hard delete so the inbound reconcile can tell a
+    card whose externalRef names a task deleted HERE from one created on another
+    machine. Before this the deleted card resurrected the task on the next read.
+
+    Both are added here AND to the fresh-create DDL, so a database created new and
+    one migrated to v13 have the same shape.
+    """
+    try:
+        conn.execute("ALTER TABLE task_time_entries ADD COLUMN session_id VARCHAR")
+    except Exception:
+        pass
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_tombstones (
+            task_id    VARCHAR PRIMARY KEY,
+            title      VARCHAR,
+            deleted_at TIMESTAMP DEFAULT current_timestamp
+        )
+        """
+    )
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (13)")
+
+
 def migrate_v9_to_v10(conn: duckdb.DuckDBPyConnection) -> None:
     """Migrate v9 -> v10: remember which comments have been mirrored.
 
@@ -594,6 +644,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 12:
         migrate_v11_to_v12(conn)
         version = 12
+    if version < 13:
+        migrate_v12_to_v13(conn)
+        version = 13
     return version
 
 

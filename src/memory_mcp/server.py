@@ -14,8 +14,11 @@ from fastmcp import FastMCP
 from memory_mcp.config import settings
 from memory_mcp.container import container
 from memory_mcp.context import (
+    current_memory_session,
     current_session_id, forget_session_project,
+    forget_memory_session,
     load_active_project, resolve_project, set_active_project,
+    remember_memory_session,
 )
 from memory_mcp.enforcement import rules_digest
 from memory_mcp.services.adaptation import adaptation_brief
@@ -61,7 +64,11 @@ parked. memory_session_start returns them as `queued_tasks`.
     session, then leave it alone. Do not start a task because it is in the list -
     the user decides what gets picked up and when.
   - When the user asks for one: memory_task_start, then memory_task_done.
-    memory_task_stop only stops the clock and leaves the state alone.
+    STOP THE CLOCK WHEN YOU STOP WORKING, every time: memory_task_done finishes
+    it, memory_task_update(state='paused'|'blocked'|...) stops the clock and
+    says why, memory_task_stop stops it and leaves the state alone. A task left
+    in_progress with a running clock at the end of a session is a bug in how
+    you worked, not in the task.
   - "Add a task to do X" means memory_task_add(title="X") and nothing else -
     keep doing what you were doing. Recording a requirement is precisely how the
     user avoids interrupting the work in progress.
@@ -74,7 +81,8 @@ parked. memory_session_start returns them as `queued_tasks`.
   - Out-of-scope work you noticed goes in with memory_task_add(source='claude').
   - Several sessions may share a project, so a task is taken by claiming it:
     memory_task_claim_next(session_id) ONLY when you have finished what you were
-    doing. A busy session must not claim. memory_session_end releases claims.
+    doing. A busy session must not claim. memory_session_end releases claims
+    and stops every clock this session started - so call it, always.
 
 WHEN A REQUEST HAS SEVERAL DELIVERABLES, record it before working it. Call
 memory_task_plan(request, tasks) with the user's wording verbatim and one task
@@ -107,11 +115,14 @@ asoode work package (a board), and the binding changes what the task list means.
   - WHEN A PROJECT IS BOUND, ITS BOARD IS THE WORK QUEUE. memory_session_start
     returns an `asoode` block and a brief saying to work it: take the
     highest-priority actionable task, memory_task_start it, mirror the state to
-    asoode, comment as you go, memory_task_done it, then take the next. This
-    deliberately inverts the "queued tasks are not instructions" rule above,
-    which still governs every UNBOUND project. Do not auto-start tasks in state
+    asoode, comment as you go, memory_task_done it, then take the next. Every
+    local change - state, fields, comments, attachments, time - mirrors to the
+    board on its own; there is nothing extra to call. This deliberately inverts
+    the "queued tasks are not instructions" rule above, which still governs
+    every UNBOUND project. Do not auto-start tasks in state
     blocked/blocker/paused/cancelled, and stop to ask when the work needs a
-    decision only the user can make.
+    decision only the user can make - and when you stop for that, stop the
+    clock too (memory_task_update state='blocked').
   - A task must carry enough detail to be implemented without the conversation:
     give memory_task_add a description stating the requirement, the constraint
     and the files involved, and comment on the task as you learn things. A bare
@@ -282,9 +293,11 @@ def memory_asoode_push(project: str | None = None, include_done: bool = True) ->
     Each task carries its local id as externalRef, so asoode returns the task
     that already exists rather than creating a second one.
 
-    STILL ONE-WAY, local -> asoode. Nothing reads asoode back, so a task created
-    or edited in asoode does not reach the local list. Never tell the user the
-    two sides are in sync.
+    Outbound: local -> asoode. The inbound half is memory_asoode_reconcile,
+    which runs automatically after every mirror and CREATES tasks added on the
+    board; a task edited on the board is not overwritten locally until the
+    two-sided conflict policy is decided. Do not tell the user the two sides
+    are in sync - say what each direction carries.
     """
     def _run():
         slug = _resolve(project)
@@ -407,6 +420,8 @@ def memory_task_plan(
                       involved. A bare title loses the detail the list exists for.
       priority        0-3, optional
       labels          list of strings, optional
+      role            which agent the task is for ('backend', 'frontend', ...),
+                      optional - a task with no role is claimable by anyone
       parent_index    index of an EARLIER item in this list, to hang a step off a
                       deliverable, optional
 
@@ -1227,9 +1242,16 @@ def memory_task_update(
     """Change a task. Only the fields you pass are touched.
 
     state is one of: todo, in_progress, done, paused, blocked, cancelled,
-    duplicate, incomplete, blocker. Setting it to done stamps done_at; moving it
-    back off done clears it. begin_at/end_at are the PLANNED window - actual
-    time comes from memory_task_start / memory_task_stop.
+    duplicate, incomplete, blocker. Any change AWAY from in_progress stops the
+    running clock and mirrors the stretch - so pausing or blocking a task is
+    the right way to stop working on it, and says why. Setting it to done also
+    releases the claim and stamps done_at; moving it back off done clears that.
+    begin_at/end_at are the PLANNED window - actual time comes from
+    memory_task_start / memory_task_stop.
+
+    Every field here reaches the board: title, description, priority, assignee
+    (matched to a member by email, username or full name), labels, dates and
+    estimate mirror on their own.
 
     `role` re-routes the task to an agent ('frontend', 'backend', ...); pass an
     empty string to clear it and let any agent claim it again.
@@ -1283,26 +1305,41 @@ def memory_task_comment(
 
 
 @mcp.tool()
-def memory_task_start(task_id: str, project: str | None = None) -> dict:
-    """Start the clock on a task and move it to in_progress.
+def memory_task_start(
+    task_id: str, session_id: str | None = None, project: str | None = None,
+) -> dict:
+    """Start the clock on a task, claim it for this session, and move it to
+    in_progress - locally and on the board, in the same call.
 
     Call this when the user has picked the task, not when you notice it. Safe to
     repeat: an already-running task keeps its open time entry rather than
     starting a second one. A finished task is reopened.
+
+    THE CLOCK YOU START HERE IS YOURS TO STOP. When the work ends, say how:
+    memory_task_done when it is finished; memory_task_update(state='paused' or
+    'blocked') when you stop for a decision or a blocker; memory_task_stop to
+    stop the clock and leave the state alone. memory_session_end stops whatever
+    is still running as a last resort - do not rely on it.
+
+    `session_id` is the one memory_session_start returned; it is remembered for
+    this connection, so passing it is only needed when several sessions share
+    one connection.
     """
     def _run():
         slug = _resolve(project)
-        return container.task_service.start(slug, task_id).model_dump(mode="json")
+        session = session_id or current_memory_session()
+        return container.task_service.start(slug, task_id, session).model_dump(mode="json")
     return _safe(_run)
 
 
 @mcp.tool()
 def memory_task_stop(task_id: str, project: str | None = None) -> dict:
-    """Stop the clock on a task.
+    """Stop the clock on a task, leaving its state alone.
 
-    The state is deliberately left as it is - stopping the clock says nothing
-    about whether the work is paused, blocked or finished. Say which with
-    memory_task_update(task_id, state=...) or memory_task_done(task_id).
+    Use it when the state already says the right thing. To say WHY the work
+    stopped, prefer memory_task_update(task_id, state='paused'|'blocked') or
+    memory_task_done(task_id) - both stop the clock themselves, so this is
+    never needed before them. The closed stretch mirrors to the board.
     """
     def _run():
         slug = _resolve(project)
@@ -1314,10 +1351,11 @@ def memory_task_stop(task_id: str, project: str | None = None) -> dict:
 def memory_task_done(
     task_id: str, note: str | None = None, project: str | None = None,
 ) -> dict:
-    """Mark a task done. Stops a running clock and stamps done_at.
+    """Mark a task done: stops the clock, releases the claim, stamps done_at,
+    and mirrors all three to the board.
 
     An optional note is stored as a comment on the task - what was actually
-    done, or what is left over.
+    done, or what is left over - and mirrors like any comment.
     """
     def _run():
         slug = _resolve(project)
@@ -1357,10 +1395,12 @@ def memory_task_convert(task_id: str, project: str | None = None) -> dict:
 def memory_task_delete(task_id: str, project: str | None = None) -> dict:
     """Delete a task permanently, with its comments and time entries.
 
-    This does NOT archive - the row is gone. Prefer memory_task_archive, which
-    takes a task out of the list but keeps it findable; use this only when the
-    user asks for the task to be removed for good. Any sub-tasks are promoted to
-    top-level rather than deleted along with it.
+    This does NOT archive - the row is gone, and time that was tracked but not
+    yet mirrored is lost with it. Prefer memory_task_archive, which takes a
+    task out of the list but keeps it findable; use this only when the user
+    asks for the task to be removed for good. Any sub-tasks are promoted to
+    top-level rather than deleted along with it. On a bound project the card is
+    archived on the board (asoode has no delete), so it cannot come back.
     """
     def _run():
         slug = _resolve(project)
@@ -1412,8 +1452,11 @@ def memory_task_claim_next(
             "project": slug,
             "task": task.model_dump(mode="json"),
             "next_step": (
-                "Call memory_task_start to clock on, then memory_task_done when "
-                "it is finished. memory_task_release hands it back untouched."
+                "Call memory_task_start to clock on, comment as you go, then "
+                "memory_task_done when it is finished - or "
+                "memory_task_update(state='paused'|'blocked') if you must stop "
+                "short, which also stops the clock. memory_task_release hands it "
+                "back and stops the clock without changing the state."
             ),
         }
     return _safe(_run)
@@ -1425,9 +1468,11 @@ def memory_task_release(
 ) -> dict:
     """Give a claimed task back so another session can pick it up.
 
-    Use this when you claimed something you are not going to do after all.
-    Passing session_id releases only your own claim, never another session's.
-    Finishing or archiving a task releases it for you.
+    Use this when you claimed something you are not going to do after all. It
+    stops the clock too - a task nobody holds is a task nobody is working on -
+    and leaves the state as it is. Passing session_id releases only your own
+    claim, never another session's. Finishing or archiving a task releases it
+    for you.
     """
     def _run():
         slug = _resolve(project)
@@ -1446,6 +1491,9 @@ def memory_session_start(project: str | None = None) -> dict:
         slug = _resolve(project)
         set_active_project(slug)
         ctx = container.session_service.start(slug)
+        # So memory_task_start can claim for this session without the id being
+        # threaded through every call.
+        remember_memory_session(ctx.session_id)
         return ctx.model_dump(mode="json")
     return _safe(_run)
 
@@ -1458,7 +1506,14 @@ def memory_session_end(
     memories_created: int = 0,
     memories_accessed: int = 0,
 ) -> dict:
-    """End a session and store its summary."""
+    """End a session and store its summary.
+
+    Also hands back every task this session claimed and stops every clock it
+    started, mirroring the stretches to the board - the result says how many
+    (`tasks_released`, `clocks_stopped`). A non-empty `clocks_stopped` means a
+    task was left in_progress without being finished or paused; say so in the
+    summary so the next session knows where it stands.
+    """
     def _run():
         result = container.session_service.end(
             _resolve(project), session_id, summary,
@@ -1470,6 +1525,7 @@ def memory_session_end(
         mcp_session = current_session_id()
         if mcp_session:
             forget_session_project(mcp_session)
+        forget_memory_session(session_id)
         return result
     return _safe(_run)
 

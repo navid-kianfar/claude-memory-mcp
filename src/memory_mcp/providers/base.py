@@ -55,6 +55,15 @@ class ProviderAuthError(ProviderError):
     """
 
 
+class TransientProviderError(ProviderError):
+    """The platform could not be reached, or answered with a server error.
+
+    Separate because retrying IS the fix: the flusher keeps the outbox row
+    without counting the attempt. Before this, five mutations during an outage
+    burned the five attempts a row gets and the pending change was dropped.
+    """
+
+
 @dataclass(frozen=True)
 class Capabilities:
     """What a platform can actually do, so shared code stops guessing.
@@ -88,8 +97,17 @@ class Capabilities:
     #: back to the full sweep rather than silently syncing nothing.
     supports_change_feed: bool = False
     #: A task can carry labels/tags. Used to show WHICH AGENT a card is for,
-    #: since no platform has a field for that. False means skip, not fail.
+    #: since no platform has a field for that, and to mirror the local labels.
+    #: False means skip, not fail.
     supports_labels: bool = False
+    #: Title, description, priority, planned dates and estimate can be changed
+    #: on an EXISTING task (`update_fields`). Without it an edit after creation
+    #: stays local, which is how a rename used to vanish silently.
+    supports_fields: bool = False
+    #: A task can be assigned to a person by name (`set_assignee`).
+    supports_assignees: bool = False
+    #: A task can be created under a parent and promoted out of one.
+    supports_subtasks: bool = False
     #: Local task states this platform can represent. A state outside this set is
     #: mapped to the nearest one by the provider, never dropped silently.
     states: tuple[str, ...] = ()
@@ -216,6 +234,7 @@ class TaskProvider(Protocol):
     def create_task(
         self, container_id: str, group_id: str | None, title: str, *,
         description: str = "", external_ref: str | None = None,
+        parent_id: str | None = None,
     ) -> RemoteTask:
         """Create a task inside a container.
 
@@ -226,6 +245,54 @@ class TaskProvider(Protocol):
         With `supports_external_ref`, repeating a create with the same ref MUST
         return the existing task rather than a duplicate - that property is what
         lets the flusher retry safely.
+
+        `parent_id` is the REMOTE id of the parent, when `supports_subtasks`;
+        a provider without sub-tasks ignores it rather than failing.
+        """
+
+    def update_fields(self, task_id: str, fields: dict) -> None:
+        """Apply changed fields to an existing task, in OUR vocabulary.
+
+        Keys: title, description, priority (0-3), due_at / begin_at / end_at
+        (datetimes, None to clear), estimated_minutes (int, None to clear).
+        Only the keys present are touched. Only called when `supports_fields`.
+        A provider IGNORES a key it cannot hold rather than failing: the local
+        edit has already happened, and a partial mirror beats none.
+        """
+
+    def sync_labels(
+        self, task_id: str, container_id: str, add: list[str], remove: list[str],
+    ) -> None:
+        """Attach `add` and detach `remove`, both by title.
+
+        Only called when `supports_labels`. Touches nothing outside the two
+        lists, so a label a human put on the card by hand survives a local
+        edit. Role labels (`agent:<role>`) are set_role_label's business and
+        never appear here.
+        """
+
+    def set_assignee(
+        self, task_id: str, container_id: str, assignee: str | None,
+        previous: str | None = None,
+    ) -> None:
+        """Assign the task to a person named by a free string - an email, a
+        username, a full name - or unassign when `assignee` is None.
+
+        Only called when `supports_assignees`. The provider resolves the string
+        against the container's members and does NOTHING when nobody matches:
+        a name the platform does not know must not fail the local edit.
+        `previous` is the assignee being replaced, so it can be removed.
+        """
+
+    def promote(self, task_id: str) -> None:
+        """Make a sub-task a top-level task. Only called when `supports_subtasks`."""
+
+    def remove_attachment(self, task_id: str, filename: str) -> None:
+        """Remove every attachment on the task with that filename.
+
+        Only called when `supports_attachments`. By filename because the upload
+        route returns no id to remember; a provider that does return one may
+        key on it instead.
         """
 
     def set_state(self, task_id: str, state: str) -> None:

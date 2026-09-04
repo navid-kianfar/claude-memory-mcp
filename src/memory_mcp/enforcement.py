@@ -41,8 +41,10 @@ def asoode_line(slug: str) -> str:
     return (
         f"[Memory MCP] asoode: '{slug}' is bound to a board ({waiting}) - that board "
         f"IS this project's work queue, so work it one task at a time rather than "
-        f"listing it and waiting. memory_task_start/comment/done, mirrored with "
-        f"memory_asoode_push. Do not auto-start blocked/blocker/paused/cancelled."
+        f"listing it and waiting. memory_task_start, comment as you go, then "
+        f"memory_task_done or update(state=paused|blocked) - each stops the clock "
+        f"and mirrors itself. Never leave a task clocking. Do not auto-start "
+        f"blocked/blocker/paused/cancelled."
     )
 
 
@@ -60,12 +62,15 @@ def asoode_intro(slug: str) -> str:
         return (
             f" This project is bound to an asoode board ({board}) and that board is "
             f"its work queue: {open_count} task(s) open. Take the highest-priority "
-            f"actionable one, memory_task_start it, mirror the state to asoode, "
-            f"comment as you go, memory_task_done it, then take the next - do not "
-            f"just report the list. Never auto-start blocked/blocker/paused/"
-            f"cancelled tasks, and stop to ask when the work needs a decision only "
-            f"the user can make. Tools: memory_asoode_status / _link / _push / "
-            f"_links, and memory_task_plan for a request with several deliverables."
+            f"actionable one, memory_task_start it (that claims it, clocks on and "
+            f"moves the card), comment as you go, memory_task_done it - which stops "
+            f"the clock - then take the next; do not just report the list. Every "
+            f"local change mirrors to the board on its own. Never auto-start "
+            f"blocked/blocker/paused/cancelled tasks; stop to ask when the work "
+            f"needs a decision only the user can make, and stop the clock when you "
+            f"do (memory_task_update state='blocked'). Tools: memory_asoode_status "
+            f"/ _link / _push / _links, and memory_task_plan for a request with "
+            f"several deliverables."
         )
     if _asoode_pat_configured():
         return (
@@ -142,7 +147,7 @@ def installed_agents(include_lead: bool = False) -> list[tuple[str, str]]:
         return []
     found: list[tuple[str, str]] = []
     for path in sorted(AGENT_TEAM_DIR.glob("*.md")):
-        if path.name.lower() == "readme.md":
+        if path.name.lower() == "readme.md" or path.stem.startswith("_"):
             continue
         try:
             text = path.read_text()
@@ -217,6 +222,13 @@ def agent_team_intro() -> str:
         "  - An agent reporting a cross-boundary risk is reporting it to YOU. Decide "
         "whether the other side changes and brief that agent; never let one agent "
         "reshape another's contract.",
+        "  - BEFORE A COMMIT, dispatch `test` to verify the change on the running "
+        "instance (daemon, UI, board) and commit only on its green report. The "
+        "repo's own suite proves the code; the test agent proves the product.",
+        "  - Subagents share this client's MCP connection: tell every agent to pass "
+        "the session_id memory_session_start gave IT on memory_task_start, "
+        "memory_task_claim_next and memory_session_end, or its session displaces "
+        "yours.",
     ])
     return "\n".join(lines)
 
@@ -374,7 +386,9 @@ def _queued_task_count(slug: str) -> int:
 def format_session_end(slug: str) -> str:
     """Stop-hook reminder to persist the session for a memory project."""
     return (
-        f"[Memory MCP] Before finishing work on project '{slug}': call "
+        f"[Memory MCP] Before finishing work on project '{slug}': finish or "
+        f"pause the task you are on (memory_task_done, or memory_task_update "
+        f"state='paused'|'blocked') so no clock is left running, then call "
         f"memory_session_end(session_id, summary) with a summary of decisions "
         f"made and context for the next session, and store any new rules or "
         f"decisions with memory_store."

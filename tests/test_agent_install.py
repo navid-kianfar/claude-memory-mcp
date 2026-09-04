@@ -96,6 +96,74 @@ class TestAgentInstall:
         manifest = settings.data_dir / "agents-installed.json"
         assert json.loads(manifest.read_text()) == ["pm.md"]
 
+    def test_an_agent_that_extends_a_base_is_composed_at_install(self, agent_dirs):
+        """Claude Code has no inheritance; the installer provides it. The base is
+        never installed on its own, and `extends` never reaches the artefact."""
+        source, dest = agent_dirs
+        _write(source, "_base.md",
+               "---\nabstract: true\nmodel: claude-opus-5\neffort: high\n---\n"
+               "{{EXTENSION}}\n\n## Shared contract\n\nAlways pass project=.\n")
+        _write(source, "backend.md",
+               "---\nname: backend\ndescription: Server work.\nextends: _base\n"
+               "effort: xhigh\n---\nYou are backend.\n")
+
+        setup_mod.setup_agents()
+
+        assert sorted(p.name for p in dest.glob("*.md")) == ["backend.md"]
+        text = (dest / "backend.md").read_text()
+        front, body = setup_mod.parse_agent(text)
+        assert front == {"name": "backend", "description": "Server work.",
+                         "model": "claude-opus-5", "effort": "xhigh"}
+        assert "extends" not in text and "abstract" not in text
+        assert "{{EXTENSION}}" not in text
+        assert body.index("You are backend.") < body.index("## Shared contract")
+
+    def test_a_chain_composes_in_order_and_leaves_no_marker(self, agent_dirs):
+        """dotnet -> backend -> _base: the expert layer lands where backend put
+        its marker, between backend's craft and the shared contract."""
+        source, dest = agent_dirs
+        _write(source, "_base.md",
+               "---\nabstract: true\nmodel: claude-opus-5\n---\n"
+               "{{EXTENSION}}\n\n## Shared\n")
+        _write(source, "backend.md",
+               "---\nname: backend\ndescription: b\nextends: _base\nisolation: worktree\n---\n"
+               "## Backend craft\n{{EXTENSION}}\n")
+        _write(source, "dotnet.md",
+               "---\nname: dotnet\ndescription: d\nextends: backend\n---\n"
+               "## The .NET layer\n")
+
+        setup_mod.setup_agents()
+
+        dotnet = (dest / "dotnet.md").read_text()
+        front, body = setup_mod.parse_agent(dotnet)
+        assert front["isolation"] == "worktree", "inherited through the chain"
+        assert front["name"] == "dotnet"
+        assert body.index("## Backend craft") < body.index("## The .NET layer") < body.index("## Shared")
+        assert "{{EXTENSION}}" not in dotnet
+        assert "{{EXTENSION}}" not in (dest / "backend.md").read_text()
+
+    def test_a_missing_base_is_an_error_naming_both_files(self, agent_dirs):
+        source, dest = agent_dirs
+        _write(source, "dotnet.md", "---\nname: dotnet\nextends: nope\n---\nx\n")
+        with pytest.raises(setup_mod.AgentCompositionError, match="dotnet.md.*nope"):
+            setup_mod.setup_agents()
+
+    def test_a_cycle_is_rejected(self, agent_dirs):
+        source, dest = agent_dirs
+        _write(source, "a.md", "---\nname: a\nextends: b\n---\nA\n")
+        _write(source, "b.md", "---\nname: b\nextends: a\n---\nB\n")
+        with pytest.raises(setup_mod.AgentCompositionError, match="cannot extend itself"):
+            setup_mod.setup_agents()
+
+    def test_composition_is_idempotent(self, agent_dirs):
+        source, dest = agent_dirs
+        _write(source, "_base.md", "---\nabstract: true\nmodel: m\n---\n{{EXTENSION}}\n\nShared\n")
+        _write(source, "x.md", "---\nname: x\ndescription: d\nextends: _base\n---\nMine\n")
+        setup_mod.setup_agents()
+        first = (dest / "x.md").read_text()
+        setup_mod.setup_agents()
+        assert (dest / "x.md").read_text() == first
+
     def test_a_missing_source_folder_is_not_an_error(self, tmp_path, monkeypatch):
         """Setup runs on machines where the repo layout may differ."""
         monkeypatch.setattr(setup_mod, "AGENTS_DIR", tmp_path / "nope")
@@ -119,30 +187,41 @@ class TestShippedAgentDefinitions:
     REQUIRED = {
         "pm", "backend", "frontend", "designer",
         "test", "reviewer", "devops", "docs",
+        "dotnet", "nodejs", "react", "app",
     }
 
     @staticmethod
     def _definitions():
-        import re
-
+        """Every INSTALLABLE definition as it will be installed - composed, so a
+        rule the base carries counts for the agents that extend it."""
+        by_stem = {
+            p.stem: p for p in setup_mod.AGENTS_DIR.glob("*.md")
+            if p.name.lower() != "readme.md"
+        }
         found = {}
-        for path in setup_mod.AGENTS_DIR.glob("*.md"):
-            if path.name.lower() == "readme.md":
+        for stem, path in by_stem.items():
+            if setup_mod.is_abstract_agent(path):
                 continue
-            text = path.read_text()
-            match = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
-            assert match, f"{path.name} has no frontmatter block"
-            front = dict(
-                (k.strip(), v.strip())
-                for k, _, v in (
-                    line.partition(":") for line in match.group(1).splitlines() if line.strip()
-                )
-            )
-            found[path.stem] = (front, match.group(2))
+            parsed = setup_mod.parse_agent(setup_mod.compose_agent(path, by_stem))
+            assert parsed, f"{path.name} has no frontmatter block"
+            found[stem] = parsed
         return found
 
-    def test_the_team_is_all_five_agents(self):
+    def test_the_team_is_all_twelve_agents(self):
         assert set(self._definitions()) == self.REQUIRED
+
+    def test_the_shared_base_is_not_installed_on_its_own(self):
+        assert (setup_mod.AGENTS_DIR / "_base.md").exists()
+        assert setup_mod.is_abstract_agent(setup_mod.AGENTS_DIR / "_base.md")
+
+    def test_every_agent_carries_the_task_lifecycle(self):
+        """The audit of 2026-09-04 found no definition mentioned the clock at all:
+        agents commented on tasks and never started, finished or clocked off one."""
+        for stem, (_, body) in self._definitions().items():
+            for tool in ("memory_session_start", "memory_task_start", "memory_task_done",
+                         "memory_session_end", "session_id"):
+                assert tool in body, f"{stem}.md never mentions {tool}"
+            assert "stop the clock" in body.lower(), f"{stem}.md never says to stop the clock"
 
     def test_every_definition_declares_name_description_and_model(self):
         for stem, (front, _) in self._definitions().items():
@@ -178,6 +257,7 @@ class TestShippedAgentDefinitions:
             "pm": "max", "designer": "max", "test": "max", "reviewer": "max",
             "backend": "xhigh", "frontend": "xhigh", "devops": "xhigh",
             "docs": "high",
+            "dotnet": "xhigh", "nodejs": "xhigh", "react": "xhigh", "app": "xhigh",
         }
         for stem, (front, _) in self._definitions().items():
             effort = front.get("effort")

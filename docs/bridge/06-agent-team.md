@@ -1,10 +1,11 @@
 # Phase 3 — the agent team
 
-> Status: **built, 2026-09-04, and not yet dispatched.** EIGHT definitions live in
-> [`agents/`](../../agents/) and `memory-mcp-setup` installs them to `~/.claude/agents/`;
-> role-aware claiming is in the task store at schema v12. What remains is a real dispatch —
-> see *What was verified* below for exactly which assumptions are now checked and which are
-> still open.
+> Status: **built and dispatched.** TWELVE definitions live in [`agents/`](../../agents/) —
+> eight roles and four stack experts that `extends:` a role — plus the shared base
+> `_base.md` every definition inherits; `memory-mcp-setup` composes and installs them to
+> `~/.claude/agents/`. Role-aware claiming is in the task store (schema v12), and the first
+> real dispatch happened on 2026-09-05: `test` verified the mirror change on the live board
+> before it was committed. See *What was verified* below.
 >
 > Sequence was: **Phase 1 tasks → Phase 2 asoode bridge → Phase 3 agent team.** Phases 1 and 2
 > shipped, which is what unblocked this one.
@@ -66,45 +67,48 @@ Confirmed capabilities (see `03-claude-ui-surfaces.md` for the UI side of the sa
 - **Plugins** can bundle agents + skills + hooks + `.mcp.json` and be distributed via a marketplace, so
   the team follows into every project.
 
-## The five agents
+## The team as it is
 
-| Agent | Model | Tools | Isolation | Owns |
+Every definition is composed at install time from `agents/_base.md` — the shared contract that
+makes the three modules complete each other in every agent: **brain** (session start, binding
+rules, search before deciding, store what outlives the task, `project=` on every write),
+**tasks** (claim only when idle, `memory_task_start` claims + clocks on + mirrors, comment as you
+go, attach evidence, stop the clock on every finish, `memory_session_end` last) and **team**
+(one lead, written hand-offs, cross-boundary changes reported not made), plus the discipline
+rules (tokens, no invented tools or versions, "not verified" over asserting). A role file adds
+its identity, craft and hand-offs; an expert file `extends:` a role and adds the stack layer.
+
+| Agent | Extends | Effort | Isolation | Owns |
 |---|---|---|---|---|
-| `pm` | opus | `memory_*`, asoode MCP, Read, Grep, Glob — **no Edit/Write** | none | Breaking work down, writing tasks, updating state, keeping the board honest |
-| `design` | opus | design skills, Read, Write, Browser pane | none | Design tokens, component specs, UI/UX review |
-| `frontend` | opus | Edit, Write, Bash, Read, Grep, Browser pane | **worktree** | UI implementation, verified in the browser |
-| `backend` | opus | Edit, Write, Bash, Read, Grep — no browser | **worktree** | APIs, services, schema, migrations |
-| `e2e` | sonnet | Bash, Browser pane, Read | **worktree** | Running and extending the e2e suite |
+| `pm` | `_base` | max | none | Planning in isolated context; the main session is normally the lead |
+| `backend` | `_base` | xhigh | worktree | APIs, services, data models, schema, migrations |
+| `frontend` | `_base` | xhigh | worktree | UI implementation to the designer's spec, verified in the browser |
+| `designer` | `_base` | max | none | Tokens, component specs, flows, visual review — before any UI is built |
+| `test` | `_base` | max | worktree | Verifying other agents' work on the running product; the gate before a commit |
+| `reviewer` | `_base` | max | none | Independent review; **no Edit/Write** (`disallowedTools`); preloads `code-review`, `security-review` |
+| `devops` | `_base` | xhigh | none | CI, builds, deploys, containers, monitoring; stops before anything irreversible |
+| `docs` | `_base` | high | none | READMEs, API docs, changelogs for readers outside the session |
+| `dotnet` | `backend` | xhigh | worktree | .NET layout, DI and services — consulted before backend |
+| `nodejs` | `backend` | xhigh | worktree | Node layout: always NestJS / Next.js / pnpm — consulted before backend |
+| `react` | `frontend` | xhigh | worktree | pnpm + Vite + Tailwind + shadcn, every shadcn component wrapped once |
+| `app` | `frontend` | xhigh | worktree | Kotlin Multiplatform mobile, Android and iOS pixel-identical |
 
-### `pm`
+All twelve pin `claude-opus-5`. No definition names its MCP tools in frontmatter: subagents
+inherit the memory server in full, and an allowlist would filter it out — `reviewer` is the one
+denylist. Skills are invoked on demand (`designer` names `/design` in its body); only `reviewer`
+preloads.
 
-Reads the board and the memory, produces a plan, writes tasks. **Deliberately has no Edit or Write** —
-it plans, it does not code. That constraint is what keeps it from quietly becoming a sixth
-implementation agent.
+**The main session is the lead**, not `pm`: the orchestration brief rides the
+`UserPromptSubmit` hook (`enforcement.agent_team_intro` at session start, one line per turn),
+and `pm` is excluded from the roster it advertises. Two operating rules the brief carries, both
+learned by dispatch: the `test` agent verifies a change on the running product before it is
+committed, and every agent passes the `session_id` its own `memory_session_start` returned —
+subagents share the parent's MCP connection, so a call that relies on the remembered session
+lands on the parent's.
 
-Inputs: `memory_search`, `memory_get_rules`, the asoode board via `list_board` / `my_tasks`.
-Outputs: tasks (with description and assignee), state changes, and a `decision` memory when it makes a
-call worth remembering.
-
-### `design`
-
-Works from `/design` — the comprehensive design skill — and `design-system` for token architecture. Writes specs and tokens, not application code — the frontend
-agent implements them.
-
-### `frontend` / `backend`
-
-The two that genuinely need `isolation: worktree`, because they are the two most likely to run at the
-same time on the same repo. Each verifies its own work: the frontend agent through the Browser pane,
-the backend agent through tests.
-
-In a monorepo like asoode, the `match_paths` routing on `project_links` (see `04-design-decisions.md`)
-already maps `apps/backend/**` and `apps/frontend/**` to different boards — the same split the agents
-work along.
-
-### `e2e`
-
-`asoode/E2E-TEST-PLAN.md` is already the brief for this one. Sonnet rather than opus: running suites
-and reporting failures does not need the larger model, and this agent will run most often.
+In a monorepo like asoode, the `match_paths` routing on `project_links` (see
+`04-design-decisions.md`) already maps `apps/backend/**` and `apps/frontend/**` to different
+boards — the same split the agents work along.
 
 ## What was verified, and what is still open
 
@@ -125,20 +129,26 @@ written from assumption, and it is now possible to say which parts survived cont
   `memory_search`", which would have silently missed the entire task queue. All five now read
   the queue explicitly.
 
-**Found, and not yet acted on:**
+**Found, and acted on (2026-09-05, first real dispatch):**
 
 - Subagents inherit the full **write** surface: `memory_store`, `memory_task_add`,
-  `memory_task_done`, `memory_asoode_push`, with no additional gate. The `pm` agent's "no
-  Edit/Write/Bash" restricts the filesystem, not the board. Worth a decision before the team
-  runs unattended.
+  `memory_task_done`, `memory_asoode_push`, with no additional gate — a `disallowedTools`
+  list restricts the filesystem, not the board. The base contract is the gate: it tells every
+  agent exactly which board writes are its own (its task, its comments, scratch data it names
+  and removes).
+- Subagents **share the parent's MCP connection** in the desktop app. The `test` agent's
+  `memory_session_start` displaced the parent's remembered memory session, so the parent's
+  next `memory_task_start` claimed the task for the agent's session. Hence the rule that every
+  agent passes its own `session_id` explicitly.
+- A dispatched `test` agent verified nine live checks (create, start, field edits, comment,
+  attachment, pause, done, delete, session end) against the board, cleaned up after itself and
+  reported faithfully — the handoff shape (brief → checks → report) holds.
 
-**Still open, all needing a restart to test:**
+**Still open:**
 
-- Whether an explicit `tools:` allowlist filters inherited MCP tools. The probe used
-  `general-purpose`, which has `tools: *`, so it cannot answer this. Every definition names its
-  `mcp__memory__*` tools explicitly meanwhile, which fails safe either way.
-- Whether `isolation: worktree` behaves as assumed.
-- Whether a handoff survives between two agents.
+- Whether an explicit `tools:` allowlist filters inherited MCP tools. No definition uses one,
+  so nothing depends on the answer; `reviewer` uses `disallowedTools` instead.
+- Whether `isolation: worktree` behaves as assumed for two invocations of the same agent.
 
 **One operational fact, learned the hard way:** Claude Code enumerates `~/.claude/agents/` at
 **session start**. Agents installed mid-session are not dispatchable until a restart —
@@ -207,8 +217,9 @@ config stays per-repo and committed.
 
 ## Open questions
 
-- ~~Does `pm` write tasks directly, or propose them for approval?~~ **Settled: propose**, using the
-  same `triage` flag the inbound asoode tasks use — one triage surface, not two.
+- ~~Does `pm` write tasks directly, or propose them for approval?~~ **Settled: the lead writes
+  them directly** (`memory_task_plan`, one task per deliverable with a full description and a
+  `role`); the `triage` flag stays reserved for inbound asoode tasks and nothing sets it yet.
 - ~~Per-project agent overrides, or one user-level team?~~ **Settled: one user-level team**, which is
   why `agents/` sits at the repo root and installs to `~/.claude/agents/` rather than living in
   `.claude/agents/`. Project-level `CLAUDE.md` supplies the specifics.

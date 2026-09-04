@@ -1,8 +1,11 @@
 # The agent team
 
-Eight specialised agents that work on projects using this server's memory and task board:
-`pm`, `backend`, `frontend`, `designer`, `test`, `reviewer`, `devops`, `docs`. The design and
-its verification status are in [`docs/bridge/06-agent-team.md`](../docs/bridge/06-agent-team.md).
+Twelve specialised agents that work on projects using this server's memory and task board:
+eight roles — `pm`, `backend`, `frontend`, `designer`, `test`, `reviewer`, `devops`, `docs` —
+and four stack experts that extend a role — `dotnet` and `nodejs` (extend `backend`), `react`
+and `app` (extend `frontend`). All of them extend `_base.md`, the shared contract. The design
+and its verification status are in
+[`docs/bridge/06-agent-team.md`](../docs/bridge/06-agent-team.md).
 
 **The main session is the lead.** It orchestrates directly rather than dispatching `pm` to do
 it, because a subagent's output is never shown to the user and cannot be redirected once it is
@@ -22,7 +25,29 @@ agents/<name>.md   →   ~/.claude/agents/<name>.md
 ```
 
 `setup_agents()` in [`src/memory_mcp/setup.py`](../src/memory_mcp/setup.py) does the copy,
-following the same pattern the hook scripts already use.
+following the same pattern the hook scripts already use — composing `extends:` on the way (see
+below).
+
+## `extends:` — one base, many agents
+
+Claude Code has no inheritance between definitions, so the installer provides it. A file may
+say `extends: <name>` in its frontmatter; the **installed** file is the base's body with this
+file's body at the base's `{{EXTENSION}}` marker (appended when there is none), under this
+file's frontmatter merged over the base's. `extends` and `abstract` never reach
+`~/.claude/agents/`. A file with `abstract: true` — or a name starting with `_` — is a base
+only and is never installed. Chains work: `dotnet` extends `backend` extends `_base`, and
+`backend.md` puts its own `{{EXTENSION}}` at the end of its craft section so an expert's layer
+lands between the role's craft and the shared contract.
+
+`_base.md` carries what every agent must do and is the one place to change it: the brain
+(session start, binding rules, `project=` on every write), the task lifecycle (start claims and
+clocks on; comment as you go; stop the clock on every finish; `memory_session_end` last, with
+the agent's own `session_id` passed explicitly because subagents share the lead's MCP
+connection), the team rules and the discipline rules. A role file adds identity, craft and
+hand-offs; an expert file adds the stack layer and its non-negotiables.
+
+A missing base or a cycle fails the install with both file names; re-running setup composes
+the same text again, so installing is idempotent.
 
 ## Editing an agent
 
@@ -53,7 +78,8 @@ directly in `~/.claude/agents/` is never touched.
 ## What goes in a definition
 
 Frontmatter carries `name`, `description`, `model`, `effort`, `color`, and optionally `tools`,
-`disallowedTools`, `skills` and `isolation`.
+`disallowedTools`, `skills`, `isolation`, `extends` and `abstract` (the last two are consumed
+by the installer, see above).
 
 - **`model`** — every agent here pins `claude-opus-5` by its full id rather than the `opus`
   alias, so a new Opus cannot silently change how the team behaves.
@@ -76,9 +102,10 @@ Frontmatter carries `name`, `description`, `model`, `effort`, `color`, and optio
 in the agent list, and the body is not loaded until the agent is actually dispatched. Keep it
 to one specific sentence.
 
-## Three things every definition must say
+## Five things every definition must say
 
-All three are consequences of how subagents actually behave, each verified rather than assumed:
+All five are consequences of how subagents actually behave, each verified rather than assumed.
+They live once, in `_base.md`, and reach every definition through `extends`:
 
 - **Load your own context.** A subagent receives a prompt, not the transcript. Nothing the
   main session learned reaches it unless the agent fetches it with `memory_get_rules` and
@@ -91,6 +118,16 @@ All three are consequences of how subagents actually behave, each verified rathe
   the board with nothing relayed through the session.
 - **Mind the tokens.** A dispatch costs ~60k at the floor, measured. Say so, and say what the
   agent should read rather than letting it survey the repo.
+- **Work the task through its lifecycle, and stop the clock.** `memory_task_start` claims,
+  clocks on and mirrors in_progress; `memory_task_done` or
+  `memory_task_update(state="paused"|"blocked")` stops the clock; `memory_session_end` last.
+  The audit of 2026-09-04 found no definition mentioned any of this — agents commented on
+  tasks and never started, finished or clocked off one, which is exactly how a task was left
+  in_progress with its clock running for hours.
+- **Pass your own `session_id`.** Subagents share the lead's MCP connection in the desktop
+  app, so the session the server "remembers" for a connection is whichever session started
+  last. An agent that relies on it claims and releases on the lead's behalf. Verified live on
+  2026-09-05 when the `test` agent's session start displaced the lead's.
 
 ## One more thing worth knowing
 

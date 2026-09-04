@@ -18,6 +18,7 @@ folder like ~/Desktop, ~/Documents, or ~/Downloads.
 """
 
 import json
+import re
 import os
 import plistlib
 import shutil
@@ -324,6 +325,128 @@ def _installed_agents_manifest() -> Path:
     return settings.data_dir / "agents-installed.json"
 
 
+# ---------- agent composition: `extends:` ----------
+#
+# Claude Code has no inheritance between agent definitions, and the team needs
+# it: the task lifecycle, the memory contract and the token rules are the same
+# for every agent, and an expert (dotnet, nodejs, react, app) is "its base plus a
+# layer", not a second copy of the base prompt that drifts. So the installer
+# composes. A file may say `extends: <base>` in its frontmatter; the INSTALLED
+# file is the base's composed body with this file's body at the base's
+# {{EXTENSION}} marker (appended when there is none), under this file's
+# frontmatter merged over the base's. `extends` and `abstract` never reach
+# ~/.claude/agents/. A file with `abstract: true` (or a name starting with `_`)
+# is a base only and is not installed.
+
+EXTENSION_MARKER = "{{EXTENSION}}"
+_FRONT_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
+_FRONT_ORDER = (
+    "name", "description", "model", "effort", "color", "isolation",
+    "tools", "disallowedTools", "skills",
+)
+_COMPOSE_ONLY_KEYS = ("extends", "abstract")
+
+
+class AgentCompositionError(RuntimeError):
+    """An agent file extends something that cannot be resolved."""
+
+
+def parse_agent(text: str) -> tuple[dict, str] | None:
+    """(frontmatter, body) for an agent-shaped file, else None.
+
+    Values stay the raw strings the file has - `skills: [a, b]` is passed through
+    untouched, exactly as Claude Code will read it.
+    """
+    match = _FRONT_RE.match(text)
+    if not match:
+        return None
+    front: dict = {}
+    for line in match.group(1).splitlines():
+        if not line.strip() or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        front[key.strip()] = value.strip()
+    return front, match.group(2)
+
+
+def _render_agent(front: dict, body: str) -> str:
+    ordered = [k for k in _FRONT_ORDER if k in front]
+    ordered += [k for k in front if k not in ordered]
+    lines = ["---", *(f"{k}: {front[k]}" for k in ordered), "---", ""]
+    return "\n".join(lines) + body.strip("\n") + "\n"
+
+
+def is_abstract_agent(path: Path) -> bool:
+    """A base other definitions extend, never installed on its own."""
+    if path.stem.startswith("_"):
+        return True
+    parsed = parse_agent(path.read_text())
+    return bool(parsed and (parsed[0].get("abstract") or "").lower() in ("true", "yes", "1"))
+
+
+def compose_agent(path: Path, sources: dict[str, Path], _chain: tuple = ()) -> str:
+    """The composed text of `path`, with any {{EXTENSION}} marker still in place
+    so a further child can extend it. `installable_agent_text` is what goes to
+    disk.
+
+    A file that extends nothing and carries no composition keys is returned
+    byte for byte - the common case, and what keeps a hand-written definition
+    exactly what its author wrote. Deterministic: the same sources always
+    compose to the same text, so re-running setup is a no-op.
+    """
+    text = path.read_text()
+    parsed = parse_agent(text)
+    if parsed is None:
+        return text
+    front, body = parsed
+    base_name = (front.get("extends") or "").strip()
+    if not base_name:
+        if not any(k in front for k in _COMPOSE_ONLY_KEYS):
+            return text
+        clean = {k: v for k, v in front.items() if k not in _COMPOSE_ONLY_KEYS}
+        return _render_agent(clean, body)
+
+    chain = _chain + (path.stem,)
+    if base_name in chain:
+        raise AgentCompositionError(
+            f"{path.name} extends {base_name!r}, which is already in the chain "
+            f"{' -> '.join(chain)}: a definition cannot extend itself"
+        )
+    base_path = sources.get(base_name)
+    if base_path is None:
+        raise AgentCompositionError(
+            f"{path.name} extends {base_name!r}, but there is no {base_name}.md "
+            f"beside it in {path.parent}"
+        )
+    base_parsed = parse_agent(compose_agent(base_path, sources, chain))
+    if base_parsed is None:
+        raise AgentCompositionError(
+            f"{path.name} extends {base_path.name}, which has no frontmatter block"
+        )
+    base_front, base_body = base_parsed
+    merged = {**base_front, **{k: v for k, v in front.items() if k not in _COMPOSE_ONLY_KEYS}}
+    merged = {k: v for k, v in merged.items() if k not in _COMPOSE_ONLY_KEYS}
+    layer = body.strip("\n")
+    if EXTENSION_MARKER in base_body:
+        composed = base_body.replace(EXTENSION_MARKER, layer, 1)
+    else:
+        composed = base_body.rstrip("\n") + "\n\n" + layer + "\n"
+    return _render_agent(merged, composed)
+
+
+def installable_agent_text(path: Path, sources: dict[str, Path]) -> str:
+    """What is written to ~/.claude/agents/: composed, and with no marker left
+    for Claude Code to read as prompt text."""
+    text = compose_agent(path, sources)
+    if EXTENSION_MARKER not in text:
+        return text
+    parsed = parse_agent(text)
+    if parsed is None:
+        return text.replace(EXTENSION_MARKER, "")
+    front, body = parsed
+    return _render_agent(front, body.replace(EXTENSION_MARKER, ""))
+
+
 def setup_agents() -> None:
     """Install the agent team from agents/ into ~/.claude/agents/.
 
@@ -345,10 +468,12 @@ def setup_agents() -> None:
     dest = claude_agents_dir()
     dest.mkdir(parents=True, exist_ok=True)
 
-    # README.md documents the folder for maintainers; it is not an agent.
-    sources = sorted(
-        p for p in AGENTS_DIR.glob("*.md") if p.name.lower() != "readme.md"
-    )
+    # README.md documents the folder for maintainers; it is not an agent. A base
+    # (`abstract: true`, or `_name.md`) is composed into others, never installed.
+    by_stem = {
+        p.stem: p for p in AGENTS_DIR.glob("*.md") if p.name.lower() != "readme.md"
+    }
+    sources = sorted(p for p in by_stem.values() if not is_abstract_agent(p))
     installed = [p.name for p in sources]
 
     manifest = _installed_agents_manifest()
@@ -368,7 +493,10 @@ def setup_agents() -> None:
                 removed += 1
 
     for src in sources:
-        shutil.copy2(src, dest / src.name)
+        # Composed, not copied: `extends:` is resolved here so Claude Code only
+        # ever sees a complete definition. A file that extends nothing is
+        # written byte for byte.
+        (dest / src.name).write_text(installable_agent_text(src, by_stem))
 
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps(installed, indent=2))

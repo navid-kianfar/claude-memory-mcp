@@ -133,6 +133,14 @@ state/priority/assignee/dates/estimate), `memory_task_comment`, `memory_task_sta
 (time entries), `memory_task_done`, `memory_task_archive`, plus `memory_task_claim_next` and
 `memory_task_release` from §1a.
 
+**The clock is symmetric.** `memory_task_start` opens a time entry, claims the task for the session
+and mirrors in_progress; every path that ends the work closes the entry and mirrors the stretch —
+`memory_task_done`, `memory_task_update` to any state other than in_progress, `memory_task_stop`,
+`memory_task_release`, `memory_session_end`, archive. The tool descriptions, the session brief and
+the agent definitions all say to stop the clock the same way they say to start it; a task left
+in_progress with a running clock at the end of a session is a bug in how the session worked, and
+`memory_session_end` reports the clocks it had to stop for it.
+
 **Capture semantics matter most here.** A task with `source='user'` is a **queued requirement, not an
 instruction**. `memory_task_add`'s description must say so explicitly, and the session brief must
 present these as "here's what's waiting" — Claude surfaces them and does **not** start work unless I

@@ -69,9 +69,18 @@ _LIST_ALIASES = {
 def build_state_list_map(board: Container) -> tuple[dict[str, str], str | None]:
     """Map each local task state to a board list id.
 
-    Returns (map, default_list_id). Matching is by column title; every state gets
-    an entry, falling back to the first column, so a push never has to decide
-    what to do with an unmapped state mid-flight.
+    Returns (map, default_list_id). Matching is by column title, and ONLY states
+    with a real column get an entry.
+
+    A state with no column is deliberately absent rather than pointed at the
+    first one. The rule is "if there is a column for that status, move the task
+    there" - so a board with To Do / In Progress / Done leaves a blocked task
+    exactly where it sits, instead of yanking it into Backlog and losing the
+    position someone put it in. Six of the nine states used to map to the same
+    fallback column, which made a state change look like a demotion.
+
+    `default_list_id` is still returned, because CREATING a task needs some
+    column even when its state has none.
     """
     groups = list(board.groups)
     if not groups:
@@ -79,13 +88,11 @@ def build_state_list_map(board: Container) -> tuple[dict[str, str], str | None]:
     by_title = {g.title.strip().lower(): g.id for g in groups}
     default_id = groups[0].id
     mapping: dict[str, str] = {}
-    for state in _LIST_ALIASES:
-        target = default_id
-        for alias in _LIST_ALIASES.get(state, ()):
+    for state, aliases in _LIST_ALIASES.items():
+        for alias in aliases:
             if alias in by_title:
-                target = by_title[alias]
+                mapping[state] = by_title[alias]
                 break
-        mapping[state] = target
     return mapping, default_id
 
 
@@ -819,6 +826,7 @@ class TaskBridge:
                 continue
             state_map = link.get("state_list_map") or {}
             default_list = link.get("default_list_id")
+            # Creating needs SOME column even for a state with none of its own.
             list_id = state_map.get(task.state.value) or default_list
             try:
                 remote = self.provider_for(link).create_task(

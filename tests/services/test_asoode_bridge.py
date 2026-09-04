@@ -49,14 +49,17 @@ class TestStateListMap:
         assert mapping["done"] == "l-done"
         assert default == "l-backlog"
 
-    def test_every_state_gets_a_column_so_a_push_never_stalls(self):
-        mapping, _ = build_state_list_map(self._board())
-        from memory_mcp.models import TaskState
+    def test_only_states_with_a_real_column_are_mapped(self):
+        """"If there is a column for that status, move the task there" - and if
+        there is not, leave it alone. Pointing six states at the same fallback
+        column made a state change look like a demotion: a blocked task got
+        yanked into Backlog, losing the position someone put it in."""
+        mapping, default = build_state_list_map(self._board())
 
-        assert set(mapping) == {s.value for s in TaskState}
-        # no column for these, so they land in the first one
-        assert mapping["blocker"] == "l-backlog"
-        assert mapping["cancelled"] == "l-backlog"
+        assert set(mapping) == {"todo", "in_progress", "done"}
+        for orphan in ("blocker", "cancelled", "paused", "duplicate", "incomplete"):
+            assert orphan not in mapping, f"{orphan} has no column and must not move"
+        assert default == "l-backlog", "creating still needs some column"
 
     def test_a_board_with_no_lists_yields_nothing_rather_than_guessing(self):
         assert build_state_list_map(Container(id="wp", title="B")) == ({}, None)

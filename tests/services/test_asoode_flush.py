@@ -471,3 +471,42 @@ class TestACommentIsSentOnce:
             assert container.outbox_repo.unmirrored_comments(project, task.id)
         finally:
             type(provider).capabilities = original
+
+
+class TestMovingOnlyWhenAColumnExists:
+    """"When a task status changes, if we have a column for that status, move the
+    task there" - and if we do not, leave the card where it is."""
+
+    def test_a_state_with_a_column_moves(self, project):
+        provider = _provider()
+        tasks, bridge, _ = _stack(project, provider)
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        bridge.flush(project)
+        tasks.done(project, task.id)
+        bridge.flush(project)
+        assert ("r1", "l-done") in provider.moves
+
+    def test_a_state_with_no_column_does_not_move(self, project):
+        from memory_mcp.db.registry import upsert_project_link
+
+        # A board with only To Do and Done - nothing for "blocked".
+        upsert_project_link(
+            project, base_url="https://api.test", remote_project_id="p1",
+            remote_work_package_id="wp1", label="board", is_default=True,
+            default_list_id="l-todo",
+            state_list_map={"todo": "l-todo", "done": "l-done"},
+        )
+        provider = _provider()
+        tasks, bridge, _ = _stack(project, provider)
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        bridge.flush(project)
+        moves_before = list(provider.moves)
+
+        tasks.update(__import__("memory_mcp.models", fromlist=["UpdateTaskRequest"])
+                     .UpdateTaskRequest(project=project, task_id=task.id,
+                                        state=__import__("memory_mcp.models", fromlist=["TaskState"])
+                                        .TaskState.BLOCKED))
+        bridge.flush(project)
+
+        assert provider.moves == moves_before, "no column for blocked, so no move"
+        assert ("r1", "blocked") in provider.states, "but the state is still set"

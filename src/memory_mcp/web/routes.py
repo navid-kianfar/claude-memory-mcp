@@ -6,6 +6,8 @@ serializes the result. The daemon owns the only writable DB connections, so
 the UI and the Claude clients never contend for locks.
 """
 
+import time
+import contextlib
 from pathlib import Path
 
 import httpx
@@ -1288,6 +1290,91 @@ def _delete_org_rule(params, body, query):
     return container.memory_service.delete(GLOBAL_PROJECT_SLUG, params["rid"], hard=hard)
 
 
+# ---------- updates ----------
+#
+# The daemon DETECTS an update and records approval; it never applies one. Two
+# reasons, both established rather than assumed: installing reloads the launchd
+# daemon and drops every live MCP connection, and the daemon cannot reach a repo
+# under a TCC-protected folder like ~/Desktop. The Stop hook does the applying,
+# in the user's own context, at the end of a turn.
+
+#: Set when the user presses Update. Cleared once the hook has applied it.
+UPDATE_APPROVED_KEY = "update:approved"
+
+
+def _update_status(params, body, query):
+    """What the poller last found, plus whether the user has approved it."""
+    from memory_mcp.services import update_poller
+
+    status = update_poller.read_status() or {}
+    return {
+        "update_available": update_poller.update_available(),
+        "current_version": status.get("current_version"),
+        "latest_version": status.get("latest_version"),
+        "commits_behind": status.get("commits_behind"),
+        "release_url": status.get("release_url"),
+        "release_notes": status.get("release_notes"),
+        "source": status.get("source"),
+        "last_checked_at": get_setting("update:last_checked_at"),
+        "last_error": get_setting("update:last_error") or None,
+        "approved": bool(get_setting(UPDATE_APPROVED_KEY)),
+    }
+
+
+def _update_approve(params, body, query):
+    """Record the user's approval. The hook applies it at the end of a turn.
+
+    Refuses when there is nothing to apply, so a stale button press cannot queue
+    a pointless reinstall - and so the UI cannot claim an update exists when the
+    last check merely failed.
+    """
+    from memory_mcp.services import update_poller
+
+    if not update_poller.update_available():
+        raise ValueError("no update is available to approve")
+    set_setting(UPDATE_APPROVED_KEY, str(time.time()))
+    return {
+        "status": "ok",
+        "approved": True,
+        "note": (
+            "Queued. It applies at the end of the current turn, not immediately - "
+            "installing restarts the daemon, so doing it mid-turn would drop the "
+            "MCP connection. Claude reconnects afterwards."
+        ),
+    }
+
+
+def _update_cancel(params, body, query):
+    set_setting(UPDATE_APPROVED_KEY, "")
+    return {"status": "ok", "approved": False}
+
+
+def _hook_update(request):
+    """Plain-text answer for the Stop hook: apply, or not.
+
+    Deliberately not JSON - the hook is bash, and `[ "$ANSWER" = "apply" ]` needs
+    no parser. Public like the other hook routes.
+    """
+    from memory_mcp.services import update_poller
+
+    try:
+        approved = bool(get_setting(UPDATE_APPROVED_KEY))
+        answer = "apply" if (approved and update_poller.update_available()) else "no"
+        # The hook cannot infer the repo from its own path - it is installed to
+        # ~/.claude-memory-mcp/hooks/. Setup recorded it; hand it over.
+        repo = get_setting("install:repo_dir") or ""
+    except Exception:  # noqa: BLE001 - the hook must never see a 500
+        answer, repo = "no", ""
+    return PlainTextResponse(f"{answer} {repo}".strip())
+
+
+def _hook_update_done(request):
+    """The hook says it finished; clear the approval so it does not loop."""
+    with contextlib.suppress(Exception):
+        set_setting(UPDATE_APPROVED_KEY, "")
+    return PlainTextResponse("ok")
+
+
 def build_routes() -> list:
     """Return the UI + JSON API routes for mounting on the daemon."""
     routes: list = [
@@ -1296,6 +1383,11 @@ def build_routes() -> list:
         Route("/api/hook/rules", _hook_rules, methods=["GET"]),
         Route("/api/hook/auto-register", _hook_auto_register, methods=["GET"]),
         Route("/api/hook/claim", _hook_claim, methods=["POST"]),
+        Route("/api/hook/update", _hook_update, methods=["GET"]),
+        Route("/api/hook/update-done", _hook_update_done, methods=["POST"]),
+        Route("/api/update", _api(_update_status, public=True), methods=["GET"]),
+        Route("/api/update/approve", _api(_update_approve), methods=["POST"]),
+        Route("/api/update/approve", _api(_update_cancel), methods=["DELETE"]),
         Route("/api/meta", _api(_meta, public=True), methods=["GET"]),
         # Auth (server mode): login/whoami are auth-optional; logout clears state.
         Route("/api/auth/login", _login, methods=["POST"]),

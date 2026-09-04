@@ -1,8 +1,17 @@
 """Update service - check GitHub for newer versions and guide the user to update.
 
-Two check strategies, in order of preference:
-1. GitHub Releases (preferred) - uses the 'latest' release tag
-2. Git commit comparison (fallback) - counts commits behind origin/main
+Three check strategies, in order of preference:
+1. GitHub Releases - uses the 'latest' release tag
+2. GitHub commits (NETWORK ONLY) - compares the recorded install commit against
+   the tip of the default branch
+3. Git commit comparison (local) - counts commits behind origin/main
+
+STRATEGY 2 EXISTS BECAUSE 1 AND 3 BOTH FAIL IN THE DAEMON. Verified 2026-09-04:
+this repo publishes no releases, so /releases/latest answers 404; and the local
+git comparison needs to read the repo, which the daemon cannot do when it lives
+under a TCC-protected folder like ~/Desktop. The background poller therefore had
+no working strategy at all until this one. It compares against `install:commit`,
+which setup records at install time, so it needs no filesystem access.
 
 The service never modifies the filesystem. It only reports. The user is
 responsible for running `git pull` and restarting Claude Code.
@@ -20,6 +29,11 @@ GITHUB_OWNER = "navid-kianfar"
 GITHUB_REPO = "claude-memory-mcp"
 GITHUB_API_BASE = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
 HTTP_TIMEOUT = 5
+DEFAULT_BRANCH = "main"
+
+#: Recorded by setup at install time - the commit the running code was built
+#: from. The daemon cannot read the repo, so this is how it knows where it is.
+INSTALL_COMMIT_KEY = "install:commit"
 
 
 def _find_install_dir() -> Path | None:
@@ -85,6 +99,44 @@ def _version_tuple_gt(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool:
 class UpdateService:
     """Check for newer versions and present a clear update path."""
 
+    def _check_via_github_commits(self) -> dict | None:
+        """Compare the recorded install commit against the branch tip. No filesystem.
+
+        Returns None when we cannot tell - no recorded commit, or the API did not
+        answer - so the caller falls through to the local git strategy rather
+        than treating "do not know" as "up to date".
+        """
+        try:
+            from memory_mcp.db.registry import get_setting
+
+            installed = (get_setting(INSTALL_COMMIT_KEY) or "").strip()
+        except Exception:  # noqa: BLE001
+            return None
+        if not installed:
+            return None
+
+        head = _fetch_github_json(f"/commits/{DEFAULT_BRANCH}")
+        if not head or not head.get("sha"):
+            return None
+        latest = head["sha"]
+        if latest.startswith(installed) or installed.startswith(latest[:7]):
+            return {"update_available": False, "latest_version": latest[:7]}
+
+        result = {"update_available": True, "latest_version": latest[:7]}
+        # How far behind, and what changed - best effort, never fatal.
+        compare = _fetch_github_json(f"/compare/{installed}...{latest}")
+        if compare:
+            result["commits_behind"] = compare.get("ahead_by") or 0
+            result["recent_commits"] = [
+                (c.get("commit", {}).get("message") or "").splitlines()[0]
+                for c in (compare.get("commits") or [])[-10:]
+            ]
+        result["release_url"] = (
+            f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/compare/"
+            f"{installed[:7]}...{latest[:7]}"
+        )
+        return result
+
     def check(self) -> dict:
         """Returns a structured update check result.
 
@@ -118,7 +170,17 @@ class UpdateService:
             result.update(release_result)
             result["source"] = "github_releases"
         else:
-            # Fallback: git commit comparison
+            # Network-only, so it works inside the daemon's sandbox.
+            api_result = self._check_via_github_commits()
+            if api_result is not None:
+                result.update(api_result)
+                result["source"] = "github_commits"
+                if result.get("update_available"):
+                    result["how_to_update"] = self._build_update_steps(
+                        install_dir, "github_commits",
+                    )
+                return result
+            # Fallback: local git comparison. Needs the repo on disk.
             git_result = self._check_via_git(install_dir)
             if git_result is not None:
                 result.update(git_result)

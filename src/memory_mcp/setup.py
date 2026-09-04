@@ -45,11 +45,19 @@ def runtime_ui_dir() -> Path:
     """Built frontend, copied here so the daemon serves it from a stable path."""
     return settings.data_dir / "ui"
 
+# One event may carry several scripts. Stop carries two: the session-end
+# bookkeeping, and the auto-update, which needs the end of a turn because
+# installing restarts the daemon and drops any in-flight MCP call.
 HOOK_EVENTS = {
-    "UserPromptSubmit": "inject-rules.sh",
-    "SessionStart": "session-start.sh",
-    "Stop": "session-end.sh",
+    "UserPromptSubmit": ["inject-rules.sh"],
+    "SessionStart": ["session-start.sh"],
+    "Stop": ["session-end.sh", "auto-update-install.sh"],
 }
+
+#: Where the source repo lives. The installed hooks run from
+#: ~/.claude-memory-mcp/hooks/, so they cannot infer it from their own path -
+#: they ask the daemon, which reads this.
+REPO_DIR_KEY = "install:repo_dir"
 
 
 def print_step(step: int, total: int, msg: str) -> None:
@@ -255,7 +263,7 @@ def setup_hooks(remote_url: str | None = None, token: str | None = None) -> None
 
     # Drop any prior memory-mcp hook entries (e.g. stale repo-path ones from an
     # earlier install) so re-running setup stays idempotent.
-    scripts = set(HOOK_EVENTS.values())
+    scripts = {name for names in HOOK_EVENTS.values() for name in names}
     for event, groups in list(settings_obj.get("hooks", {}).items()):
         kept_groups = []
         for group in groups:
@@ -268,15 +276,38 @@ def setup_hooks(remote_url: str | None = None, token: str | None = None) -> None
         settings_obj["hooks"][event] = kept_groups
 
     added = 0
-    for event, script in HOOK_EVENTS.items():
-        src = HOOKS_DIR / script
-        if not src.exists():
-            continue
-        dst = hooks_dest / script
-        shutil.copy2(src, dst)
-        os.chmod(dst, 0o755)
-        if _add_hook(settings_obj, event, f"{env_prefix}{shlex.quote(str(dst))}" if env_prefix else str(dst)):
-            added += 1
+    for event, script_names in HOOK_EVENTS.items():
+        for script in script_names:
+            src = HOOKS_DIR / script
+            if not src.exists():
+                continue
+            dst = hooks_dest / script
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o755)
+            command = (
+                f"{env_prefix}{shlex.quote(str(dst))}" if env_prefix else str(dst)
+            )
+            if _add_hook(settings_obj, event, command):
+                added += 1
+
+    # Record the source repo so the installed hooks can find it. They live in
+    # ~/.claude-memory-mcp/hooks/ and would otherwise resolve their own path and
+    # find no repository at all.
+    try:
+        from memory_mcp.db.registry import set_setting
+
+        set_setting(REPO_DIR_KEY, str(REPO_DIR))
+        # The commit this install was built from. The daemon compares it against
+        # GitHub to detect an update without touching the repo, which it cannot
+        # read when the repo lives in a TCC-protected folder.
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR),
+            capture_output=True, text=True, timeout=10,
+        )
+        if head.returncode == 0 and head.stdout.strip():
+            set_setting("install:commit", head.stdout.strip())
+    except Exception:  # noqa: BLE001 - hooks still work, updates just stay manual
+        print("    Warning: could not record the repo path for auto-update.")
 
     path.write_text(json.dumps(settings_obj, indent=2))
     print(f"    Hooks installed to {hooks_dest} ({added} added)")

@@ -155,11 +155,11 @@
     "priority": 3,
     "related_ids": [],
     "source": "assistant",
-    "status": "active",
+    "status": "archived",
     "summary": "TWO HALVES, both from the same incident on 2026-09-04",
     "tags": [],
     "title": "A write names its project explicitly; no viewer may steer a writer",
-    "updated_at": "2026-09-04T20:02:39.670584"
+    "updated_at": "2026-09-04T20:57:37.904818"
   },
   {
     "approval_status": "approved",

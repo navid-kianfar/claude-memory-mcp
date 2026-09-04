@@ -5,9 +5,11 @@ Claude so they survive context compaction and never get silently dropped.
 """
 
 import re
+import time
 from pathlib import Path
 
 from memory_mcp.container import container
+from memory_mcp.db.registry import get_setting, set_setting
 
 
 # ---------- asoode, carried by the hook path ----------
@@ -219,13 +221,82 @@ def agent_team_intro() -> str:
     return "\n".join(lines)
 
 
+# ---------- update notice, carried by the hook path ----------
+#
+# Reads the poller's CACHED answer. It never checks for itself: this runs on
+# every prompt, and a network call there would put GitHub on the critical path
+# of the user typing.
+#
+# THE RULE HERE IS "DO NOT NAG". An update notice repeated on every turn for a
+# week is worse than no notice - the user stops reading the injected block
+# entirely, which costs them the binding rules too. So the full notice appears
+# once at session start, and the per-turn line at most once every few hours.
+
+#: How long before a running session is reminded again. A session that started
+#: this morning should still learn about an update that landed at lunchtime; it
+#: should not hear about it forty times.
+NOTIFY_INTERVAL_SECONDS = 6 * 3600.0
+NOTIFIED_AT_KEY = "update:last_notified_at"
+
+
+def _update_status() -> dict | None:
+    """The cached result, only when a SUCCESSFUL check found something."""
+    try:
+        from memory_mcp.services.update_poller import read_status, update_available
+
+        return read_status() if update_available() else None
+    except Exception:  # noqa: BLE001 - a notice must never break the hook
+        return None
+
+
+def update_intro() -> str:
+    """The full notice, at session start."""
+    status = _update_status()
+    if not status:
+        return ""
+    current = status.get("current_version") or "?"
+    latest = status.get("latest_version") or "?"
+    behind = status.get("commits_behind")
+    detail = f" ({behind} commits behind)" if behind else ""
+    return (
+        f"\n[Memory MCP] An update is available: {current} -> {latest}{detail}. "
+        "Approve it in the management UI, or say so here and it will be applied "
+        "at the END of a turn - never mid-turn, because installing reloads the "
+        "daemon and drops this MCP connection."
+    )
+
+
+def update_line() -> str:
+    """One line, and only occasionally. Empty most of the time, by design."""
+    status = _update_status()
+    if not status:
+        return ""
+    try:
+        last = float(get_setting(NOTIFIED_AT_KEY) or 0)
+    except (TypeError, ValueError):
+        last = 0.0
+    now = time.time()
+    if now - last < NOTIFY_INTERVAL_SECONDS:
+        return ""
+    try:
+        set_setting(NOTIFIED_AT_KEY, str(now))
+    except Exception:  # noqa: BLE001
+        pass
+    return (
+        f"[Memory MCP] Update available: {status.get('current_version')} -> "
+        f"{status.get('latest_version')}. Approve in the UI or ask to apply it."
+    )
+
+
 def format_rules_block(slug: str, mandatory: list, forbidden: list) -> str:
     """Render rules as an injectable text block. Empty string when there are none."""
     asoode = asoode_line(slug)
     if not mandatory and not forbidden:
         # A bound project still gets its asoode line: the workflow must not
         # depend on the project happening to have rules. Same for the team line.
-        return "\n".join(x for x in (asoode, agent_team_line()) if x)
+        return "\n".join(
+            x for x in (asoode, agent_team_line(), update_line()) if x
+        )
     lines = [
         f"[Memory MCP] Binding rules for project '{slug}' — follow every one of these:",
     ]
@@ -246,6 +317,9 @@ def format_rules_block(slug: str, mandatory: list, forbidden: list) -> str:
     team = agent_team_line()
     if team:
         lines.append(team)
+    update = update_line()
+    if update:
+        lines.append(update)
     return "\n".join(lines)
 
 
@@ -277,6 +351,7 @@ def format_intro(slug: str) -> str:
         )
     text += asoode_intro(slug)
     text += agent_team_intro()
+    text += update_intro()
     return text
 
 

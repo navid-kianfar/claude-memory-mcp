@@ -77,6 +77,7 @@ def build_app() -> Starlette:
     async def lifespan(app):
         from memory_mcp.container import container
         from memory_mcp.services.socket_subscriber import SocketSubscriber
+        from memory_mcp.services.update_poller import UpdatePoller
 
         subscriber = SocketSubscriber(
             container.task_bridge, _all_links, _socket_credentials,
@@ -89,11 +90,24 @@ def build_app() -> Starlette:
         except Exception as e:  # noqa: BLE001 - never block the daemon starting
             log.warning("asoode socket subscription did not start: %s", e)
 
+        # Detects a newer version; never installs one. Applying an update
+        # reloads this daemon and drops every live MCP connection, and the
+        # daemon cannot reach a repo under a TCC-protected folder anyway - the
+        # Stop hook does the applying, in the user's own context.
+        poller = UpdatePoller(container.update_service)
+        app.state.update_poller = poller
+        try:
+            poller.start()
+        except Exception as e:  # noqa: BLE001 - never block the daemon starting
+            log.warning("update poller did not start: %s", e)
+
         async with mcp_app.lifespan(app):
             yield
 
         with contextlib.suppress(Exception):
             await subscriber.stop()
+        with contextlib.suppress(Exception):
+            await poller.stop()
 
     return Starlette(routes=routes, lifespan=lifespan)
 

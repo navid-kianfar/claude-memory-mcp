@@ -321,6 +321,17 @@ class AsoodeClient:
         body = {k: v for k, v in filters.items() if v is not None}
         return self._post("/tasks/kartabl", body)
 
+    def socket_ticket(self) -> dict:
+        """Exchange the PAT for a short-lived socket ticket.
+
+        The realtime gateway has no database by design and verifies signed JWTs
+        only, so a raw PAT is REJECTED there - it authenticates the REST API and
+        nothing else (main.gateway.ts:55-90). Returns {token, userId, expiresAt};
+        the ticket expires, so it is fetched fresh on every connect rather than
+        cached.
+        """
+        return self._post("/account/socket-token") or {}
+
     def whoami(self) -> dict | None:
         """Best-effort identity check, used by `asoode check` to prove the PAT works."""
         try:

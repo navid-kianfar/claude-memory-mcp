@@ -829,6 +829,16 @@ def _asoode_clear_pat(params, body, query):
     return asoode.status()
 
 
+async def _asoode_socket(request):
+    """Whether the live subscription is up. A silent background task that might
+    be dead is worse than no background task."""
+    sub = getattr(request.app.state, "asoode_socket", None)
+    if sub is None:
+        return JSONResponse({"started": False,
+                             "not_started_because": "no subscriber on this app"})
+    return JSONResponse(sub.status())
+
+
 def _asoode_boards(params, body, query):
     """Boards this credential can see - what the UI offers to attach."""
     return {"boards": container.task_bridge.boards(query.get("project_id"))}
@@ -1326,6 +1336,7 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/asoode/push", _api(_asoode_push), methods=["POST"]),
         Route("/api/asoode", _api(_asoode_status), methods=["GET"]),
         Route("/api/asoode/boards", _api(_asoode_boards), methods=["GET"]),
+        Route("/api/asoode/socket", _asoode_socket, methods=["GET"]),
         Route("/api/asoode", _api(_asoode_set_urls, admin=True), methods=["PUT"]),
         Route("/api/asoode/pat", _api(_asoode_set_pat, admin=True), methods=["POST"]),
         Route("/api/asoode/pat", _api(_asoode_clear_pat, admin=True), methods=["DELETE"]),

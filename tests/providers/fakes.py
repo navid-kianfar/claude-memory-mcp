@@ -46,6 +46,8 @@ class FakeProvider:
         self.comments: list[tuple[str, str]] = []
         self.time_logs: list[tuple[str, object, object]] = []
         self.attachments_sent: list[tuple[str, str, bytes, str | None]] = []
+        self.archived: list[tuple[str, bool]] = []
+        self.groups_archived: list[str] = []
         self.created_spaces: list[str] = []
         self._n = 0
 
@@ -104,7 +106,7 @@ class FakeProvider:
         return Capabilities(
             supports_external_ref=True, supports_comments=True, supports_groups=True,
             supports_independent_state=True, supports_time_tracking=True,
-            supports_attachments=True,
+            supports_attachments=True, supports_archive=True,
             states=STATES,
         )
 
@@ -215,3 +217,16 @@ class FakeProvider:
     def attach(self, task_id, filename, content, content_type=None):
         self._require_task(task_id)
         self.attachments_sent.append((task_id, filename, content, content_type))
+
+    def archive(self, task_id, archived=True):
+        self._require_task(task_id)["archived"] = bool(archived)
+        self.archived.append((task_id, bool(archived)))
+
+    def archive_group(self, group_id):
+        """Bulk: every task in the group, in one call - what asoode's
+        lists/:id/archive-tasks does server-side with one updateMany."""
+        for task_id, task in self._tasks.items():
+            if task.get("group") == group_id and not task.get("archived"):
+                task["archived"] = True
+                self.archived.append((task_id, True))
+        self.groups_archived.append(group_id)

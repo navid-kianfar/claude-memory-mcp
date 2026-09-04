@@ -300,6 +300,31 @@ class AsoodeClient:
             raise AsoodeError(f"asoode {resp.status_code} on attach: {resp.text[:200]}")
         return resp.json() if resp.content else {}
 
+    def archive_task(self, task_id: str, archived: bool = True) -> Any:
+        """Take a task off the board, or restore it.
+
+        An empty body toggles; sending {archived} sets it absolutely, which is
+        what a mirror needs - a retried flush must land on the same state rather
+        than flipping it back.
+        """
+        return self._post(f"/tasks/{task_id}/archive", {"archived": bool(archived)})
+
+    def archive_list_tasks(self, list_id: str) -> Any:
+        """Archive EVERY unarchived task in one list, in a single call.
+
+        POST /work-packages/lists/:id/archive-tasks. Server-side it is
+        updateMany({listId, archivedAt: null} -> archivedAt = now), so it is a
+        soft delete and reversible per task.
+
+        Use it to clear a finished column rather than looping archive_task over
+        forty cards. NOT to be confused with lists/:id/clear-tasks, which is the
+        destructive sibling.
+
+        It archives what is IN the list regardless of state, so only point it at
+        a column whose contents you have actually looked at.
+        """
+        return self._post(f"/work-packages/lists/{list_id}/archive-tasks", {})
+
     def spend_time(self, task_id: str, begin: str, end: str | None = None) -> Any:
         """Log a stretch of work. SpendTimeDto is {begin, end?} (task.dto.ts:116)."""
         body: dict = {"begin": begin}

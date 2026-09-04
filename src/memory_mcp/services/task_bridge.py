@@ -435,6 +435,15 @@ class TaskBridge:
             return True  # created in ToDo already; no state call needed
 
         op = row["op"]
+        if op == "archive":
+            provider = self.provider_for(link)
+            if not provider.capabilities.supports_archive:
+                # Keep the local archive, send nothing. A platform without the
+                # feature must not fail a local operation.
+                return False
+            payload = row.get("payload") or {}
+            provider.archive(remote_id, bool(payload.get("archived", True)))
+            return True
         if op == "attachment":
             return self._flush_attachments(slug, task, link, remote_id)
         if op == "time":

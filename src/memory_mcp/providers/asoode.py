@@ -47,6 +47,7 @@ _CAPABILITIES = Capabilities(
     supports_independent_state=True,
     # POST /tasks/:id/spend-time {begin, end}
     supports_time_tracking=True,
+    supports_archive=True,
     # POST /tasks/:taskId/attach, multipart
     supports_attachments=True,
     states=tuple(STATE_TO_ORDINAL),
@@ -182,6 +183,14 @@ class AsoodeProvider:
     def attach(self, task_id: str, filename: str, content: bytes,
                content_type: str | None = None) -> None:
         self.client.attach(task_id, filename, content, content_type)
+
+    def archive(self, task_id: str, archived: bool = True) -> None:
+        """POST /tasks/:id/archive - {archived} sets the state absolutely."""
+        self.client.archive_task(task_id, archived)
+
+    def archive_group(self, group_id: str) -> None:
+        """One call for a whole column - asoode has a real bulk route."""
+        self.client.archive_list_tasks(group_id)
 
     def log_time(self, task_id: str, begin, end=None) -> None:
         """asoode takes ISO instants; a datetime is what the local store holds."""

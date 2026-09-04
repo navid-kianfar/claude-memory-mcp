@@ -79,6 +79,10 @@ class Capabilities:
     #: Time spent can be logged against a remote task. When False the flusher
     #: keeps the local entries and sends nothing, rather than losing them.
     supports_time_tracking: bool = False
+    #: A task can be archived - taken off the board without being deleted.
+    #: When False the flusher keeps the local archive and sends nothing,
+    #: rather than failing a local operation on a remote shortcoming.
+    supports_archive: bool = False
     #: Local task states this platform can represent. A state outside this set is
     #: mapped to the nearest one by the provider, never dropped silently.
     states: tuple[str, ...] = ()
@@ -241,6 +245,22 @@ class TaskProvider(Protocol):
         Content is BYTES, not a path: a provider must never reach into this
         server's filesystem layout, and every platform's upload is a multipart
         body anyway.
+        """
+
+    def archive(self, task_id: str, archived: bool = True) -> None:
+        """Take a task off the board, or put it back. Only called when
+        `supports_archive`.
+
+        Takes the BOOLEAN rather than being one-way: the local store can
+        un-archive, and a one-way call would make that unmirrorable, so the two
+        sides would drift the moment anyone restored a task.
+        """
+
+    def archive_group(self, group_id: str) -> None:
+        """Archive every task in one group/column, in a single call.
+
+        Only called when `supports_archive`. A provider without a bulk route may
+        implement it as a loop, but it must exist so callers need not choose.
         """
 
     def log_time(self, task_id: str, begin, end=None) -> None:

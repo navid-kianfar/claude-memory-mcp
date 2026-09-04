@@ -624,4 +624,7 @@ class TaskService:
         self._task_repo.release(project, task_id, None)
         task = self._task_repo.archive(project, task_id)
         self._record(project, task_id, "task_archive", {"title": task.title})
+        # The board keeps showing it otherwise: archived tasks are hidden from
+        # the local list, so the two sides would diverge where nobody looks.
+        self._enqueue(project, task_id, "archive", {"archived": True})
         return task

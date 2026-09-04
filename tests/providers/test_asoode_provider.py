@@ -26,6 +26,8 @@ class FakeAsoodeClient:
         self.comments: list[tuple[str, str]] = []
         self.spent: list[tuple[str, str, str | None]] = []
         self.attached: list[tuple[str, str, bytes]] = []
+        self.archived: list[tuple[str, bool]] = []
+        self.lists_archived: list[str] = []
         self._n = 0
 
     def _next(self, prefix):
@@ -123,6 +125,18 @@ class FakeAsoodeClient:
         if task_id not in self.tasks:
             raise AsoodeError(f"no task {task_id}")
         self.attached.append((task_id, filename, content))
+
+    def archive_task(self, task_id, archived=True):
+        self.tasks[task_id]["archivedAt"] = "now" if archived else None
+        self.archived.append((task_id, archived))
+
+    def archive_list_tasks(self, list_id):
+        """Mirrors the server: updateMany over one list, in a single call."""
+        for tid, t in self.tasks.items():
+            if t.get("listId") == list_id and not t.get("archivedAt"):
+                t["archivedAt"] = "now"
+                self.archived.append((tid, True))
+        self.lists_archived.append(list_id)
 
     def spend_time(self, task_id, begin, end=None):
         if task_id not in self.tasks:

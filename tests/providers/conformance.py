@@ -102,6 +102,31 @@ class ProviderConformance(SpaceConformance):
         """A container to work in, created through the provider's own API."""
         return provider.create_container("Conformance", external_ref="conformance-1")
 
+    # ---------- archive ----------
+
+    def test_archive_hides_a_task_and_can_restore_it(self, provider, container):
+        """Both directions. A one-way archive makes un-archiving unmirrorable."""
+        if not provider.capabilities.supports_archive:
+            pytest.skip("provider does not support archive")
+        task = provider.create_task(container.id, None, "To be archived")
+
+        provider.archive(task.id, True)
+        provider.archive(task.id, False)
+        provider.archive(task.id, True)  # idempotent: a retried flush must land here
+
+    def test_archive_group_takes_a_whole_column(self, provider, container):
+        """asoode has a real bulk route; looping single calls is the wrong shape."""
+        if not provider.capabilities.supports_archive:
+            pytest.skip("provider does not support archive")
+        groups = list(container.groups or [])
+        if not groups:
+            pytest.skip("provider has no groups")
+        group = groups[0].id
+        provider.create_task(container.id, group, "One")
+        provider.create_task(container.id, group, "Two")
+
+        provider.archive_group(group)  # must not raise
+
     # ---------- shape ----------
 
     def test_satisfies_the_protocol(self, provider):

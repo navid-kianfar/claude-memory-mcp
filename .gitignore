@@ -40,3 +40,6 @@ Thumbs.db
 # Local test credentials for the browser agents. The .example file is
 # committed; the real one never is.
 .claude/test-credentials.json
+
+# Agent worktrees are throwaway checkouts, never committed.
+.claude/worktrees/

@@ -1314,6 +1314,10 @@ def _update_status(params, body, query):
         "commits_behind": status.get("commits_behind"),
         "release_url": status.get("release_url"),
         "release_notes": status.get("release_notes"),
+        # The github_commits strategy never yields release notes (this repo
+        # publishes no releases), so the commit subjects ARE the "what changed".
+        # Dropping them left the banner with nothing to show but a compare link.
+        "recent_commits": status.get("recent_commits") or [],
         "source": status.get("source"),
         "last_checked_at": get_setting("update:last_checked_at"),
         "last_error": get_setting("update:last_error") or None,
@@ -1386,8 +1390,10 @@ def build_routes() -> list:
         Route("/api/hook/update", _hook_update, methods=["GET"]),
         Route("/api/hook/update-done", _hook_update_done, methods=["POST"]),
         Route("/api/update", _api(_update_status, public=True), methods=["GET"]),
-        Route("/api/update/approve", _api(_update_approve), methods=["POST"]),
-        Route("/api/update/approve", _api(_update_cancel), methods=["DELETE"]),
+        # admin: approving queues a restart of the daemon that every session
+        # on this machine (and every member, in server mode) depends on.
+        Route("/api/update/approve", _api(_update_approve, admin=True), methods=["POST"]),
+        Route("/api/update/approve", _api(_update_cancel, admin=True), methods=["DELETE"]),
         Route("/api/meta", _api(_meta, public=True), methods=["GET"]),
         # Auth (server mode): login/whoami are auth-optional; logout clears state.
         Route("/api/auth/login", _login, methods=["POST"]),

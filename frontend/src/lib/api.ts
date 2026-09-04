@@ -42,6 +42,7 @@ import type {
   TemplateItemInput,
   TemplateItemUpdate,
   TemplateUpdate,
+  UpdateStatus,
   User,
   UsersResponse,
 } from "../types";
@@ -684,6 +685,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     });
+  },
+
+  // ---------- self-update ----------
+  // Machine-wide, like the asoode credential: one daemon, one installation.
+
+  getUpdateStatus(): Promise<UpdateStatus> {
+    return request("/api/update");
+  },
+
+  /**
+   * Record approval. Does NOT install - the Stop hook applies it at the end of
+   * the turn. Refused with an error when the cached poll says there is nothing
+   * to apply, which is how a stale banner tells on itself.
+   */
+  approveUpdate(): Promise<{ status: string; approved: boolean; note?: string }> {
+    return request("/api/update/approve", { method: "POST" });
+  },
+
+  cancelUpdateApproval(): Promise<{ status: string; approved: boolean }> {
+    return request("/api/update/approve", { method: "DELETE" });
   },
 };
 

@@ -52,6 +52,7 @@ import { ImportRulesDialog } from "./components/ImportRulesDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { TemplatesView } from "./components/TemplatesView";
 import { IntegrationsView } from "./components/IntegrationsView";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { EditProjectDialog } from "./components/EditProjectDialog";
 import { BulkAddRuleDialog } from "./components/BulkAddRuleDialog";
 
@@ -774,6 +775,11 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
         </header>
 
         <div className="flex-1 overflow-y-auto px-6 py-5 scrollbar-thin">
+          {/* Machine-wide, so it sits above every view rather than inside one.
+              Renders nothing at all unless there is an update or the last check
+              failed - see UpdateBanner. */}
+          <UpdateBanner />
+
           {bootError && (
             <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
               {bootError}

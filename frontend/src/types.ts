@@ -476,3 +476,27 @@ export interface BoardRef {
   project_title: string | null;
   provider?: string;
 }
+
+// ---------- self-update ----------
+
+/**
+ * `GET /api/update` — what the daemon's poller last found, machine-wide.
+ *
+ * `update_available` is only ever true after a check that actually SUCCEEDED.
+ * A failed check reports `update_available: false` with `last_error` set, which
+ * means "we could not tell" — never "you are up to date".
+ */
+export interface UpdateStatus {
+  update_available: boolean;
+  current_version: string | null;
+  latest_version: string | null;
+  commits_behind: number | null;
+  release_url: string | null;
+  release_notes: string | null;
+  source: string | null;
+  /** Unix epoch seconds, as a string. Not ISO — parse before formatting. */
+  last_checked_at: string | null;
+  last_error: string | null;
+  /** True once the user has pressed Update. The Stop hook clears it. */
+  approved: boolean;
+}

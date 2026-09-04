@@ -515,9 +515,9 @@ class TaskRepository:
     def list_meta(self, project: str) -> dict[str, dict]:
         """Per-task row metadata for the list view, in four grouped queries.
 
-        The list shows comment counts, sub-task progress, tracked time and
-        whether a clock is running - none of which live on the `tasks` row, and
-        none of which should cost a query per task.
+        The list shows comment counts, sub-task progress, tracked time, whether a
+        clock is running and how many files are attached - none of which live on
+        the `tasks` row, and none of which should cost a query per task.
         """
         meta: dict[str, dict] = {}
 
@@ -526,7 +526,7 @@ class TaskRepository:
                 task_id,
                 {
                     "comments": 0, "subtasks_total": 0, "subtasks_done": 0,
-                    "minutes_spent": 0, "running": False,
+                    "minutes_spent": 0, "running": False, "attachments": 0,
                 },
             )
 
@@ -535,6 +535,14 @@ class TaskRepository:
                 "SELECT task_id, COUNT(*) FROM task_comments GROUP BY task_id"
             ).fetchall():
                 slot(task_id)["comments"] = int(count)
+
+            try:
+                for task_id, count in conn.execute(
+                    "SELECT task_id, COUNT(*) FROM task_attachments GROUP BY task_id"
+                ).fetchall():
+                    slot(task_id)["attachments"] = int(count)
+            except Exception:  # noqa: BLE001 - a DB older than v11
+                pass
 
             for parent_id, total, done in conn.execute(
                 """

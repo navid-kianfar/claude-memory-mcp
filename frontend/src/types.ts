@@ -359,6 +359,7 @@ export interface TaskDetail {
   subtasks: Task[];
   minutes_spent: number;
   running: boolean;
+  attachments?: number;
 }
 
 /** What a list row shows beyond the task's own columns. */
@@ -368,6 +369,7 @@ export interface TaskRowMeta {
   subtasks_done: number;
   minutes_spent: number;
   running: boolean;
+  attachments?: number;
 }
 
 export interface TaskActivityEntry {

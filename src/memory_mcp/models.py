@@ -397,6 +397,7 @@ class TaskRowMeta(BaseModel):
     subtasks_done: int = 0
     minutes_spent: int = 0
     running: bool = False
+    attachments: int = 0
 
 
 class TaskAttachment(BaseModel):

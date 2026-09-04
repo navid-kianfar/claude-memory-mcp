@@ -285,6 +285,23 @@ def memory_asoode_push(project: str | None = None, include_done: bool = True) ->
 
 
 @mcp.tool()
+def memory_asoode_reconcile(project: str | None = None) -> dict:
+    """Pull tasks added on the board that are not in the local list yet.
+
+    Safe by construction: it only CREATES locally, never updates, so a task with
+    local edits cannot be overwritten. This is what runs automatically after a
+    mirror, so work someone adds on the board reaches the session.
+
+    Use memory_asoode_import instead to also pull CHANGES to tasks that exist on
+    both sides - that one overwrites the local title and state.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.asoode_bridge.reconcile(slug)
+    return _safe(_run)
+
+
+@mcp.tool()
 def memory_asoode_import(project: str | None = None) -> dict:
     """Pull tasks FROM the linked asoode boards into this project's task list.
 

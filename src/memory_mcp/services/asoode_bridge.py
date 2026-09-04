@@ -433,7 +433,9 @@ class AsoodeBridge:
 
     # ---------- inbound ----------
 
-    def import_board(self, slug: str, link: dict, *, limit: int = 500) -> dict:
+    def import_board(
+        self, slug: str, link: dict, *, limit: int = 500, update_existing: bool = True,
+    ) -> dict:
         """Pull one board's tasks into the local store.
 
         IDENTITY IS THE REMOTE ID, held in task_sync - not the title, and not
@@ -455,46 +457,54 @@ class AsoodeBridge:
         suppressed = getattr(self._tasks, "_outbox", None)
         self._tasks._outbox = None
         try:
-            return self._import_rows(slug, link, container, limit)
+            return self._import_rows(slug, link, container, limit, update_existing)
         finally:
             self._tasks._outbox = suppressed
 
-    def _import_rows(self, slug, link, container, limit) -> dict:
+    def _import_rows(self, slug, link, container, limit, update_existing=True) -> dict:
         created, updated, skipped = [], [], 0
+        # Fallback identity, built once per board. See _resolve_local.
+        existing_by_title: dict[str, str] = {}
+        for task in self._tasks.list_tasks(
+            slug, TaskFilter(include_done=True, include_subtasks=True), limit=1000,
+        ).tasks:
+            existing_by_title.setdefault(task.title.strip().lower(), task.id)
+
         for remote in list(container.tasks)[:limit]:
-            remote_id = remote.id
             title = (remote.title or "").strip()
-            if not remote_id or not title:
+            if not remote.id or not title:
                 skipped += 1
                 continue
             state = remote.state
-            local_id = self._outbox.local_id_for_remote(slug, link["id"], remote_id)
+            local_id = self._resolve_local(slug, link, remote, existing_by_title)
 
             if local_id:
-                try:
-                    current = self._tasks.get(slug, local_id)
-                except Exception:  # noqa: BLE001 - deleted locally since
-                    current = None
-                if current is not None:
-                    if current.title != title or current.state.value != state:
-                        self._tasks.update(UpdateTaskRequest(
-                            project=slug, task_id=local_id, title=title,
-                            state=TaskState(state),
-                        ))
-                        updated.append({"task_id": local_id, "title": title})
+                if not update_existing:
+                    # Reconcile mode: a task that already exists locally is left
+                    # alone. Overwriting needs a two-sided conflict policy, which
+                    # is undecided - guessing would discard local edits silently.
                     continue
+                current = self._tasks.get(slug, local_id)
+                if current.title != title or current.state.value != state:
+                    self._tasks.update(UpdateTaskRequest(
+                        project=slug, task_id=local_id, title=title,
+                        state=TaskState(state),
+                    ))
+                    updated.append({"task_id": local_id, "title": title})
+                continue
 
             task = self._tasks.create(CreateTaskRequest(
                 project=slug, title=title,
                 description=remote.description or None,
-                source=TaskSource.ASOODE if hasattr(TaskSource, "ASOODE") else TaskSource.USER,
+                source=TaskSource.ASOODE,
             ))
             if state != "todo":
                 self._tasks.update(UpdateTaskRequest(
                     project=slug, task_id=task.id, state=TaskState(state),
                 ))
             self._tasks.set_link(slug, task.id, link["id"])
-            self._outbox.remember(slug, task.id, link["id"], remote_id, state)
+            self._outbox.remember(slug, task.id, link["id"], remote.id, state)
+            existing_by_title.setdefault(title.lower(), task.id)
             created.append({"task_id": task.id, "title": title, "state": state})
 
         return {
@@ -503,6 +513,70 @@ class AsoodeBridge:
             "created": created, "updated": updated, "skipped": skipped,
             "counts": {"created": len(created), "updated": len(updated)},
         }
+
+    def _resolve_local(self, slug: str, link: dict, remote, existing_by_title: dict):
+        """Which local task a remote one is, if any.
+
+        THREE identities, in descending order of trust, because relying on only
+        the first one duplicated 54 tasks across two projects:
+
+        1. The stored task_sync mapping. Exact, but ABSENT for anything mirrored
+           before that mapping was reliably written - and a missing mapping used
+           to mean "this is new", which is how the duplicates happened.
+        2. The remote externalRef, which for anything pushed from here is
+           "memory-mcp:<local task id>" - a perfect identity when the platform
+           returns it. asoode's board fetch does not yet, so this is currently
+           dormant on asoode and correct everywhere else.
+        3. The title, within this board. Imperfect - two tasks can share one -
+           but far better than creating a duplicate, which is unrecoverable
+           without a human reading both.
+
+        A match found by 2 or 3 BACKFILLS the mapping, so the gap that caused
+        this heals itself the first time a board is read.
+        """
+        remote_id = remote.id
+        mapped = self._outbox.local_id_for_remote(slug, link["id"], remote_id)
+        if mapped:
+            return mapped
+
+        candidate = None
+        ref = (remote.external_ref or "")
+        if ref.startswith("memory-mcp:"):
+            candidate = ref.split(":", 1)[1]
+        if candidate is None:
+            candidate = existing_by_title.get((remote.title or "").strip().lower())
+        if not candidate:
+            return None
+        try:
+            self._tasks.get(slug, candidate)
+        except Exception:  # noqa: BLE001 - the title matched a task since deleted
+            return None
+        self._outbox.remember(slug, candidate, link["id"], remote_id, remote.state)
+        return candidate
+
+    def reconcile(self, slug: str) -> dict:
+        """Pull tasks that exist remotely but NOT locally. Never overwrites.
+
+        The safe half of the inbound direction, and safe by construction: a task
+        that is not in the local store cannot have local edits to lose. Someone
+        adding a task on the board therefore sees it in the session, without any
+        conflict policy being needed.
+
+        Updating a task that exists on BOTH sides is the other half, and it stays
+        behind `import_all` (explicit) until the two-sided conflict policy is
+        decided - last-write-wins would silently discard local work.
+        """
+        links = get_project_links(slug)
+        if not links:
+            return {"slug": slug, "imported": 0, "reason": "not linked"}
+        imported, failed = 0, []
+        for link in links:
+            try:
+                result = self.import_board(slug, link, update_existing=False)
+                imported += result["counts"]["created"]
+            except ProviderError as e:
+                failed.append({"board": link.get("label"), "error": str(e)})
+        return {"slug": slug, "imported": imported, "failed": failed}
 
     def import_all(self, slug: str) -> dict:
         """Pull every linked board into the local store."""

@@ -103,6 +103,10 @@ class Container:
         def _run():
             try:
                 self.asoode_bridge.flush(project)
+                # Then pull anything added on the board. Only NEW remote tasks -
+                # see AsoodeBridge.reconcile - so this can never overwrite local
+                # work, which is what makes it safe to run unattended.
+                self.asoode_bridge.reconcile(project)
             except Exception:  # noqa: BLE001 - a mirror can never break a local write
                 pass
             finally:

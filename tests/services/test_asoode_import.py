@@ -138,3 +138,113 @@ class TestImport:
         result = _bridge(_provider()).import_all(project)
         assert result["counts"]["created"] == 2
         assert result["failed"][0]["board"] == "broken"
+
+
+class TestIdentityWhenTheMappingIsMissing:
+    """The bug that duplicated 54 tasks across two projects.
+
+    Import treated the stored task_sync mapping as the ONLY identity, so a remote
+    task whose mapping was absent - anything mirrored before that mapping was
+    written reliably - looked new and was created again. A duplicated task is not
+    recoverable without a human reading both copies, so identity here has to be
+    defensive rather than exact.
+    """
+
+    def test_a_missing_mapping_does_not_create_a_duplicate(self, project):
+        """Matched by title within the board, which is imperfect but far better
+        than a duplicate."""
+        from memory_mcp.models import CreateTaskRequest
+
+        container.task_service.create(
+            CreateTaskRequest(project=project, title="Made in asoode"))
+        result = _bridge().import_all(project)
+
+        assert result["counts"]["created"] == 1, "only the genuinely new one"
+        titles = [t.title for t in container.task_service.list_tasks(
+            project, TaskFilter(include_done=True), limit=20).tasks]
+        assert titles.count("Made in asoode") == 1
+
+    def test_a_title_match_backfills_the_mapping(self, project):
+        """So the gap heals the first time a board is read, instead of relying on
+        the title match forever."""
+        from memory_mcp.db.registry import get_default_project_link
+        from memory_mcp.models import CreateTaskRequest
+
+        task = container.task_service.create(
+            CreateTaskRequest(project=project, title="Made in asoode"))
+        _bridge().import_all(project)
+
+        link = get_default_project_link(project)
+        assert container.outbox_repo.local_id_for_remote(project, link["id"], "r1") == task.id
+
+    def test_an_external_ref_identifies_a_task_pushed_from_here(self, project):
+        """The strongest identity after the stored mapping: anything pushed from
+        here carries memory-mcp:<local id> on the remote task."""
+        from memory_mcp.models import CreateTaskRequest
+
+        task = container.task_service.create(
+            CreateTaskRequest(project=project, title="Renamed remotely"))
+        provider = _provider(tasks=[{
+            "id": "r9", "title": "Renamed remotely", "state": "todo",
+            "external_ref": f"memory-mcp:{task.id}",
+        }])
+        # Title differs from the local one, so only the ref can match them.
+        provider._tasks["r9"]["title"] = "A different title entirely"
+        result = _bridge(provider).import_all(project)
+
+        assert result["counts"]["created"] == 0, "the ref identifies it"
+        assert result["counts"]["updated"] == 1
+
+    def test_a_ref_pointing_at_a_deleted_task_creates_rather_than_crashing(self, project):
+        provider = _provider(tasks=[{
+            "id": "r9", "title": "Orphan", "state": "todo",
+            "external_ref": "memory-mcp:00000000-0000-0000-0000-000000000000",
+        }])
+        result = _bridge(provider).import_all(project)
+        assert result["counts"]["created"] == 1
+
+    def test_reconcile_is_idempotent(self, project):
+        bridge = _bridge()
+        first = bridge.reconcile(project)
+        second = bridge.reconcile(project)
+        assert first["imported"] == 2
+        assert second["imported"] == 0, "running it twice must import nothing new"
+
+
+class TestReconcileNeverOverwrites:
+    """Safe by construction: it only creates, so a task with local edits cannot
+    be clobbered. Updating both sides needs the conflict policy, still undecided."""
+
+    def test_a_local_edit_survives_reconcile(self, project):
+        from memory_mcp.models import CreateTaskRequest, TaskState
+
+        bridge = _bridge()
+        bridge.reconcile(project)
+        task = next(t for t in container.task_service.list_tasks(
+            project, TaskFilter(include_done=True), limit=20).tasks
+            if t.title == "Made in asoode")
+        container.task_service.set_state(project, task.id, TaskState.BLOCKED)
+
+        bridge.reconcile(project)
+        assert container.task_service.get(project, task.id).state.value == "blocked"
+
+    def test_import_all_still_updates_deliberately(self, project):
+        """The explicit path keeps overwriting - that is what it is for."""
+        from memory_mcp.models import TaskState
+
+        bridge = _bridge()
+        bridge.reconcile(project)
+        task = next(t for t in container.task_service.list_tasks(
+            project, TaskFilter(include_done=True), limit=20).tasks
+            if t.title == "Made in asoode")
+        container.task_service.set_state(project, task.id, TaskState.BLOCKED)
+
+        bridge.import_all(project)
+        assert container.task_service.get(project, task.id).state.value == "todo"
+
+    def test_an_unlinked_project_reconciles_to_nothing(self, project):
+        from memory_mcp.db.registry import delete_project_link, get_project_links
+
+        for link in get_project_links(project):
+            delete_project_link(link["id"])
+        assert _bridge().reconcile(project)["imported"] == 0

@@ -102,16 +102,10 @@ def _ensure_builtins() -> None:
 
         return AsoodeProvider()
 
-    def _trello() -> TaskProvider:
-        from memory_mcp.providers.trello import TrelloProvider
-
-        return TrelloProvider()
-
-    def _asana() -> TaskProvider:
-        from memory_mcp.providers.asana import AsanaProvider
-
-        return AsanaProvider()
-
     register(DEFAULT_PROVIDER, _asoode)
-    register("trello", _trello)
-    register("asana", _asana)
+    # A second platform registers here, in exactly this shape. Deliberately none
+    # today: an implementation written against published docs but never run
+    # against the live service is not a working provider, and a suite built on a
+    # fake its own author wrote cannot tell the difference. The contract, the
+    # registry and the conformance suite are the reusable part; a real provider
+    # arrives with real credentials to verify it.

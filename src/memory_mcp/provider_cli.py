@@ -28,8 +28,6 @@ USAGE = "Usage: memory-mcp provider [list|set-credential|clear-credential]"
 # What a platform's secret actually is, so the prompt asks for the right thing.
 _HINTS = {
     "asoode": "a personal access token (asoode_pat_…)",
-    "trello": 'an API key and token together as "key:token" (trello.com/app-key)',
-    "asana": "a personal access token (app.asana.com/0/my-apps)",
 }
 
 

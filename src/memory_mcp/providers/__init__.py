@@ -28,9 +28,7 @@ from memory_mcp.providers.registry import (
 )
 
 __all__ = [
-    "AsanaProvider",
     "AsoodeProvider",
-    "TrelloProvider",
     "DEFAULT_PROVIDER",
     "available",
     "get_provider",
@@ -63,12 +61,4 @@ def __getattr__(name: str):
         from memory_mcp.providers.asoode import AsoodeProvider
 
         return AsoodeProvider
-    if name == "AsanaProvider":
-        from memory_mcp.providers.asana import AsanaProvider
-
-        return AsanaProvider
-    if name == "TrelloProvider":
-        from memory_mcp.providers.trello import TrelloProvider
-
-        return TrelloProvider
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

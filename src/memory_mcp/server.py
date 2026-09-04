@@ -219,6 +219,7 @@ def memory_asoode_attach(
     label: str | None = None,
     is_default: bool = True,
     provider: str | None = None,
+    backfill: bool = False,
     project: str | None = None,
 ) -> dict:
     """Link this project to an asoode board that ALREADY EXISTS. Creates nothing.
@@ -235,12 +236,18 @@ def memory_asoode_attach(
     `provider` names which (memory_asoode_status lists them), defaulting to
     asoode. `is_default` picks the board a task with no explicit target routes
     to; promoting a link demotes the others.
+
+    The reply says how many existing tasks are NOT on the board yet. They are not
+    sent automatically - linking a project with a long history would otherwise
+    flood a board someone just made, and there is no bulk undo on the far side.
+    Pass backfill=True to mirror them, or say the count and let the user decide.
     """
     def _run():
         slug = _resolve(project)
         return container.asoode_bridge.attach(
             slug, external_ref=external_ref, work_package_id=work_package_id,
             label=label, is_default=is_default, provider=provider,
+            backfill=backfill,
         )
     return _safe(_run)
 

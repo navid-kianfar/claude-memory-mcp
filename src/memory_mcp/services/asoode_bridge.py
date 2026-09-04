@@ -146,7 +146,7 @@ class AsoodeBridge:
     def bootstrap(
         self, slug: str, *, project_title: str | None = None,
         board_title: str | None = None, reuse_project_id: str | None = None,
-        provider: str | None = None,
+        provider: str | None = None, backfill: bool = False,
     ) -> dict:
         """Create (or find) the asoode project + board for a memory project.
 
@@ -200,13 +200,14 @@ class AsoodeBridge:
             "work_package": {"id": package_id, "title": container.title},
             "lists": [{"id": g.id, "title": g.title} for g in container.groups],
             "url": f"{endpoints.app_url}/projects/{project_id}",
+            **self._backfill_offer(slug, backfill),
         }
 
     def attach(
         self, slug: str, *, work_package_id: str | None = None,
         external_ref: str | None = None, label: str | None = None,
         is_default: bool = True, match_paths: list | None = None,
-        provider: str | None = None,
+        provider: str | None = None, backfill: bool = False,
     ) -> dict:
         """Link a memory project to a board that ALREADY EXISTS. Creates nothing.
 
@@ -264,6 +265,7 @@ class AsoodeBridge:
             "lists": [{"id": g.id, "title": g.title} for g in container.groups],
             "url": f"{endpoints.app_url}/projects/{project_id}",
             "created": False,
+            **self._backfill_offer(slug, backfill),
         }
 
     # ---------- routing ----------
@@ -666,6 +668,42 @@ class AsoodeBridge:
             self._outbox.mark_time_mirrored(slug, entry["id"])
         return True
 
+    def _backfill_offer(self, slug: str, backfill: bool) -> dict:
+        """What linking would move, and optionally move it.
+
+        OFFERED, NOT AUTOMATIC. Linking a project that already has a long task
+        history would otherwise push everything to a board someone just created,
+        which is occasionally what is wanted and usually a surprise - and there
+        is no bulk undo on the other side. So the default reports the count and
+        waits to be asked.
+        """
+        link = get_default_project_link(slug)
+        every = self._tasks.list_tasks(
+            slug, TaskFilter(include_done=True, include_subtasks=True), limit=1000,
+        ).tasks
+        # Only what is genuinely NOT on the board. Counting every local task
+        # would report "27 not mirrored" for a project whose 27 tasks are all
+        # already there, which is worse than saying nothing.
+        pending = [
+            t for t in every
+            if link is None
+            or not self._outbox.remote_id(slug, t.id, link["id"])
+        ] if self._outbox else every
+        if not backfill:
+            return {
+                "backfill_available": len(pending),
+                "backfill_hint": (
+                    f"{len(pending)} existing task(s) are not on this board yet. "
+                    "Re-run with backfill=True, or call memory_asoode_push, to "
+                    "mirror them."
+                ) if pending else None,
+            }
+        result = self.push(slug)
+        return {
+            "backfill_available": len(pending),
+            "backfilled": result["counts"],
+        }
+
     def boards(
         self, project_id: str | None = None, provider: str | None = None,
     ) -> list[dict]:
@@ -785,6 +823,12 @@ class AsoodeBridge:
                     external_ref=f"memory-mcp:{task.id}",
                 )
                 remote_id = remote.id
+                # Remember the mapping, exactly as the flusher does. Without it a
+                # pushed task looks unmirrored to the backfill count and looks NEW
+                # to reconcile - which is how 54 duplicates were created.
+                if remote_id and self._outbox is not None:
+                    self._outbox.remember(
+                        slug, task.id, link["id"], remote_id, task.state.value)
                 # asoode creates in ToDo; carry the real state over. Skipped for
                 # todo so a re-push of an unchanged list makes no extra calls.
                 if remote_id and task.state.value != "todo":

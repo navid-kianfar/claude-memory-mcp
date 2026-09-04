@@ -410,3 +410,79 @@ class TestAttachExisting:
         )
         refs = {b["external_ref"] for b in bridge.boards()}
         assert refs == {"app-worker", "app-backend"}
+
+
+class TestBackfillIsOfferedNotAutomatic:
+    """Linking a project with a long history would otherwise flood a board
+    someone just created, and there is no bulk undo on the far side."""
+
+    def test_attach_reports_what_is_not_mirrored_yet(self, linked_project):
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, _provider(),
+            outbox_repo=container.outbox_repo,
+        )
+        for i in range(3):
+            container.task_service.create(
+                CreateTaskRequest(project=linked_project, title=f"Existing {i}"))
+
+        result = bridge.attach(linked_project, external_ref="app-worker")
+        assert result["backfill_available"] == 3
+        assert "Re-run with backfill=True" in result["backfill_hint"]
+
+    def test_nothing_is_sent_without_being_asked(self, linked_project):
+        fake = _provider()
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, fake,
+            outbox_repo=container.outbox_repo,
+        )
+        container.task_service.create(
+            CreateTaskRequest(project=linked_project, title="Stays put"))
+        bridge.attach(linked_project, external_ref="app-worker")
+        assert fake.created_tasks == [], "linking must not push on its own"
+
+    def test_backfill_true_mirrors_them(self, linked_project):
+        fake = _provider()
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, fake,
+            outbox_repo=container.outbox_repo,
+        )
+        container.task_service.create(
+            CreateTaskRequest(project=linked_project, title="Send me"))
+        result = bridge.attach(linked_project, external_ref="app-worker", backfill=True)
+
+        assert result["backfilled"]["pushed"] == 1
+        assert [t["title"] for t in fake.created_tasks] == ["Send me"]
+
+    def test_already_mirrored_tasks_are_not_counted(self, linked_project):
+        """Reporting "27 not mirrored" for a project whose 27 tasks are all
+        already there is worse than saying nothing."""
+        fake = _provider()
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, fake,
+            outbox_repo=container.outbox_repo,
+        )
+        container.task_service.create(
+            CreateTaskRequest(project=linked_project, title="Already there"))
+        bridge.attach(linked_project, external_ref="app-worker", backfill=True)
+
+        again = bridge.attach(linked_project, external_ref="app-worker")
+        assert again["backfill_available"] == 0
+        assert again["backfill_hint"] is None
+
+
+class TestPushRecordsTheMapping:
+    def test_a_pushed_task_is_identifiable_afterwards(self, linked_project):
+        """push() used to create remote tasks without storing the mapping, so a
+        pushed task looked unmirrored to the backfill count and NEW to reconcile
+        - which is how 54 duplicates were created."""
+        bridge = AsoodeBridge(
+            container.project_service, container.task_service, _provider(),
+            outbox_repo=container.outbox_repo,
+        )
+        bridge.bootstrap(linked_project)
+        task = container.task_service.create(
+            CreateTaskRequest(project=linked_project, title="Pushed"))
+        bridge.push(linked_project)
+
+        link = get_default_project_link(linked_project)
+        assert container.outbox_repo.remote_id(linked_project, task.id, link["id"])

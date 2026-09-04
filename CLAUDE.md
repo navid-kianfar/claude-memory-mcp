@@ -81,11 +81,18 @@ project holds MANY links (a monorepo has one board per app); `memory_task_add`'s
 - `memory_asoode_boards` lists what can be attached.
 - `memory_asoode_import` pulls board tasks into the local list.
 
-Mirroring is automatic: every task create/update/completion/comment queues to an
-outbox and flushes off-thread, so a local write never waits on the network and an
-unreachable asoode is a delay, not a lost edit. `memory_asoode_push` is now only
-for full reconciliation. **Still one-way for edits** — importing is explicit, so
-never say the two sides are in sync.
+Mirroring is automatic in both directions. Out: every create/update/completion/
+comment/time-entry/attachment queues to an outbox and flushes off-thread, so a
+local write never waits on the network. In: a Socket.IO subscription reconciles
+within seconds of a board change, backed by a poll so a dropped socket only costs
+promptness.
+
+**Inbound only CREATES.** A task on both sides is never overwritten — that needs
+a conflict policy nobody has decided. `memory_asoode_import` is the explicit path
+that does overwrite, so do not describe the two sides as "in sync".
+
+`memory_task_attach(task_id, path)` puts evidence on a task — a screenshot of a
+working fix, a failing log — and mirrors it to the board.
 - `memory_asoode_push` mirrors local tasks onto it.
 - `memory-mcp asoode open <slug>` opens that board already signed in.
 

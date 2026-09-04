@@ -221,7 +221,7 @@ A React single-page app served by the daemon at `/`:
 
 ## MCP tools
 
-All 63 tools:
+All 66 tools:
 
 | Area | Tools |
 |------|-------|
@@ -238,7 +238,8 @@ All 63 tools:
 | Portability | `memory_attach_project`, `memory_make_portable`, `memory_sync` |
 | Import/Export | `memory_export`, `memory_import`, `memory_import_claude_md` |
 | Model | `memory_model_info`, `memory_set_model`, `memory_reembed` |
-| asoode bridge | `memory_asoode_status`, `memory_asoode_boards`, `memory_asoode_attach`, `memory_asoode_link`, `memory_asoode_import`, `memory_asoode_push`, `memory_asoode_links` |
+| asoode bridge | `memory_asoode_status`, `memory_asoode_boards`, `memory_asoode_attach`, `memory_asoode_link`, `memory_asoode_import`, `memory_asoode_reconcile`, `memory_asoode_push`, `memory_asoode_links` |
+| Attachments | `memory_task_attach`, `memory_task_attachments` |
 | Misc | `memory_provenance`, `memory_version`, `memory_check_update` |
 
 ## Configuration
@@ -326,6 +327,14 @@ change described in several clauses is not a plan. Fewer than 2 tasks is rejecte
 description is refused — over-decomposition buries a board in rows nobody would
 plan around.
 
+### Other platforms
+
+The bridge is provider-agnostic: `TaskProvider` (a Protocol), a registry that
+resolves a link's `provider` column, per-(provider, account) credentials, and a
+conformance suite any implementation must pass. asoode is the only provider
+shipped, because an integration written from published docs and tested against a
+fake written in this repo is not a verified integration.
+
 ### Binding a project makes its board the work queue
 
 A bound project's `memory_session_start` returns the board's open tasks and a
@@ -357,8 +366,34 @@ The sibling `app.`/`socket.` URLs are derived when the host looks like
 `api.<domain>`; otherwise pass `--app` and `--socket` too. `reset-url` returns to
 the hosted defaults.
 
-**One-way today.** Local tasks reach asoode; changes made in asoode do not come
-back yet (that needs the socket subscription and the `updatedSince` reconcile).
+### Both directions
+
+**Out:** every task create, update, completion, comment, time entry and
+attachment queues to an outbox and flushes off-thread, so a local write never
+waits on the network. An unreachable asoode is a delay, not a lost edit — rows
+are retried, and abandoned after five attempts so a poison row cannot loop
+forever repeating a side effect.
+
+**In:** the daemon holds a Socket.IO subscription, so a task added on the board
+reaches the session within seconds. It is an optimisation, not a correctness
+requirement — `reconcile` also runs after every mirror, so a dropped socket
+degrades to polling. `GET /api/asoode/socket` reports whether it is connected.
+
+Note the socket needs a **ticket**, not the PAT: asoode's gateway keeps no
+database and verifies signed JWTs only, so the PAT is exchanged at
+`POST /account/socket-token` on each connect. A raw PAT is accepted and then
+dropped with `transport error`.
+
+**Inbound only creates, never overwrites.** A task that exists on both sides is
+left alone, because resolving a two-sided edit needs a conflict policy that has
+not been decided. `memory_asoode_import` is the explicit path that does overwrite.
+
+### Evidence on a task
+
+`memory_task_attach(task_id, path)` copies a file into the task store and mirrors
+it to the remote task — a screenshot proving a fix, a failing log, a generated
+report. Content-addressed, so the same file on two tasks is one blob; sent once,
+because no platform gives an attachment an idempotency key.
 
 ## Team / multi-device memory (git sync)
 

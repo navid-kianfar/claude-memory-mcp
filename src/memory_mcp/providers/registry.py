@@ -102,4 +102,10 @@ def _ensure_builtins() -> None:
 
         return AsoodeProvider()
 
+    def _trello() -> TaskProvider:
+        from memory_mcp.providers.trello import TrelloProvider
+
+        return TrelloProvider()
+
     register(DEFAULT_PROVIDER, _asoode)
+    register("trello", _trello)

@@ -10,13 +10,14 @@
   memory-mcp user ...   -> manage server-mode users (create/list/rotate tokens)
   memory-mcp bind ...   -> route a project to a local or remote backend
   memory-mcp asoode ... -> asoode endpoints + the machine-wide PAT
+  memory-mcp provider ... -> task platforms and their credentials
 """
 
 import sys
 
 USAGE = (
     "Usage: memory-mcp "
-    "[stdio|serve|rules|sync|setup|update|user|bind|asoode]"
+    "[stdio|serve|rules|sync|setup|update|user|bind|asoode|provider]"
 )
 
 
@@ -62,6 +63,9 @@ def main() -> None:
     elif cmd == "asoode":
         from memory_mcp.asoode_cli import main as asoode_main
         asoode_main(args[1:])
+    elif cmd == "provider":
+        from memory_mcp.provider_cli import main as provider_main
+        provider_main(args[1:])
     elif cmd in ("-h", "--help", "help"):
         print(USAGE)
     else:

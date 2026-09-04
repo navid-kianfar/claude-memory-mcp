@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -64,7 +64,12 @@ _TASK_DDL = (
         body       VARCHAR NOT NULL,
         kind       VARCHAR NOT NULL DEFAULT 'note',
         author     VARCHAR,
-        created_at TIMESTAMP DEFAULT current_timestamp
+        created_at TIMESTAMP DEFAULT current_timestamp,
+        -- When this comment was mirrored. No platform gives a comment an
+        -- idempotency key, so "already sent" has to be remembered here or a
+        -- retried flush posts it again - and asoode has no delete endpoint to
+        -- undo that with.
+        mirrored_at TIMESTAMP
     )
     """,
     # `end` is a DuckDB reserved word and cannot be used as a column name even
@@ -425,6 +430,33 @@ def migrate_v7_to_v8(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (8)")
 
 
+def migrate_v9_to_v10(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v9 -> v10: remember which comments have been mirrored.
+
+    Comments were sent from the outbox row's PAYLOAD, so every retry re-posted
+    them: one task ended up with the same comment nine times remotely against one
+    locally, because a row that could not be deleted locally kept being retried
+    after its remote call had already succeeded. asoode has no comment
+    idempotency key and no delete endpoint, so the guard has to be local - the
+    same fix time entries got in v9.
+
+    Existing comments are marked mirrored rather than left NULL: they have
+    already been sent (repeatedly), and treating them as unsent would post the
+    whole history again the first time a task is touched.
+    """
+    try:
+        conn.execute("ALTER TABLE task_comments ADD COLUMN mirrored_at TIMESTAMP")
+    except Exception:
+        pass
+    try:
+        conn.execute(
+            "UPDATE task_comments SET mirrored_at = created_at WHERE mirrored_at IS NULL"
+        )
+    except Exception:
+        pass
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (10)")
+
+
 def migrate_v8_to_v9(conn: duckdb.DuckDBPyConnection) -> None:
     """Migrate v8 -> v9: remember which time entries have been mirrored.
 
@@ -491,6 +523,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 9:
         migrate_v8_to_v9(conn)
         version = 9
+    if version < 10:
+        migrate_v9_to_v10(conn)
+        version = 10
     return version
 
 

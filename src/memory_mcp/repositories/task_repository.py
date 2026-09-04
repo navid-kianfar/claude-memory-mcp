@@ -690,6 +690,29 @@ class OutboxRepository:
         except Exception:
             return 0
 
+    def unmirrored_comments(self, project: str, task_id: str) -> list[dict]:
+        """Comments for a task that have not been sent yet, oldest first."""
+        try:
+            with connect(project) as conn:
+                rows = conn.execute(
+                    "SELECT id, body FROM task_comments "
+                    "WHERE task_id = ? AND mirrored_at IS NULL "
+                    "ORDER BY created_at ASC",
+                    [task_id],
+                ).fetchall()
+        except Exception:
+            return []
+        return [{"id": r[0], "body": r[1]} for r in rows]
+
+    def mark_comment_mirrored(self, project: str, comment_id: str) -> None:
+        from datetime import datetime, timezone
+
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE task_comments SET mirrored_at = ? WHERE id = ?",
+                [datetime.now(timezone.utc), comment_id],
+            )
+
     def unmirrored_time(self, project: str, task_id: str) -> list[dict]:
         """Closed time entries for a task that have not been sent yet.
 

@@ -412,11 +412,7 @@ class AsoodeBridge:
         if op == "time":
             return self._flush_time(slug, task, link, remote_id)
         if op == "comment":
-            body = (row.get("payload") or {}).get("body")
-            provider = self.provider_for(link)
-            if body and provider.capabilities.supports_comments:
-                provider.comment(remote_id, body)
-            return True
+            return self._flush_comments(slug, task, link, remote_id)
         # create/state/update all reconcile to "make the remote match".
         provider = self.provider_for(link)
         provider.set_state(remote_id, task.state.value)
@@ -524,6 +520,27 @@ class AsoodeBridge:
                 "boards": len(boards),
             },
         }
+
+    def _flush_comments(self, slug: str, task, link: dict, remote_id: str) -> bool:
+        """Send every comment on this task that has not been sent yet.
+
+        Reads the LOCAL comments rather than the outbox row's payload. That is
+        the whole fix: a payload is re-sent on every retry, and since no platform
+        gives a comment an idempotency key - and asoode has no delete endpoint -
+        a retry loop left the same comment on a task nine times. Marked one at a
+        time as each lands, so a failure partway through cannot re-post what
+        already went.
+        """
+        provider = self.provider_for(link)
+        if not provider.capabilities.supports_comments:
+            return False
+        pending = self._outbox.unmirrored_comments(slug, task.id)
+        if not pending:
+            return False
+        for comment in pending:
+            provider.comment(remote_id, comment["body"])
+            self._outbox.mark_comment_mirrored(slug, comment["id"])
+        return True
 
     def _flush_time(self, slug: str, task, link: dict, remote_id: str) -> bool:
         """Send every closed, unsent stretch of work for this task.

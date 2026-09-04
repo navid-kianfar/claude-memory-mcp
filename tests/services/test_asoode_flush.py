@@ -369,7 +369,8 @@ class TestTimeTrackingIsMirrored:
         from memory_mcp.providers import Capabilities
 
         provider = _provider()
-        provider.__class__.capabilities = property(
+        original = type(provider).capabilities
+        type(provider).capabilities = property(
             lambda self: Capabilities(supports_external_ref=True, states=STATES_ALL)
         )
         try:
@@ -382,10 +383,91 @@ class TestTimeTrackingIsMirrored:
                 "the entry is still there to send later"
             )
         finally:
-            del provider.__class__.capabilities
+            type(provider).capabilities = original
 
 
 STATES_ALL = (
     "todo", "in_progress", "done", "paused", "blocked",
     "cancelled", "duplicate", "incomplete", "blocker",
 )
+
+
+class TestACommentIsSentOnce:
+    """A live task ended up with the same comment NINE times.
+
+    No platform gives a comment an idempotency key and asoode has no delete
+    endpoint, so a duplicate is permanent. Sending from the outbox row's payload
+    meant every retry posted again; sending from the LOCAL comments, marked as
+    they land, means a retry sends nothing.
+    """
+
+    def test_a_comment_reaches_the_provider_once(self, project):
+        tasks, bridge, _ = _stack(project, _provider())
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        tasks.comment(project, task.id, "only once")
+        bridge.flush(project)
+        assert bridge.provider_for(None).comments == [("r1", "only once")]
+
+    def test_a_retry_does_not_repost_it(self, project):
+        tasks, bridge, _ = _stack(project, _provider())
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        tasks.comment(project, task.id, "only once")
+        bridge.flush(project)
+
+        # exactly what the stuck row did: the op is queued again
+        container.outbox_repo.enqueue(project, task.id, "comment", {"body": "only once"})
+        bridge.flush(project)
+        assert len(bridge.provider_for(None).comments) == 1
+
+    def test_a_second_real_comment_still_goes(self, project):
+        """The guard must not stop new comments - only repeats."""
+        tasks, bridge, _ = _stack(project, _provider())
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        tasks.comment(project, task.id, "first")
+        bridge.flush(project)
+        tasks.comment(project, task.id, "second")
+        bridge.flush(project)
+        assert [b for _, b in bridge.provider_for(None).comments] == ["first", "second"]
+
+    def test_a_failure_partway_does_not_repost_what_landed(self, project):
+        tasks, bridge, _ = _stack(project, _provider())
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        tasks.comment(project, task.id, "one")
+        tasks.comment(project, task.id, "two")
+        provider = bridge.provider_for(None)
+
+        original = provider.comment
+        calls = {"n": 0}
+
+        def flaky(task_id, body):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise ProviderError("dropped mid-way")
+            return original(task_id, body)
+
+        provider.comment = flaky
+        bridge.flush(project)
+        provider.comment = original
+        bridge.flush(project)
+
+        bodies = [b for _, b in provider.comments]
+        assert bodies.count("one") == 1, "the one that landed must not be re-posted"
+        assert "two" in bodies
+
+    def test_a_provider_without_comments_keeps_them_unsent(self, project):
+        from memory_mcp.providers import Capabilities
+
+        provider = _provider()
+        original = type(provider).capabilities
+        type(provider).capabilities = property(
+            lambda self: Capabilities(supports_external_ref=True, states=STATES_ALL)
+        )
+        try:
+            tasks, bridge, _ = _stack(project, provider)
+            task = tasks.create(CreateTaskRequest(project=project, title="X"))
+            tasks.comment(project, task.id, "nowhere to go")
+            bridge.flush(project)
+            assert provider.comments == []
+            assert container.outbox_repo.unmirrored_comments(project, task.id)
+        finally:
+            type(provider).capabilities = original

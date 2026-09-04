@@ -16,6 +16,7 @@ import uuid
 
 from memory_mcp.config import settings
 from memory_mcp.context import current_user
+from memory_mcp.db.connection import after_commit
 from memory_mcp.exceptions import MemoryMCPError, TaskNotFoundError
 from memory_mcp.models import (
     CreateTaskRequest, Task, TaskComment, TaskCommentKind, TaskDetail, TaskFilter,
@@ -153,6 +154,14 @@ class TaskService:
         happened and is the source of truth. An unreachable asoode, a missing
         credential and an unlinked project are all ordinary outcomes here, never
         a reason to fail the edit that just succeeded.
+
+        Inside a transaction the two halves part company. The outbox row is
+        local, so it stays IN the transaction and rolls back with everything
+        else. The mirror nudge is not: it spawns a thread that POSTs to asoode,
+        and a ROLLBACK cannot un-POST. A plan that fails on task 4 would
+        otherwise leave three cards on the board with no local rows behind them
+        - the exact shape that produced 54 duplicates once already. So the nudge
+        waits for the commit.
         """
         if self._outbox is None:
             return
@@ -160,11 +169,18 @@ class TaskService:
             self._outbox.enqueue(project, task_id, op, payload)
         except Exception:  # noqa: BLE001
             return
-        if self._mirror is not None:
+        if self._mirror is None:
+            return
+
+        def _nudge() -> None:
             try:
                 self._mirror(project)
             except Exception:  # noqa: BLE001
                 pass
+
+        # False means there is no transaction to wait for - mirror now, as ever.
+        if not after_commit(_nudge, key=("mirror", project)):
+            _nudge()
 
     def _resolve_target(self, project: str, target: str | None) -> int | None:
         """A task's board, or None for the project's default. Raises if the name

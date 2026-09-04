@@ -19,6 +19,7 @@ every task it produced, so the original wording survives even if a title is late
 edited into something narrower.
 """
 
+from memory_mcp.db.connection import transaction
 from memory_mcp.exceptions import MemoryMCPError
 from memory_mcp.models import CreateTaskRequest, TaskSource
 
@@ -81,26 +82,49 @@ class TaskPlanner:
                 )
 
         created, ids = [], []
-        for item in items:
-            parent_index = item.get("parent_index")
-            task = self._tasks.create(CreateTaskRequest(
-                project=project,
-                title=item["title"].strip(),
-                description=item["description"].strip(),
-                priority=int(item.get("priority", 0)),
-                labels=list(item.get("labels") or []),
-                parent_id=ids[parent_index] if parent_index is not None else None,
-                source=TaskSource.CLAUDE,
-            ))
-            ids.append(task.id)
-            # The request verbatim, on every task it produced: a title gets edited,
-            # a description gets rewritten, and the thing that must not drift is
-            # what was actually asked for.
-            self._tasks.comment(
-                project, task.id, kind="note",
-                body=f"Decomposed from this request:\n\n{text}",
+        index = -1
+        try:
+            # ONE transaction for the whole plan. A half-applied plan is worse
+            # than no plan at all: the queue reads as a considered decomposition
+            # when it is really the first fragment of one, nothing records that
+            # the rest was lost, and re-running creates a SECOND parent rather
+            # than resuming. Every repository call below keeps its own
+            # `with connect(project)` and joins this transaction through it, so
+            # a failure on task 7 of 9 takes tasks 1-6 down with it.
+            with transaction(project):
+                for index, item in enumerate(items):
+                    parent_index = item.get("parent_index")
+                    task = self._tasks.create(CreateTaskRequest(
+                        project=project,
+                        title=item["title"].strip(),
+                        description=item["description"].strip(),
+                        priority=int(item.get("priority", 0)),
+                        labels=list(item.get("labels") or []),
+                        parent_id=ids[parent_index] if parent_index is not None else None,
+                        source=TaskSource.CLAUDE,
+                    ))
+                    ids.append(task.id)
+                    # The request verbatim, on every task it produced: a title gets
+                    # edited, a description gets rewritten, and the thing that must
+                    # not drift is what was actually asked for.
+                    self._tasks.comment(
+                        project, task.id, kind="note",
+                        body=f"Decomposed from this request:\n\n{text}",
+                    )
+                    created.append(task)
+        except Exception as e:  # noqa: BLE001
+            # Say what happened to the plan, not just what threw. "which tasks
+            # got created" now has an answer, and the answer is none.
+            where = (
+                f"task {index + 1} of {len(items)} "
+                f"({(items[index].get('title') or '').strip()!r})"
+                if 0 <= index < len(items)
+                else "opening the transaction"
             )
-            created.append(task)
+            raise PlanError(
+                f"the plan was ROLLED BACK and no tasks were created - failed on "
+                f"{where}: {type(e).__name__}: {e}"
+            ) from e
 
         result = {
             "project": project,

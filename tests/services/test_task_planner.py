@@ -9,6 +9,7 @@ plan, and a description is not optional.
 import pytest
 
 from memory_mcp.container import container
+from memory_mcp.db.connection import connect
 from memory_mcp.db.registry import upsert_project_link
 from memory_mcp.models import TaskFilter
 from memory_mcp.services.task_planner import MAX_TASKS, PlanError, TaskPlanner
@@ -171,3 +172,130 @@ class TestMirroring:
         assert result["count"] == 3, "the local queue is the record"
         assert "asoode down" in result["mirror_error"]
         assert container.task_service.list_tasks(project, limit=50).total == 3
+
+
+class FailsOnTask:
+    """The real task service, but the Nth create blows up.
+
+    Stands in for anything that can fail partway through a plan now that the
+    original trigger is fixed: a provider error, a lock, a validation failure on
+    task 7 of 9.
+    """
+
+    def __init__(self, inner, fail_on: int):
+        self._inner = inner
+        self._fail_on = fail_on
+        self.creates = 0
+
+    def create(self, request):
+        self.creates += 1
+        if self.creates == self._fail_on:
+            raise RuntimeError("provider blew up")
+        return self._inner.create(request)
+
+    def comment(self, *args, **kwargs):
+        return self._inner.comment(*args, **kwargs)
+
+
+def count(project: str, table: str) -> int:
+    with connect(project) as conn:
+        return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+
+
+class TestAPlanIsAllOrNothing:
+    """OBSERVED 2026-09-04: a plan created its first task, crashed on the second,
+    and left the parent in the queue looking like a considered decomposition.
+    Re-running made a SECOND parent instead of resuming."""
+
+    def test_a_failure_partway_leaves_no_tasks_behind(self, project):
+        planner = TaskPlanner(FailsOnTask(container.task_service, fail_on=3))
+        with pytest.raises(PlanError):
+            planner.plan(project, REQUEST, ITEMS)
+        assert count(project, "tasks") == 0, "two tasks were created before the failure"
+
+    def test_it_leaves_no_comments_or_outbox_rows_either(self, project):
+        """Every repository the create path touches must roll back, not just tasks."""
+        planner = TaskPlanner(FailsOnTask(container.task_service, fail_on=3))
+        with pytest.raises(PlanError):
+            planner.plan(project, REQUEST, ITEMS)
+        assert count(project, "task_comments") == 0
+        assert count(project, "task_outbox") == 0, (
+            "an outbox row for a task that no longer exists would mirror a ghost"
+        )
+        assert count(project, "provenance") == 0
+
+    def test_no_orphaned_parent_survives(self, project):
+        """The specific damage: a parent whose steps never got created."""
+        items = [*ITEMS, {"title": "Add a test", "description": "Cover it.",
+                          "parent_index": 0}]
+        planner = TaskPlanner(FailsOnTask(container.task_service, fail_on=4))
+        with pytest.raises(PlanError):
+            planner.plan(project, REQUEST, items)
+        assert count(project, "tasks") == 0
+
+    def test_the_error_says_the_plan_was_rolled_back(self, project):
+        planner = TaskPlanner(FailsOnTask(container.task_service, fail_on=3))
+        with pytest.raises(PlanError) as exc:
+            planner.plan(project, REQUEST, ITEMS)
+        message = str(exc.value)
+        assert "ROLLED BACK" in message
+        assert "no tasks were created" in message, (
+            "'which tasks got created' must have a stated answer"
+        )
+        assert "task 3 of 3" in message and "Write the docs" in message
+        assert "provider blew up" in message, "the underlying cause is still there"
+        assert isinstance(exc.value.__cause__, RuntimeError)
+
+    def test_a_retry_after_a_failure_creates_one_set_not_two(self, project):
+        service = FailsOnTask(container.task_service, fail_on=3)
+        planner = TaskPlanner(service)
+        with pytest.raises(PlanError):
+            planner.plan(project, REQUEST, ITEMS)
+        service._fail_on = 0
+        assert planner.plan(project, REQUEST, ITEMS)["count"] == 3
+        assert count(project, "tasks") == 3, "re-running resumed, it did not duplicate"
+
+    def test_positions_are_still_distinct_inside_the_transaction(self, project):
+        """next_position reads uncommitted siblings on the shared connection. On a
+        separate one it would be blind to them and give every task position 0."""
+        planner = TaskPlanner(container.task_service)
+        result = planner.plan(project, REQUEST, ITEMS)
+        positions = [t["position"] for t in result["tasks"]]
+        assert len(set(positions)) == 3, positions
+        assert positions == sorted(positions)
+
+
+class TestTheMirrorWaitsForTheCommit:
+    """A ROLLBACK undoes local rows. It cannot un-POST to asoode - which is the
+    shape that produced 54 duplicate cards once already."""
+
+    @pytest.fixture
+    def nudges(self, monkeypatch, project):
+        seen = []
+        monkeypatch.setattr(
+            container.task_service, "_mirror",
+            lambda slug: seen.append(count(slug, "tasks")),
+        )
+        return seen
+
+    def test_it_is_not_nudged_mid_plan(self, nudges, project):
+        TaskPlanner(container.task_service).plan(project, REQUEST, ITEMS)
+        assert nudges == [3], (
+            "one nudge, after the commit, seeing all three rows - not three "
+            "nudges mid-transaction against rows that might still vanish"
+        )
+
+    def test_a_rolled_back_plan_never_nudges(self, nudges, project):
+        planner = TaskPlanner(FailsOnTask(container.task_service, fail_on=3))
+        with pytest.raises(PlanError):
+            planner.plan(project, REQUEST, ITEMS)
+        assert nudges == [], "nothing may be pushed for tasks that do not exist"
+
+    def test_an_ordinary_create_still_nudges_immediately(self, nudges, project):
+        """Outside a transaction nothing changes - this is the common path."""
+        from memory_mcp.models import CreateTaskRequest
+
+        container.task_service.create(CreateTaskRequest(
+            project=project, title="One off", description="x",
+        ))
+        assert nudges == [1]

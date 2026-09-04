@@ -2,8 +2,9 @@
 
 Two isolation models live here, selected by settings.mode:
 
-- local (default): a single process-global active project (`_active_project`),
-  exactly as before - one user, one machine.
+- local (default): per MCP SESSION where the transport gives us one, falling
+  back to a process-global (`_active_project`) for callers that have no session -
+  the CLI, the hooks, background tasks in the daemon.
 - server: a per-request identity (`_request_user`, a contextvar) and a per-user
   active project, so concurrent users never clobber each other. The old global
   is never consulted in server mode.
@@ -13,6 +14,7 @@ import contextlib
 import contextvars
 import json
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +23,64 @@ from memory_mcp.constants import MANIFEST_NAME, PORTABLE_DB_NAME, SNAPSHOT_DIRNA
 
 _active_project: str | None = None
 _lock = threading.Lock()
+
+# ---------- per-session active project ----------
+#
+# One daemon serves EVERY Claude session on this machine, every subagent of every
+# session, and the management UI. A single process-global active project means
+# session A calling memory_use('x') silently redirects session B's next
+# project-less write. That is not hypothetical: on 2026-09-04 it put seven tasks
+# in the wrong project and mirrored them to that project's board within seconds,
+# and the asoode side has no hard delete, so the cleanup was archiving seven
+# cards by hand.
+#
+# FastMCP's streamable-HTTP transport gives each client its own session id, so
+# the fix is to key the active project on it. Callers with no session - the CLI,
+# the hook scripts, the daemon's own background tasks - keep using the global
+# exactly as before.
+#
+# Writes go to BOTH: the session's own entry, which is what that session reads,
+# and the global, so a caller without a session still sees the last choice made.
+_session_projects: "OrderedDict[str, str]" = OrderedDict()
+#: Sessions are ephemeral and we are never told when one ends, so the map is
+#: bounded rather than left to grow for the daemon's lifetime.
+_SESSION_LIMIT = 256
+
+
+def current_session_id() -> str | None:
+    """The calling MCP session, or None when there is no MCP request in flight.
+
+    Never raises: this is consulted on every project resolution, including from
+    the CLI and from background tasks where there is no context at all.
+    """
+    try:
+        from fastmcp.server.dependencies import get_context
+
+        return getattr(get_context(), "session_id", None) or None
+    except Exception:  # noqa: BLE001 - no context, or a FastMCP that lacks it
+        return None
+
+
+def _remember_session_project(session_id: str, slug: str) -> None:
+    with _lock:
+        _session_projects[session_id] = slug
+        _session_projects.move_to_end(session_id)
+        while len(_session_projects) > _SESSION_LIMIT:
+            _session_projects.popitem(last=False)
+
+
+def _session_project(session_id: str) -> str | None:
+    with _lock:
+        slug = _session_projects.get(session_id)
+        if slug is not None:
+            _session_projects.move_to_end(session_id)
+    return slug
+
+
+def forget_session_project(session_id: str) -> None:
+    """Drop a session's choice. Called when a session ends."""
+    with _lock:
+        _session_projects.pop(session_id, None)
 
 
 @dataclass(frozen=True)
@@ -110,6 +170,13 @@ def set_active_project(slug: str) -> None:
             pass
         return
 
+    # The session's own choice, so it cannot be moved by another session.
+    session_id = current_session_id()
+    if session_id:
+        _remember_session_project(session_id, slug)
+
+    # And the global, so a caller with no session (CLI, hooks, background work)
+    # still sees the most recent choice - unchanged behaviour for them.
     global _active_project
     with _lock:
         _active_project = slug
@@ -220,6 +287,13 @@ def get_active_project(cwd: str | None = None) -> str | None:
         if slug:
             return slug
         return detect_project_from_cwd(cwd)
+
+    # This session's own choice wins over anything another session has set.
+    session_id = current_session_id()
+    if session_id:
+        slug = _session_project(session_id)
+        if slug:
+            return slug
 
     if _active_project:
         return _active_project

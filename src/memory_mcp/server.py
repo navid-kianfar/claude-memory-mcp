@@ -14,6 +14,7 @@ from fastmcp import FastMCP
 from memory_mcp.config import settings
 from memory_mcp.container import container
 from memory_mcp.context import (
+    current_session_id, forget_session_project,
     load_active_project, resolve_project, set_active_project,
 )
 from memory_mcp.enforcement import rules_digest
@@ -1459,10 +1460,17 @@ def memory_session_end(
 ) -> dict:
     """End a session and store its summary."""
     def _run():
-        return container.session_service.end(
+        result = container.session_service.end(
             _resolve(project), session_id, summary,
             memories_created, memories_accessed,
         )
+        # Drop this MCP session's active-project choice. Sessions are ephemeral
+        # and the transport never tells us one ended, so this is the only point
+        # where we know - without it the map only shrinks by its LRU cap.
+        mcp_session = current_session_id()
+        if mcp_session:
+            forget_session_project(mcp_session)
+        return result
     return _safe(_run)
 
 

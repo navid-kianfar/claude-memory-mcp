@@ -235,70 +235,129 @@ class TestShippedAgentDefinitions:
             assert "project=" in body, f"{stem}.md never mentions passing project="
 
 
-class TestDefaultSessionAgent:
-    """`agent: pm` in ~/.claude/settings.json makes every session start as the lead.
+    def test_designer_does_not_preload_skills(self):
+        """`skills:` pulls each skill's full content in on EVERY dispatch.
 
-    The value of these tests is the two refusals: never clobber a choice someone
-    made by hand, and never point at an agent that is not installed.
+        The designer needs one or two per job out of six, so they are invoked on
+        demand with the Skill tool instead. Removed 2026-09-04 after the user
+        pushed back on agents loading what a session does not need.
+        """
+        front, body = self._definitions()["designer"]
+        assert "skills" not in front, (
+            "designer must invoke design skills on demand, not preload them"
+        )
+        assert "/design" in body or "`design`" in body, (
+            "designer must be told which skill to reach for"
+        )
+
+    def test_no_agent_references_a_skill_that_is_not_installed(self):
+        """A definition naming a removed skill sends the agent after nothing."""
+        import re
+        from pathlib import Path as _Path
+
+        installed = {p.name for p in (_Path.home() / ".claude" / "skills").iterdir()} \
+            if (_Path.home() / ".claude" / "skills").is_dir() else set()
+        if not installed:
+            import pytest as _pytest
+            _pytest.skip("no user skills installed on this machine")
+        for stem, (_, body) in self._definitions().items():
+            for name in re.findall(r"`([a-z][a-z0-9-]{3,})`", body):
+                if name.endswith("-design") or name in {"design", "design-system", "ui-styling", "brand", "slides"}:
+                    assert name in installed, (
+                        f"{stem}.md names skill {name!r}, which is not installed"
+                    )
+
+class TestRetireDefaultAgent:
+    """`agent: pm` was removed in favour of the hook-injected lead brief.
+
+    Two reasons, both observed: the setting is silently ignored by some clients
+    (it was set on this machine and the desktop app started an ordinary session
+    anyway), and running it alongside the hook would give a CLI session the same
+    instructions twice plus pm's tools forced onto every one-off session.
+
+    The test that matters is the last one: never delete a value someone chose.
     """
 
     @pytest.fixture
     def settings_file(self, tmp_path, monkeypatch):
         path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(setup_mod, "claude_settings_path", lambda: path)
-        agents = tmp_path / "agents"
-        agents.mkdir()
-        (agents / "pm.md").write_text("---\nname: pm\n---\n")
-        monkeypatch.setattr(setup_mod, "AGENTS_DIR", agents)
         return path
+
+    def _write(self, path, data):
+        path.write_text(json.dumps(data))
 
     def _read(self, path):
         return json.loads(path.read_text())
 
-    def test_sessions_are_pointed_at_pm(self, settings_file):
-        setup_mod.setup_default_agent()
+    def test_our_own_value_is_removed(self, settings_file):
+        self._write(settings_file, {"agent": "pm", "theme": "dark"})
 
-        assert self._read(settings_file)["agent"] == "pm"
-
-    def test_existing_settings_are_preserved(self, settings_file):
-        settings_file.parent.mkdir(parents=True, exist_ok=True)
-        settings_file.write_text(json.dumps({"hooks": {"X": []}, "theme": "dark"}))
-
-        setup_mod.setup_default_agent()
+        setup_mod.retire_default_agent()
 
         data = self._read(settings_file)
-        assert data["agent"] == "pm"
-        assert data["theme"] == "dark" and "hooks" in data
+        assert "agent" not in data
+        assert data["theme"] == "dark", "unrelated settings must survive"
 
-    def test_a_hand_set_agent_is_never_clobbered(self, settings_file):
+    def test_a_hand_set_agent_is_never_removed(self, settings_file):
         """Someone choosing a different agent made a deliberate choice."""
-        settings_file.parent.mkdir(parents=True, exist_ok=True)
-        settings_file.write_text(json.dumps({"agent": "my-own-agent"}))
+        self._write(settings_file, {"agent": "my-own-agent"})
 
-        setup_mod.setup_default_agent()
+        setup_mod.retire_default_agent()
 
         assert self._read(settings_file)["agent"] == "my-own-agent"
 
     def test_it_is_idempotent(self, settings_file):
-        setup_mod.setup_default_agent()
-        setup_mod.setup_default_agent()
+        self._write(settings_file, {"agent": "pm"})
 
-        assert self._read(settings_file)["agent"] == "pm"
+        setup_mod.retire_default_agent()
+        setup_mod.retire_default_agent()
 
-    def test_it_refuses_to_point_at_an_agent_that_is_not_installed(
-        self, settings_file, monkeypatch, tmp_path
-    ):
-        """Otherwise every session starts as an agent that does not exist."""
-        monkeypatch.setattr(setup_mod, "AGENTS_DIR", tmp_path / "empty")
+        assert "agent" not in self._read(settings_file)
 
-        setup_mod.setup_default_agent()
+    def test_a_missing_settings_file_is_not_an_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            setup_mod, "claude_settings_path", lambda: tmp_path / "nope.json"
+        )
 
-        assert not settings_file.exists() or "agent" not in self._read(settings_file)
+        setup_mod.retire_default_agent()  # must not raise
 
     def test_invalid_settings_json_is_left_alone(self, settings_file):
-        settings_file.parent.mkdir(parents=True, exist_ok=True)
         settings_file.write_text("{ not json")
 
-        setup_mod.setup_default_agent()  # must not raise
+        setup_mod.retire_default_agent()
 
         assert settings_file.read_text() == "{ not json"
+
+
+class TestLeadBrief:
+    """The orchestration brief the hook injects, now that the session IS the lead."""
+
+    def test_the_lead_is_not_offered_as_a_dispatch_target(self):
+        """Offering pm re-creates the relay layer this design rejected."""
+        from memory_mcp import enforcement
+
+        names = [n for n, _ in enforcement.installed_agents()]
+        assert enforcement.LEAD_AGENT not in names
+        assert enforcement.LEAD_AGENT in [
+            n for n, _ in enforcement.installed_agents(include_lead=True)
+        ]
+
+    def test_the_per_turn_line_stays_one_line(self):
+        """It is injected on EVERY prompt; a long brief there is the waste itself."""
+        from memory_mcp import enforcement
+
+        line = enforcement.agent_team_line()
+        if not line:
+            pytest.skip("no agents installed on this machine")
+        assert "\n" not in line
+        assert len(line) < 400, f"per-turn line is {len(line)} chars"
+
+    def test_no_agents_installed_means_no_injection(self, tmp_path, monkeypatch):
+        """An unrelated machine must not get a roster of agents it does not have."""
+        from memory_mcp import enforcement
+
+        monkeypatch.setattr(enforcement, "AGENT_TEAM_DIR", tmp_path / "none")
+        assert enforcement.agent_team_line() == ""
+        assert enforcement.agent_team_intro() == ""

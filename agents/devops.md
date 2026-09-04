@@ -1,6 +1,6 @@
 ---
 name: devops
-description: Owns CI, builds, deployment, containers, environment configuration, production migrations, monitoring and alerting. Use for pipeline and infrastructure work. Stops and asks before anything touching production, deleting data, rotating a credential, or costing money.
+description: CI, builds, deployment, containers, production migrations, monitoring. Stops before anything irreversible.
 model: claude-opus-5
 effort: xhigh
 color: cyan

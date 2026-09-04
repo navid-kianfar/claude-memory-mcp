@@ -1,6 +1,6 @@
 ---
 name: pm
-description: Technical lead and orchestrator. Decides what the work is, breaks it down, assigns it to the right specialist agent, and integrates what comes back. Use as the default driver of any non-trivial request. Fans out explorer agents when a job would otherwise mean reading an entire codebase.
+description: Technical lead. Breaks work down, assigns it to the right specialist, integrates what comes back. Default driver for non-trivial work.
 model: claude-opus-5
 effort: max
 color: blue

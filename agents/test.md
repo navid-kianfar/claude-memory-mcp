@@ -1,6 +1,6 @@
 ---
 name: test
-description: Verifies other agents' work - e2e, integration, unit and browser preview testing. Use to check whether a change broke a user-facing flow, to investigate a failure, or to add coverage. Runs in its own git worktree.
+description: Verifies other agents' work: e2e, integration, unit and browser testing.
 model: claude-opus-5
 effort: max
 color: yellow

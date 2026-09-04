@@ -59,8 +59,10 @@ Confirmed capabilities (see `03-claude-ui-surfaces.md` for the UI side of the sa
 - **`isolation: worktree`** gives an agent its own git worktree, auto-cleaned if unchanged. Frontend and
   backend agents can work the same repo in parallel without colliding.
   (asoode already has a `.claude/worktrees` directory, so this path is proven here.)
-- **Skills** are available to agents. Seven design skills are already installed at `~/.claude/skills/`:
-  `banner-design`, `brand`, `design`, `design-system`, `slides`, `ui-styling`, `ui-ux-pro-max`.
+- **Skills** are available to agents. Six design skills are installed at `~/.claude/skills/`:
+  `design` (the comprehensive entry point the `designer` agent uses), `design-system`,
+  `ui-styling`, `brand`, `slides`, `banner-design`. They are invoked on demand rather than
+  preloaded via `skills:`, which would pull each one's full content in on every dispatch.
 - **Plugins** can bundle agents + skills + hooks + `.mcp.json` and be distributed via a marketplace, so
   the team follows into every project.
 
@@ -86,8 +88,7 @@ call worth remembering.
 
 ### `design`
 
-Gets the seven installed design skills. Works from `ui-ux-pro-max` for interface decisions and
-`design-system` for token architecture. Writes specs and tokens, not application code — the frontend
+Works from `/design` — the comprehensive design skill — and `design-system` for token architecture. Writes specs and tokens, not application code — the frontend
 agent implements them.
 
 ### `frontend` / `backend`
@@ -149,7 +150,12 @@ seconds. That is the floor for delegating anything, and the concrete argument be
 
 ## Orchestration — who dispatches
 
-**The main session dispatches. The `pm` agent does not.**
+**The main session IS the lead. It does not dispatch a pm agent to be one.**
+
+Settled 2026-09-04 after measuring. The orchestration brief is injected by the
+`UserPromptSubmit` hook, so the session holding the conversation is the one delegating, and
+`pm` is excluded from the roster that brief advertises. `agent: pm` in settings.json was tried
+first and retired: some clients ignore it silently, and alongside the hook it double-injects.
 
 Agents can nest in principle, but it degrades quickly and subagent results are not shown to the user —
 the parent has to relay them, so a two-level tree loses information at every hop. Options, in order of

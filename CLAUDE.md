@@ -133,17 +133,28 @@ Eight agents share this server's memory and task board: `pm`, `backend`, `fronte
 `max` for pm/designer/test/reviewer, `xhigh` for backend/frontend/devops, `high` for docs.
 Design and verification status: `docs/bridge/06-agent-team.md`.
 
-**Every session starts as `pm`.** `setup_default_agent()` writes `agent: pm` to
-`~/.claude/settings.json`, so the session inherits pm's prompt, tools, model and effort and
-behaves as the orchestrator. Remove the `"agent"` key from that file to undo it. Note the
-mechanism: the MCP **server** cannot choose a session's agent — the **installer** sets it, and
-it reaches every project because it writes the same global files the MCP registration uses.
+**The main session IS the lead.** There is no pm subagent above the work: the orchestration
+brief rides the `UserPromptSubmit` hook (`enforcement.agent_team_intro` at session start, a
+single `agent_team_line` every turn), so the session that talks to you is the one that
+delegates. `pm` is therefore excluded from the roster the brief advertises — dispatching it
+would re-create the layer this replaced.
 
-**pm keeps Edit/Write on purpose.** A strictly read-only pm was considered and rejected: a
-session that cannot edit must dispatch a subagent for even a one-line change, and the measured
-floor for a dispatch is ~60k tokens. pm fans out to protect its own *context* — surveying a
-large codebase — not because it is forbidden to work. Do not "restore" a no-edit constraint
-without re-reading that trade-off.
+Chosen 2026-09-04 over "the session dispatches pm, pm dispatches the rest", for three measured
+reasons: subagent output is never shown to the user, so each layer is a lossy relay; an
+orchestrating pm accumulates every agent's report, which is the context cost its own fan-out
+rule exists to avoid (one planning dispatch alone cost 102k tokens); and a user cannot redirect
+an agent that is already running, only the session.
+
+`agent: pm` in `~/.claude/settings.json` was the earlier mechanism and has been **retired** —
+`retire_default_agent()` removes it. It is silently ignored by some clients (it was set on this
+machine and the desktop app started an ordinary session anyway), and running it alongside the
+hook would inject the same instructions twice while forcing pm's tools onto every one-off
+session. Do not re-add it.
+
+**Skills are invoked, not preloaded.** `skills:` pulls a skill's full content into context at
+startup on *every* dispatch, so `designer` names `/design` in its body and loads it on demand
+instead. Only `reviewer` preloads (`code-review`, `security-review`) because it uses them every
+run. `ui-ux-pro-max` was removed from this machine on 2026-09-04; `/design` is the entry point.
 
 **`reviewer` cannot edit**, via `disallowedTools`. That one is load-bearing: a reviewer that can
 fix its own findings stops reviewing. `disallowedTools` is used rather than a `tools:` allowlist

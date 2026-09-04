@@ -1,6 +1,6 @@
 ---
 name: docs
-description: Writes documentation a human outside the session will read - READMEs, API docs, changelogs, setup and operational guides. Use when shipped work needs explaining to someone who was not here. Does not own decisions or rationale; those belong in the memory store.
+description: READMEs, API docs, changelogs and guides for readers outside the session.
 model: claude-opus-5
 effort: high
 color: gray

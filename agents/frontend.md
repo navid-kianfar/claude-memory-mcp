@@ -1,6 +1,6 @@
 ---
 name: frontend
-description: Implements user interfaces to the designer's spec and verifies them in a real browser. Use for UI work - components, pages, styling, client state, interaction. Runs in its own git worktree so it can work alongside the backend agent.
+description: UI implementation to the designer's spec, verified in a real browser.
 model: claude-opus-5
 effort: xhigh
 color: green

@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Independently reviews code it did not write - security vulnerabilities, correctness regressions, missed edge cases, standards violations. Use after an implementation agent reports done, before the work is accepted. Reports findings; never fixes them.
+description: Independent review of code it did not write: security, regressions, edge cases. Reports findings, never fixes them.
 model: claude-opus-5
 effort: max
 color: red

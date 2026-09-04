@@ -10,7 +10,7 @@ Sets up the shared HTTP daemon model:
   7. Claude Code MCP config -> points at the HTTP daemon
   8. Claude Code hooks -> rule injection / session lifecycle
   9. Agent definitions -> ~/.claude/agents/ (the standing agent team)
- 10. `agent: pm` -> every session starts as the orchestrator
+ 10. retire `agent: pm` -> the hook carries the lead brief instead
 
 The runtime is installed under ~/.memory-mcp/ (not in the repo) so the launchd
 background agent can run it even when the repo lives in a macOS TCC-protected
@@ -350,59 +350,50 @@ def setup_agents() -> None:
         print(f"    Team: {', '.join(p.removesuffix('.md') for p in installed)}")
 
 
-# ---------- 10. pm as the session default ----------
+# ---------- 10. retire the `agent` setting ----------
 
-# The agent every Claude Code session starts as. Set in ~/.claude/settings.json -
-# the same global file setup_hooks() already owns.
-#
-# NOTE ON THE MECHANISM, because it is easy to misattribute: the memory MCP server
-# does NOT and cannot choose the session's agent. An MCP server exposes tools. The
-# INSTALLER sets this, and it reaches every project for the same reason the server
-# does - both are registered globally.
+#: What setup used to write into ~/.claude/settings.json to make every session
+#: start as the pm agent.
 DEFAULT_SESSION_AGENT = "pm"
 
 
-def setup_default_agent() -> None:
-    """Start every Claude Code session as the `pm` agent.
+def retire_default_agent() -> None:
+    """Remove `agent: pm` from ~/.claude/settings.json if WE put it there.
 
-    The session then inherits pm's prompt, tools, model and effort, so it behaves
-    as the orchestrator by default and delegates to the specialists.
+    WHY IT WENT AWAY, so it is not re-added: the session is meant to BE the lead,
+    and the orchestration brief now rides the UserPromptSubmit hook instead
+    (enforcement.agent_team_intro / agent_team_line). Two reasons the hook won:
 
-    pm deliberately KEEPS Edit/Write. A strictly read-only pm was considered and
-    rejected: a session that cannot edit must dispatch a subagent for even a
-    one-line change, and the measured floor for a dispatch is ~60k tokens. Do not
-    "restore" the no-edit constraint without reading that trade-off again.
+    - The `agent` setting is silently ignored by some clients. It was set on this
+      machine and the desktop app started an ordinary session anyway, so it
+      promised an orchestrator and delivered none.
+    - With both, a CLI session would get pm's prompt as its system prompt AND the
+      hook's brief on every turn - the same instructions twice, and pm's tool and
+      effort settings forced onto every unrelated one-off session.
 
-    A hand-set `agent` value is never clobbered - if someone chose a different
-    agent, that is a deliberate choice and this says so rather than overriding it.
-
-    To turn it off: remove the "agent" key from ~/.claude/settings.json.
+    Only ever removes the exact value this installer wrote. An `agent` set to
+    anything else is someone's deliberate choice and is left alone.
     """
     path = claude_settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    settings_obj: dict = {}
-    if path.exists():
-        try:
-            settings_obj = json.loads(path.read_text())
-        except Exception:  # noqa: BLE001
-            print("    Warning: ~/.claude/settings.json invalid - skipping default agent.")
-            return
-
-    if not (AGENTS_DIR / f"{DEFAULT_SESSION_AGENT}.md").exists():
-        print(f"    No agents/{DEFAULT_SESSION_AGENT}.md - leaving the session agent unset.")
+    if not path.exists():
+        return
+    try:
+        settings_obj = json.loads(path.read_text())
+    except Exception:  # noqa: BLE001
+        print("    Warning: ~/.claude/settings.json invalid - leaving it alone.")
         return
 
     current = settings_obj.get("agent")
-    if current and current != DEFAULT_SESSION_AGENT:
-        print(f"    Session agent is already '{current}' (set by hand) - leaving it alone.")
+    if current is None:
+        print("    No session agent set - the hook carries the lead brief.")
         return
-    if current == DEFAULT_SESSION_AGENT:
-        print(f"    Sessions already start as '{DEFAULT_SESSION_AGENT}'.")
+    if current != DEFAULT_SESSION_AGENT:
+        print(f"    Session agent is '{current}' (set by hand) - leaving it alone.")
         return
 
-    settings_obj["agent"] = DEFAULT_SESSION_AGENT
+    del settings_obj["agent"]
     path.write_text(json.dumps(settings_obj, indent=2))
-    print(f"    Sessions now start as '{DEFAULT_SESSION_AGENT}' (remove the \"agent\" key to undo).")
+    print("    Removed `agent: pm` - the lead brief now rides the hook instead.")
 
 
 # ---------- lean update ----------
@@ -440,7 +431,7 @@ def main() -> None:
         ("Configuring Claude Code MCP (HTTP daemon)", setup_claude_mcp),
         ("Installing Claude Code hooks", setup_hooks),
         ("Installing the agent team", setup_agents),
-        ("Starting sessions as the pm agent", setup_default_agent),
+        ("Retiring the `agent` setting (the hook carries it)", retire_default_agent),
     ]
     total = len(steps)
     for i, (msg, fn) in enumerate(steps, 1):

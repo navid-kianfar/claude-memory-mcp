@@ -4,6 +4,9 @@ The goal: keep a project's mandatory/forbidden rules continuously visible to
 Claude so they survive context compaction and never get silently dropped.
 """
 
+import re
+from pathlib import Path
+
 from memory_mcp.container import container
 
 
@@ -101,13 +104,128 @@ def _board_url(link: dict) -> str:
         return "asoode"
 
 
+# ---------- the agent team ----------
+#
+# The MAIN SESSION is the technical lead. Not a pm subagent underneath it.
+#
+# Chosen 2026-09-04 over "the session dispatches pm, and pm dispatches the rest",
+# for three reasons that were measured rather than assumed: subagent output is
+# never shown to the user, so every extra layer is a lossy relay; an orchestrating
+# pm accumulates every agent's report, which is the context cost its own fan-out
+# rule exists to avoid (one planning dispatch alone cost 102k tokens); and a user
+# cannot redirect an agent that is already running, only the session.
+#
+# `agent: pm` in settings.json would do this natively, but it is silently ignored
+# by some clients - it did nothing in the desktop app - so the brief rides the
+# hook instead, which works everywhere the rules already do.
+
+AGENT_TEAM_DIR = Path.home() / ".claude" / "agents"
+
+
+#: The lead's own definition. The SESSION is pm, so pm must not appear in the
+#: roster of things to dispatch - offering it re-creates the relay layer this
+#: design rejected. The file still exists and can be dispatched deliberately for
+#: a planning job worth doing in isolated context.
+LEAD_AGENT = "pm"
+
+
+def installed_agents(include_lead: bool = False) -> list[tuple[str, str]]:
+    """(name, description) for every installed agent, from its frontmatter.
+
+    Read from disk rather than hardcoded so the brief can never advertise an
+    agent that was retired, or miss one that was added. `pm` is excluded unless
+    asked for - see LEAD_AGENT.
+    """
+    if not AGENT_TEAM_DIR.is_dir():
+        return []
+    found: list[tuple[str, str]] = []
+    for path in sorted(AGENT_TEAM_DIR.glob("*.md")):
+        if path.name.lower() == "readme.md":
+            continue
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
+        if not match:
+            continue
+        desc = ""
+        for line in match.group(1).splitlines():
+            if line.startswith("description:"):
+                desc = line.split(":", 1)[1].strip()
+                break
+        if path.stem == LEAD_AGENT and not include_lead:
+            continue
+        found.append((path.stem, desc))
+    return found
+
+
+def agent_team_line() -> str:
+    """One line, every turn. Enough to keep delegation in mind, and no more.
+
+    Deliberately NOT the full brief: this is injected on EVERY prompt, and a
+    ninety-line orchestration prompt per turn is exactly the token waste the
+    team exists to avoid.
+    """
+    agents = installed_agents()
+    if not agents:
+        return ""
+    names = ", ".join(name for name, _ in agents)
+    return (
+        f"[Agent team] You are the technical lead. Specialists available: {names}. "
+        "Delegate a real specialism or genuinely parallel work; do it yourself when "
+        "you are the cheaper path. Never dispatch what two file reads would answer."
+    )
+
+
+def agent_team_intro() -> str:
+    """The full orchestration brief, at session start only."""
+    agents = installed_agents()
+    if not agents:
+        return ""
+    lines = [
+        "",
+        "[Agent team] YOU are the technical lead for this session - the `pm` role. "
+        "You orchestrate directly; you do not dispatch a pm agent to do it, because "
+        "a subagent's output is never shown to the user and cannot be redirected "
+        "once running.",
+        "",
+        "Available specialists:",
+    ]
+    lines.extend(f"  - {name}: {desc}" for name, desc in agents)
+    lines.extend([
+        "",
+        "HOW TO USE THEM, and the economics that decide it:",
+        "  - A dispatch costs ~60k tokens at the floor, measured. Do the work "
+        "yourself when you are the cheapest way to do it - a one-file change never "
+        "needs an agent.",
+        "  - Delegate when the work is a genuine specialism (a migration, a "
+        "pixel-accurate screen, a test suite, an infra change), or when two pieces "
+        "are genuinely parallel. frontend and backend are worktree-isolated so they "
+        "can run at once.",
+        "  - NEVER dispatch what you could answer by reading two files.",
+        "  - A subagent cannot see this conversation. Give it the goal, the "
+        "constraint that shapes it, the files involved, and what done looks like - "
+        "an under-specified brief buys a second dispatch.",
+        "  - Sequence deliberately: designer before frontend; reviewer after an "
+        "implementation, never instead of one.",
+        "  - FAN OUT only to keep a large codebase out of your own context: several "
+        "agents survey, ONE folds their findings into a digest, you read the digest. "
+        "Never fan out work a single agent could do.",
+        "  - An agent reporting a cross-boundary risk is reporting it to YOU. Decide "
+        "whether the other side changes and brief that agent; never let one agent "
+        "reshape another's contract.",
+    ])
+    return "\n".join(lines)
+
+
 def format_rules_block(slug: str, mandatory: list, forbidden: list) -> str:
     """Render rules as an injectable text block. Empty string when there are none."""
     asoode = asoode_line(slug)
     if not mandatory and not forbidden:
         # A bound project still gets its asoode line: the workflow must not
-        # depend on the project happening to have rules.
-        return asoode
+        # depend on the project happening to have rules. Same for the team line.
+        return "\n".join(x for x in (asoode, agent_team_line()) if x)
     lines = [
         f"[Memory MCP] Binding rules for project '{slug}' — follow every one of these:",
     ]
@@ -125,6 +243,9 @@ def format_rules_block(slug: str, mandatory: list, forbidden: list) -> str:
     )
     if asoode:
         lines.append(asoode)
+    team = agent_team_line()
+    if team:
+        lines.append(team)
     return "\n".join(lines)
 
 
@@ -155,6 +276,7 @@ def format_intro(slug: str) -> str:
             f"them unless the user asks."
         )
     text += asoode_intro(slug)
+    text += agent_team_intro()
     return text
 
 

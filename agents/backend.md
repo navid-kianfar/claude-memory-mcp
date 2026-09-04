@@ -1,6 +1,6 @@
 ---
 name: backend
-description: Implements server-side work - APIs, services, data models, schema changes and migrations - and proves it with tests. Use for anything touching persistence or the API contract. Runs in its own git worktree so it can work alongside the frontend agent.
+description: Server-side work: APIs, services, data models, schema and migrations, proven with tests.
 model: claude-opus-5
 effort: xhigh
 color: orange

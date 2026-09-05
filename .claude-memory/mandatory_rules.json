@@ -190,15 +190,17 @@
     "approved_at": null,
     "approved_by": null,
     "category": "mandatory_rules",
-    "content": "When this project is bound to an asoode work package, WORK ITS QUEUE - do not just report it.\n\nThe loop, one task at a time:\n1. Read the bound board at session start. If tasks are waiting, take the highest-priority\n   actionable one (state todo or in_progress). Do not ask which - pick and go.\n2. Move it to in_progress on BOTH sides, and start time tracking.\n3. Do the work. Record what comes up as it comes up: comments on the task, and anything\n   that outlives it as a rule/decision/architecture memory.\n4. Mark it done on both sides, stop the clock, then take the next one.\n\nDo NOT auto-start a task whose state is blocked, blocker, paused, or cancelled, and stop to\nask when the work needs a decision only the user can make (an API choice, a product call, a\ncredential). Say which task you are on before starting it, so it can be redirected.\n\nThis deliberately OVERRIDES the default 'a queued task is a requirement, not an instruction'\ncontract for asoode-bound projects. That default still holds everywhere else: it protects the\ncapture case, where the user parks a requirement mid-session and does not want the session\nderailed. Binding a project to an asoode board is the explicit opt-in to the loop.",
+    "content": "When this project is bound to an asoode work package, WORK ITS QUEUE - do not just report it.\n\nThe loop, one task at a time:\n1. Read the bound board at session start. If tasks are waiting, take the highest-priority\n   actionable one (state todo or in_progress). Do not ask which - pick and go.\n2. Move it to in_progress on BOTH sides, and start time tracking.\n3. Do the work. Record what comes up as it comes up: comments on the task, and anything\n   that outlives it as a rule/decision/architecture memory.\n4. Mark it done on both sides, stop the clock, then take the next one.\n\nDo NOT auto-start a task whose state is blocked, blocker, paused, or cancelled, and stop to\nask when the work needs a decision only the user can make (an API choice, a product call, a\ncredential). Say which task you are on before starting it, so it can be redirected.\n\nThis deliberately OVERRIDES the default 'a queued task is a requirement, not an instruction'\ncontract for asoode-bound projects. That default still holds everywhere else: it protects the\ncapture case, where the user parks a requirement mid-session and does not want the session\nderailed. Binding a project to an asoode board is the explicit opt-in to the loop.\n\nSCOPE (added 2026-09-05, after a verification agent reported the conflict): this loop binds the\nLEAD session - the one talking to the user. A dispatched agent works the task it was briefed\non and takes another only through memory_task_claim_next(session_id, role) when it is idle\nand its brief allows it; a verification or review agent (test, reviewer) starts nothing on\nthe board, whatever the queue holds. A rule that made every subagent auto-claim work would\nturn one dispatch into a swarm.",
     "created_at": "2026-09-04T00:02:28.357963",
     "created_by": null,
     "entities": [
       "API",
       "BOTH",
       "ITS",
+      "LEAD",
       "OVERRIDES",
       "QUEUE",
+      "SCOPE",
       "WORK"
     ],
     "expires_at": null,
@@ -215,7 +217,7 @@
       "tasks"
     ],
     "title": "Work the bound asoode task queue autonomously, one task at a time",
-    "updated_at": "2026-09-04T00:02:28.357963"
+    "updated_at": "2026-09-05T04:36:25.371033"
   },
   {
     "approval_status": "approved",

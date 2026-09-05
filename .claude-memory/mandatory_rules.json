@@ -130,7 +130,7 @@
     "approved_at": null,
     "approved_by": null,
     "category": "mandatory_rules",
-    "content": "Whenever a full task is done and tested - the change complete, the suite green, the test agent's live verification green - increment the version and push. Stated by the user on 2026-09-05: \"whenever a full task is done and tested you shall increment the version and push.\"\n\nHow, in this repo: `./scripts/release.sh` (patch by default; `minor` for a feature-level change such as a new mirror path or a new agent; `major` for a breaking one). It bumps pyproject.toml, src/memory_mcp/__init__.py and uv.lock, commits \"Release vX.Y.Z\", tags vX.Y.Z and pushes both; the tag is what publishes the Docker image. The script runs the full suite first; pass SKIP_TESTS=1 when the suite has just run on the same code - one gate, not two. The working tree must be clean and on main. There is no pre-commit hook any more (the user found a four-minute commit unacceptable), so the suite is a deliberate step, never a hook. Then `uv run memory-mcp-setup` so the daemon reports the new version.\n\nWhy it is a rule and not a habit: the installed daemon records its install commit and the update checker compares it against the branch tip, so an unversioned pile of commits is invisible as a release, and the version the daemon reports (memory_version, /api/health) stops meaning anything. One task, one version: the board's done task, the commit and the tag then tell the same story.",
+    "content": "Whenever a full task is done and tested - the change complete, the suite green if code it covers changed, the test agent's live verification green - increment the version and push. Stated by the user on 2026-09-05: \"whenever a full task is done and tested you shall increment the version and push.\"\n\nHow, in this repo: `./scripts/release.sh` (patch by default; `minor` for a feature-level change such as a new mirror path or a new agent; `major` for a breaking one). It bumps pyproject.toml, src/memory_mcp/__init__.py and uv.lock, commits \"Release vX.Y.Z\", tags vX.Y.Z and pushes both; the tag is what publishes the Docker image. The working tree must be clean and on main. The script runs the full suite by default: pass SKIP_TESTS=1 when the suite has already run on this exact code, or when nothing the suite covers changed (docs, agents, snapshot, a version bump) - the suite is evidence about code, not a ritual, and a four-minute release for a docs change is exactly what the user finds annoying. There is no pre-commit hook. Then `uv run memory-mcp-setup` so the daemon reports the new version.\n\nWhy it is a rule and not a habit: the installed daemon records its install commit and the update checker compares it against the branch tip, so an unversioned pile of commits is invisible as a release, and the version the daemon reports (memory_version, /api/health) stops meaning anything. One task, one version: the board's done task, the commit and the tag then tell the same story.",
     "created_at": "2026-09-05T04:43:43.001649",
     "created_by": null,
     "entities": [
@@ -144,10 +144,10 @@
     "related_ids": [],
     "source": "assistant",
     "status": "active",
-    "summary": "Whenever a full task is done and tested - the change complete, the suite green, the test agent's live verification...",
+    "summary": "Whenever a full task is done and tested - the change complete, the suite green if code it covers changed,...",
     "tags": [],
     "title": "A finished, tested task bumps the version and pushes",
-    "updated_at": "2026-09-05T04:48:30.902248"
+    "updated_at": "2026-09-05T04:49:37.977259"
   },
   {
     "approval_status": "approved",
@@ -248,13 +248,14 @@
     "approved_at": null,
     "approved_by": null,
     "category": "mandatory_rules",
-    "content": "The full suite takes about three minutes. Run it when the CHANGE is complete, not after each file you touch. A task that spans five files gets ONE run, not five - five runs is fifteen minutes and a pile of tokens spent re-proving the same thing about half-finished work.\n\nA one-line change is a complete change, so it gets its run. What is forbidden is running it as a progress check partway through.\n\nWhile iterating, run the NARROW selection that covers what you are editing (pytest tests/test_x.py, or -k). That is seconds, it is the fast feedback loop, and it is what catches your own mistakes. The full suite is the final gate before installing and committing, and it answers a different question: did this break something elsewhere.\n\nStated by the user on 2026-09-04 after a task ran it three times over one piece of work. Same spirit as the standing constraint on token usage: be intelligent about cost, do not spend it re-confirming what has not changed.",
+    "content": "The full suite runs when actual code it covers has changed - src/memory_mcp/** or tests/** - once, when that change is complete. It does NOT run for a change that cannot affect it: docs, README, agents/*.md, the .claude-memory snapshot, hook scripts, a version bump, a frontend-only change (the frontend has its own build; `cd frontend && npm run build` is its check). Stated by the user on 2026-09-05: \"the full suite test will run when actual code from where it covers gets changed; otherwise what is the benefit of checking something that did not have any effect - it is annoying.\"\n\nOnce, not once per file: a task that spans five files gets ONE run, when the change is complete, not after each file. While iterating, run the NARROW selection that covers what you are editing (pytest tests/test_x.py, or -k) - seconds, the fast feedback loop, what catches your own mistakes. The full suite answers a different question, did this break something elsewhere, and it takes about four minutes, so it is a deliberate step before installing and committing code, never a hook (the pre-commit hook was tried on 2026-09-05 and removed the same day). For a release, `SKIP_TESTS=1 ./scripts/release.sh` when the suite has just run on the same code or when nothing the suite covers changed.\n\nStated first by the user on 2026-09-04 after a task ran it three times over one piece of work. Same spirit as the standing constraint on token usage: be intelligent about cost, do not spend it re-confirming what has not changed.",
     "created_at": "2026-09-04T22:33:01.003258",
     "created_by": null,
     "entities": [
-      "CHANGE",
+      "CODE",
       "NARROW",
-      "ONE"
+      "ONE",
+      "README"
     ],
     "expires_at": null,
     "id": "a8d8be77-66a3-404d-bd6f-174fe1ad193c",
@@ -263,10 +264,10 @@
     "related_ids": [],
     "source": "assistant",
     "status": "active",
-    "summary": "The full suite takes about three minutes",
+    "summary": "The full suite runs when actual code it covers has changed - src/memory_mcp/** or tests/** - once, when that change...",
     "tags": [],
-    "title": "Run the full suite once per finished task, not once per file",
-    "updated_at": "2026-09-04T22:33:01.003258"
+    "title": "Run the full suite once per finished CODE change, and only when code it covers changed",
+    "updated_at": "2026-09-05T04:49:24.035382"
   },
   {
     "approval_status": "approved",

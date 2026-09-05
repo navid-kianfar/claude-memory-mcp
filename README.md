@@ -178,13 +178,21 @@ you can record something mid-session without derailing the work in progress.
 ```text
 memory_task_add("Rewrite the CSV exporter")   # queued; Claude keeps doing what it was doing
 memory_task_list()                            # what is waiting, open work first
-memory_task_start(task_id)                    # clock on, moves it to in_progress
+memory_task_start(task_id)                    # claims it, clocks on, moves it to in_progress
+memory_task_update(task_id, state="blocked")  # stops the clock and says why
 memory_task_done(task_id, note="shipped")     # closes it and stops the clock
 ```
 
 `memory_session_start` returns the open tasks together with a brief telling
 Claude to **report them and start none of them** unless you ask. Work Claude
 notices but is not doing goes in with `source="claude"`.
+
+**The clock is symmetric.** `memory_task_start` opens a time entry stamped with
+the session that started it; every path that ends the work closes it — done, an
+update to any state other than in_progress, stop, release, archive, and
+`memory_session_end`, which reports any clock it had to stop for a session that
+forgot. A lease a session never refreshed for an hour is swept at the next
+session start, so a crashed session cannot leave a task clocking.
 
 When several Claude sessions share one project, a task is taken by claiming it:
 `memory_task_claim_next(session_id)` — which a session calls only when it has
@@ -305,15 +313,24 @@ real boards.
 
 ### Mirroring is automatic
 
-Every task create, update, completion and comment queues to an outbox and flushes
-**off-thread**, so a local write never waits on the network. If asoode is
-unreachable the write still succeeds and the row is retried on the next flush —
-an unreachable server is a delay, not a lost edit.
+Everything the board can hold mirrors the moment it changes: state (including
+`memory_task_start` moving a card to In Progress), title, description,
+priority, assignee (matched to a member by email, username or full name),
+labels, dates, estimate, comments with their kind and author, attachments and
+their removal, sub-task parents, archive, delete (the card is archived — asoode
+has no delete — and a local tombstone stops it re-importing) and every closed
+time entry. Each mutation queues to an outbox and flushes **off-thread**, so a
+local write never waits on the network. A card the flusher creates gets every
+field the task already has. If asoode is unreachable the write still succeeds
+and the row is retried — an outage never spends a row's retry budget — and the
+daemon sweeps every linked outbox on start and every minute, so nothing waits
+for the next mutation to be noticed.
 
-`import` is the other direction, for tasks created in asoode by a person. It is
-**import-only**: a remote change overwrites the local title and state, and local
-edits are not merged back. The two sides are never "in sync" — don't describe
-them that way.
+`reconcile` runs after every mirror and **creates** tasks added on the board;
+`import` is the explicit path that also overwrites the local title and state of
+tasks on both sides. Edits made on the board to a task that exists on both
+sides do not come back until the conflict policy is decided — say what each
+direction carries rather than calling the two sides "in sync".
 
 `open` uses asoode's `/auth/token` deep link, which carries the token in the URL
 **fragment** — never sent to the server, never in an access log, never leaked
@@ -346,10 +363,12 @@ fake written in this repo is not a verified integration.
 ### Binding a project makes its board the work queue
 
 A bound project's `memory_session_start` returns the board's open tasks and a
-brief telling the agent to **work** them one at a time — start, mirror the state,
-comment as it goes, mark done, next. An unbound project keeps the opposite
+brief telling the agent to **work** them one at a time — start (which claims,
+clocks on and moves the card), comment as it goes, mark done or pause with the
+reason (both stop the clock), next. An unbound project keeps the opposite
 contract: its queued tasks are surfaced and never started, so parking a
-requirement mid-session cannot derail the session.
+requirement mid-session cannot derail the session. The loop binds the lead
+session; a dispatched agent works the task it was briefed on.
 
 The binding is the whole opt-in — nothing is configured per project. If the board
 cannot be reached, the session still starts and is told to work the local list,
@@ -376,19 +395,25 @@ the hosted defaults.
 
 ### Both directions
 
-**Out:** every task create, update, completion, comment, time entry and
-attachment queues to an outbox and flushes off-thread, so a local write never
-waits on the network. An unreachable asoode is a delay, not a lost edit — rows
-are retried, and abandoned after five attempts so a poison row cannot loop
-forever repeating a side effect.
+**Out:** every mutation the board can hold — state, fields, labels, assignee,
+parent, comment, time entry, attachment, archive, delete — queues to an outbox
+and flushes off-thread, so a local write never waits on the network. An
+unreachable asoode is a delay, not a lost edit: an outage never counts against
+a row, only a rejected call does, and a row is abandoned after five of those so
+a poison row cannot loop forever repeating a side effect. A nudge that lands
+while a flush is running makes it go round again; the daemon sweeps every
+linked outbox on start and once a minute; a short-lived process waits for its
+own mirrors before exiting.
 
 **In:** the daemon holds a Socket.IO subscription, so a task added on the board
 reaches the session within seconds. It is an optimisation, not a correctness
 requirement — `reconcile` also runs after every mirror, so a dropped socket
 degrades to polling. asoode replays nothing, so every connect (the first one
-included — the daemon was deaf before it started) also reconciles each linked
-project once, floored at five minutes so a flapping socket cannot spend its life
-sweeping. `GET /api/asoode/socket` reports connection, events, reconciles,
+included — the daemon was deaf before it started) drains each linked outbox and
+reconciles each linked project once, floored at five minutes so a flapping
+socket cannot spend its life sweeping; the catch-up asks the change feed which
+boards moved and advances its watermark only after every reconcile it covers
+succeeded. `GET /api/asoode/socket` reports connection, events, reconciles,
 catch-ups and suppressed echoes.
 
 Note the socket needs a **ticket**, not the PAT: asoode's gateway keeps no
@@ -413,6 +438,28 @@ not been decided. `memory_asoode_import` is the explicit path that does overwrit
 it to the remote task — a screenshot proving a fix, a failing log, a generated
 report. Content-addressed, so the same file on two tasks is one blob; sent once,
 because no platform gives an attachment an idempotency key.
+
+## The agent team
+
+`memory-mcp-setup` installs twelve specialised agents to `~/.claude/agents/`
+from [`agents/`](agents/): eight roles — `pm`, `backend`, `frontend`,
+`designer`, `test`, `reviewer`, `devops`, `docs` — and four stack experts that
+extend a role: `dotnet` and `nodejs` (before `backend`, for layout, DI and
+services), `react` (pnpm + Vite + Tailwind + shadcn, every shadcn component
+wrapped once) and `app` (Kotlin Multiplatform, Android and iOS pixel-identical).
+
+Every definition `extends:` the shared base `agents/_base.md`, composed at
+install time, so the contract that makes the three modules complete each other
+is stated once: **brain** (session start, the binding rules, search before
+deciding, store what outlives the task, `project=` on every write), **tasks**
+(start claims and clocks on, comment as you go, stop the clock on every finish,
+session end last — with the agent's own `session_id`, because subagents share
+the lead's MCP connection) and **team** (the session that talks to you is the
+lead; cross-boundary changes are reported, not made; `test` verifies a change
+on the running product before it is committed). See
+[`agents/README.md`](agents/README.md) for the composition rules and
+[`docs/bridge/06-agent-team.md`](docs/bridge/06-agent-team.md) for the design
+and what was verified by dispatch.
 
 ## Team / multi-device memory (git sync)
 

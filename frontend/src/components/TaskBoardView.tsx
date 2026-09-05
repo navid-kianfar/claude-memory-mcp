@@ -10,6 +10,7 @@ import {
   labelColor,
   priorityColor,
 } from "../lib/tasks";
+import { markdownToPlainText } from "../lib/markdown";
 import { cn } from "../lib/utils";
 import { Badge } from "./ui/Badge";
 
@@ -89,6 +90,9 @@ export function TaskBoardView({
           <div className="flex min-h-24 flex-col gap-2 p-2">
             {items.map((task) => {
               const m = meta[task.id];
+              // Markdown STRIPPED, never rendered: a card is a card, and a
+              // heading or a bullet list in it would make it a document.
+              const preview = markdownToPlainText(task.description, 120);
               return (
                 <button
                   key={task.id}
@@ -115,6 +119,15 @@ export function TaskBoardView({
                       {task.title}
                     </span>
                   </div>
+
+                  {preview && (
+                    <p
+                      title={preview}
+                      className="mt-1 truncate pl-3 text-[10px] leading-snug text-muted-foreground"
+                    >
+                      {preview}
+                    </p>
+                  )}
 
                   {task.role && (
                     <div className="mt-1.5">

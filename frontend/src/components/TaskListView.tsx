@@ -28,6 +28,7 @@ import {
   isOverdue,
   priorityColor,
 } from "../lib/tasks";
+import { markdownToPlainText } from "../lib/markdown";
 import { Input } from "./ui/Input";
 
 export interface TaskListViewProps {
@@ -295,6 +296,10 @@ function TaskRow({
   onDrop: () => void;
 }) {
   const overdue = isOverdue(task);
+  const preview = useMemo(
+    () => markdownToPlainText(task.description, 140),
+    [task.description]
+  );
   return (
     <div
       onClick={onOpen}
@@ -338,6 +343,16 @@ function TaskRow({
       {/* Title + inline meta */}
       <div className="flex min-w-[280px] flex-1 items-center gap-2 overflow-hidden px-3">
         <span className="truncate text-[0.85rem] text-foreground">{task.title}</span>
+        {preview && (
+          // Markdown STRIPPED, never rendered: a row is one line, and a
+          // heading or a bullet list in it would stop it being one.
+          <span
+            title={preview}
+            className="w-0 min-w-0 flex-1 truncate text-[0.78rem] text-muted-foreground/70"
+          >
+            {preview}
+          </span>
+        )}
         <div className="flex shrink-0 items-center gap-1.5 text-[0.7rem] text-muted-foreground">
           {!!meta?.comments && (
             <span className="inline-flex items-center gap-0.5" title="Comments">

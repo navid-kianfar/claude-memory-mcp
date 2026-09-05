@@ -32,6 +32,7 @@ import { cn } from "../lib/utils";
 import { useToast } from "./ui/Toast";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Input } from "./ui/Input";
+import { Markdown } from "./ui/Markdown";
 import { Textarea } from "./ui/Textarea";
 import {
   PRIORITY_LABELS,
@@ -88,6 +89,10 @@ export function TaskDialog({
   const [activity, setActivity] = useState<TaskActivityEntry[] | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // The parent of an open sub-task, for the breadcrumb. The task endpoint
+  // returns `parent_id` but no parent summary, so its title costs one more
+  // request — only ever made for a sub-task.
+  const [parent, setParent] = useState<Task | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -111,11 +116,38 @@ export function TaskDialog({
 
   // Opening a sub-task swaps taskId on this same instance, so per-task view
   // state has to reset with it - otherwise the Activity tab shows the history
-  // of the task you just navigated away from.
+  // of the task you just navigated away from, and the panel shows the previous
+  // task's fields for as long as the new one takes to load.
   useEffect(() => {
     setActivity(null);
     setTab("comments");
+    setDetail(null);
+    setParent(null);
+    setLoading(true);
   }, [taskId]);
+
+  // Breadcrumb for a sub-task. A failure here is silent on purpose: the
+  // breadcrumb falls back to "Parent task" rather than raising a toast about a
+  // task the user did not ask to open.
+  const parentId = detail?.task.parent_id ?? null;
+  useEffect(() => {
+    if (!parentId) {
+      setParent(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getTask(projectSlug, parentId)
+      .then((res) => {
+        if (!cancelled) setParent(res.task);
+      })
+      .catch(() => {
+        if (!cancelled) setParent(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectSlug, parentId]);
 
   // Escape closes, and the body must not scroll behind the panel.
   useEffect(() => {
@@ -209,7 +241,27 @@ export function TaskDialog({
                     />
                     {STATE_LABELS[task.state]}
                   </span>
-                  <ChevronRight className="size-3 text-muted-foreground/60" />
+                  <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
+                  {task.parent_id && (
+                    // A sub-task says whose it is, and the crumb navigates: the
+                    // dialog swaps taskId rather than opening a second panel.
+                    <>
+                      <button
+                        type="button"
+                        disabled={!onOpenTask}
+                        title={parent ? `Open "${parent.title}"` : undefined}
+                        onClick={() => onOpenTask?.(task.parent_id as string)}
+                        className={cn(
+                          "flex max-w-[220px] shrink items-center gap-1.5 truncate text-muted-foreground",
+                          onOpenTask && "transition-colors hover:text-primary hover:underline"
+                        )}
+                      >
+                        <ListTree className="size-3.5 shrink-0" />
+                        <span className="truncate">{parent?.title ?? "Parent task"}</span>
+                      </button>
+                      <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
+                    </>
+                  )}
                   <span className="truncate font-medium">{task.title}</span>
                 </div>
                 <div className="flex shrink-0 items-center gap-0.5">
@@ -274,7 +326,12 @@ export function TaskDialog({
             </div>
 
             <div className="flex flex-1 overflow-hidden max-md:flex-col max-md:overflow-y-auto">
+              {/* Keyed by task: opening a sub-task reuses this instance, and
+                  without a remount the inline editors would still hold the
+                  previous task's title, description and dates — saving one
+                  would write the parent's values onto the sub-task. */}
               <TaskDialogMain
+                key={`main:${task.id}`}
                 projectSlug={projectSlug}
                 detail={detail}
                 tab={tab}
@@ -289,6 +346,9 @@ export function TaskDialog({
                 onOpenTask={onOpenTask}
               />
               <TaskDialogSidebar
+                // Siblings need distinct keys; the task id alone would collide
+                // with the main column's and React would warn.
+                key={`sidebar:${task.id}`}
                 projectSlug={projectSlug}
                 detail={detail}
                 onPatch={patch}
@@ -588,15 +648,17 @@ function TaskDialogMain({
         {!editingDesc ? (
           <div
             onClick={() => {
+              // Selecting a line of the rendered description must not open the
+              // editor underneath the selection.
+              if (window.getSelection()?.toString()) return;
               setDescDraft(task.description ?? "");
               setEditingDesc(true);
             }}
             className="group flex cursor-pointer items-start gap-2 py-2 text-sm leading-relaxed"
           >
-            {task.description ? (
-              <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">
-                {task.description}
-              </div>
+            {task.description?.trim() ? (
+              // Rendered markdown; the textarea below still edits the source.
+              <Markdown source={task.description} className="min-w-0 flex-1" />
             ) : (
               <span className="italic text-muted-foreground">No description yet</span>
             )}
@@ -623,7 +685,9 @@ function TaskDialogMain({
         )}
       </div>
 
-      {/* Sub-tasks */}
+      {/* Sub-tasks — hidden entirely on a sub-task, because a task with a
+          parent can never have children: one level, no deeper. The server
+          rejects a grandchild, so the UI must not offer the action at all. */}
       {!task.parent_id && (
         <div className="mb-7">
           <SectionHeader
@@ -784,9 +848,10 @@ function TaskDialogMain({
                           {formatDateTime(comment.created_at)}
                         </span>
                       </div>
-                      <div className="whitespace-pre-wrap break-words text-[0.82rem] leading-relaxed">
-                        {comment.body}
-                      </div>
+                      <Markdown
+                        source={comment.body}
+                        className="text-[0.82rem] leading-relaxed"
+                      />
                     </div>
                   </div>
                 ))}
@@ -1263,10 +1328,12 @@ function TaskDialogSidebar({
 /* ── Sub-task row ────────────────────────────────────────────────────── */
 
 /**
- * A sub-task is a task: its title opens it in this dialog, where everything
- * else about it can be edited. The ⋯ menu carries the three things that only
- * make sense from the parent's list — rename in place, promote it out of the
- * parent, or delete it.
+ * A sub-task is a task, and its row says as much: the same things a card shows
+ * — state, labels, agent role, priority and assignee — not just a checkbox and
+ * a title. Clicking the title opens it in this dialog, where every remaining
+ * property is editable. The ⋯ menu carries the three things that only make
+ * sense from the parent's list — rename in place, promote it out of the parent,
+ * or delete it.
  */
 function SubtaskRow({
   projectSlug,
@@ -1387,19 +1454,75 @@ function SubtaskRow({
           </button>
         </>
       ) : (
-        <button
-          type="button"
-          onClick={onOpen}
-          disabled={!onOpen}
-          title={onOpen ? "Open sub-task" : undefined}
-          className={cn(
-            "min-w-0 flex-1 truncate text-left text-[0.82rem]",
-            onOpen && "hover:text-primary",
-            subtask.state === "done" && "text-muted-foreground line-through"
+        <>
+          <button
+            type="button"
+            onClick={onOpen}
+            disabled={!onOpen}
+            title={onOpen ? "Open sub-task" : undefined}
+            className={cn(
+              "min-w-0 flex-1 truncate text-left text-[0.82rem]",
+              onOpen && "hover:text-primary",
+              subtask.state === "done" && "text-muted-foreground line-through"
+            )}
+          >
+            {subtask.title}
+          </button>
+
+          {subtask.labels.length > 0 && (
+            <div className="flex shrink-0 items-center gap-1">
+              {subtask.labels.slice(0, 2).map((label) => (
+                <span
+                  key={label}
+                  className="max-w-[90px] truncate rounded px-1.5 py-0.5 text-[0.6rem] font-medium text-white"
+                  style={{ background: labelColor(label) }}
+                >
+                  {label}
+                </span>
+              ))}
+              {subtask.labels.length > 2 && (
+                <span className="text-[0.6rem] text-muted-foreground">
+                  +{subtask.labels.length - 2}
+                </span>
+              )}
+            </div>
           )}
-        >
-          {subtask.title}
-        </button>
+
+          {subtask.role && (
+            <span
+              title={`Routed to the ${subtask.role} agent`}
+              className="shrink-0 rounded border border-primary/30 px-1.5 py-0.5 text-[0.58rem] font-semibold text-primary"
+            >
+              agent:{subtask.role}
+            </span>
+          )}
+
+          <span
+            title={`State: ${STATE_LABELS[subtask.state]}`}
+            className="shrink-0 rounded px-1.5 py-0.5 text-[0.58rem] font-bold uppercase tracking-wide text-white"
+            style={{ background: STATE_COLORS[subtask.state] }}
+          >
+            {STATE_LABELS[subtask.state]}
+          </span>
+
+          <Flag
+            className="size-3.5 shrink-0"
+            style={{ color: priorityColor(subtask.priority) }}
+            fill={subtask.priority > 0 ? priorityColor(subtask.priority) : "none"}
+          />
+
+          {subtask.assignee ? (
+            <span
+              title={subtask.assignee}
+              style={{ background: avatarColor(subtask.assignee) }}
+              className="flex size-[18px] shrink-0 items-center justify-center rounded-full text-[0.5rem] font-bold text-white"
+            >
+              {initials(subtask.assignee)}
+            </span>
+          ) : (
+            <User className="size-3.5 shrink-0 text-muted-foreground/40" />
+          )}
+        </>
       )}
 
       <div ref={menuRef} className="relative shrink-0">

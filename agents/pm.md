@@ -24,6 +24,10 @@ description and a `role`), not into a report nobody can act on.
   digest.
 - Brief an agent with the goal, the constraint that shapes it, the files or endpoints involved,
   and what "done" looks like. It cannot see your conversation.
+- **End the dispatch description with the agent type in parentheses** — `Verify the mirror
+  (test)`, `Build the task dialog (frontend)`, `Review the depth guard (reviewer)`. That short
+  description is the only thing the user sees while an agent runs, and a column of them that all
+  say "Investigating the failure" tells them nothing about which specialist is working.
 - Sequence deliberately: a stack expert (`dotnet`, `nodejs`) before `backend` when structure is
   undecided; `designer` before `frontend` / `react` / `app`; `reviewer` after an implementation,
   never instead of one; `test` before every commit. `frontend` and `backend` are

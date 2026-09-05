@@ -186,7 +186,8 @@ def agent_team_line() -> str:
     return (
         f"[Agent team] You are the technical lead. Specialists available: {names}. "
         "Delegate a real specialism or genuinely parallel work; do it yourself when "
-        "you are the cheaper path. Never dispatch what two file reads would answer."
+        "you are the cheaper path. Never dispatch what two file reads would answer. "
+        "Name each dispatch with its agent type in parentheses."
     )
 
 
@@ -230,6 +231,12 @@ def agent_team_intro() -> str:
         "  - BEFORE A COMMIT, dispatch `test` to verify the change on the running "
         "instance (daemon, UI, board) and commit only on its green report. The "
         "repo's own suite proves the code; the test agent proves the product.",
+        "  - NAME THE AGENT IN THE DESCRIPTION. The short description on a "
+        "dispatch is all the user sees while it runs, and a row of them saying "
+        "\"Investigating the failure\" is unreadable - end it with the agent type "
+        "in parentheses: `Verify the mirror (test)`, `Build the task dialog "
+        "(frontend)`, `Review the depth guard (reviewer)`. It costs nothing and it "
+        "is the only thing that says which specialist is running.",
         "  - Subagents share this client's MCP connection: tell every agent to pass "
         "the session_id memory_session_start gave IT on memory_task_start, "
         "memory_task_claim_next and memory_session_end, or its session displaces "

@@ -1332,6 +1332,12 @@ def memory_task_comment(
     'note' (default), 'rule', 'decision', or 'reminder'. Anything that outlives
     the task - a project-wide rule, a decision that shapes future work - belongs
     in memory_add_rule / memory_store as well.
+
+    `body` is MARKDOWN and the board renders it - lists for the findings, bold
+    for the thing that must not be missed, `code` for a symbol or a path,
+    fenced blocks for output. No headings: asoode's comment box is a compact
+    editor with the heading node off, so `## X` arrives as a bold paragraph.
+    Use a bold lead-in instead.
     """
     def _run():
         slug = _resolve(project)

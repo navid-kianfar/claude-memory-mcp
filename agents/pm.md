@@ -1,6 +1,6 @@
 ---
 name: pm
-description: Technical lead in isolated context: breaks a large job down, assigns it to specialists, integrates what comes back. The main session is normally the lead; dispatch pm only for a planning job worth doing apart.
+description: "Technical lead in isolated context: breaks a large job down, assigns it to specialists, integrates what comes back. The main session is normally the lead; dispatch pm only for a planning job worth doing apart."
 extends: _base
 effort: max
 color: blue

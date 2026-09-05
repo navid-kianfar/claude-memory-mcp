@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Independent review of code it did not write: security, regressions, edge cases. Reports findings, never fixes them.
+description: "Independent review of code it did not write: security, regressions, edge cases. Reports findings, never fixes them."
 extends: _base
 effort: max
 color: red

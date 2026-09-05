@@ -22,6 +22,8 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    # the agent-definition guard parses frontmatter the way a strict reader does
+    "pyyaml>=6.0",
 ]
 
 [project.urls]

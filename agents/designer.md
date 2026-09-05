@@ -1,6 +1,6 @@
 ---
 name: designer
-description: Interface and UX decisions: design tokens, component specs, flows, visual review. Runs before frontend builds.
+description: "Interface and UX decisions: design tokens, component specs, flows, visual review. Runs before frontend builds."
 extends: _base
 effort: max
 color: purple

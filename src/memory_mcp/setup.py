@@ -351,10 +351,37 @@ class AgentCompositionError(RuntimeError):
     """An agent file extends something that cannot be resolved."""
 
 
+def _unquote(value: str) -> str:
+    """The value YAML would hand back, without its quotes.
+
+    A description containing a colon-space MUST be quoted in the file or a strict
+    YAML parser reads the second colon as a nested mapping. Those quotes are
+    syntax, not text: every consumer wants the string inside them.
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def _yaml_scalar(value: str) -> str:
+    """`value` as a frontmatter scalar, quoted only when YAML needs it.
+
+    The counterpart to `_unquote`: parsing drops the quotes, so rendering has to
+    put them back, or a composed file would ship the invalid YAML the quotes were
+    added to fix. A flow collection (`skills: [a, b]`) is left alone.
+    """
+    if not value or value[0] in "[{":
+        return value
+    if ": " in value or value.endswith(":"):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return value
+
+
 def parse_agent(text: str) -> tuple[dict, str] | None:
     """(frontmatter, body) for an agent-shaped file, else None.
 
-    Values stay the raw strings the file has - `skills: [a, b]` is passed through
+    Values are unquoted - the string YAML would give you - so a caller never has
+    to know whether the file needed quoting. `skills: [a, b]` is passed through
     untouched, exactly as Claude Code will read it.
     """
     match = _FRONT_RE.match(text)
@@ -365,14 +392,14 @@ def parse_agent(text: str) -> tuple[dict, str] | None:
         if not line.strip() or ":" not in line:
             continue
         key, _, value = line.partition(":")
-        front[key.strip()] = value.strip()
+        front[key.strip()] = _unquote(value.strip())
     return front, match.group(2)
 
 
 def _render_agent(front: dict, body: str) -> str:
     ordered = [k for k in _FRONT_ORDER if k in front]
     ordered += [k for k in front if k not in ordered]
-    lines = ["---", *(f"{k}: {front[k]}" for k in ordered), "---", ""]
+    lines = ["---", *(f"{k}: {_yaml_scalar(front[k])}" for k in ordered), "---", ""]
     return "\n".join(lines) + body.strip("\n") + "\n"
 
 

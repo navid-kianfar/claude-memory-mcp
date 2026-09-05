@@ -1,6 +1,6 @@
 ---
 name: app
-description: Mobile expert. Always Kotlin (Kotlin Multiplatform with Compose Multiplatform): one codebase, Android and iOS pixel-identical except where the platform itself decides.
+description: "Mobile expert. Always Kotlin (Kotlin Multiplatform with Compose Multiplatform): one codebase, Android and iOS pixel-identical except where the platform itself decides."
 extends: frontend
 effort: xhigh
 color: green

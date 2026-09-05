@@ -160,6 +160,11 @@ def installed_agents(include_lead: bool = False) -> list[tuple[str, str]]:
         for line in match.group(1).splitlines():
             if line.startswith("description:"):
                 desc = line.split(":", 1)[1].strip()
+                # A description containing a colon-space has to be quoted in the
+                # file to stay valid YAML. The quotes are syntax; injecting them
+                # into the roster puts them in front of every session.
+                if len(desc) >= 2 and desc[0] == desc[-1] and desc[0] in "\"'":
+                    desc = desc[1:-1]
                 break
         if path.stem == LEAD_AGENT and not include_lead:
             continue

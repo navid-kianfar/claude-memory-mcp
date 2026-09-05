@@ -1,6 +1,6 @@
 ---
 name: test
-description: Verifies other agents' work on the running product: e2e, integration, unit and browser testing. The gate before a commit.
+description: "Verifies other agents' work on the running product: e2e, integration, unit and browser testing. The gate before a commit."
 extends: _base
 effort: max
 color: yellow

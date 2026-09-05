@@ -229,6 +229,30 @@ class TestShippedAgentDefinitions:
                 assert front.get(field), f"{stem}.md is missing {field}"
             assert front["name"] == stem, f"{stem}.md declares name={front['name']!r}"
 
+    def test_frontmatter_is_valid_yaml_a_strict_reader_can_parse(self):
+        """`parse_agent` splits on the first colon, and so does Claude Code, so a
+        description reading `Interface and UX decisions: design tokens` composed and
+        dispatched fine while being invalid YAML - a strict parser reads the second
+        colon as a nested mapping. Six definitions shipped that way. Parse the real
+        frontmatter here, the way any other reader would.
+        """
+        yaml = pytest.importorskip("yaml")
+        by_stem = {
+            p.stem: p for p in setup_mod.AGENTS_DIR.glob("*.md")
+            if p.name.lower() != "readme.md"
+        }
+        for path in sorted(by_stem.values()):
+            # the abstract base is never installed, but a child inherits its keys
+            text = path.read_text() if setup_mod.is_abstract_agent(path) \
+                else setup_mod.installable_agent_text(path, by_stem)
+            end = text.find("\n---\n", 3)
+            assert text.startswith("---\n") and end > 0, f"{path.name} has no frontmatter block"
+            try:
+                front = yaml.safe_load(text[4:end])
+            except yaml.YAMLError as exc:
+                raise AssertionError(f"{path.name} frontmatter is not valid YAML: {exc}") from exc
+            assert isinstance(front, dict), f"{path.name} frontmatter is not a mapping"
+
     def test_the_reviewer_cannot_edit_what_it_judges(self):
         """A reviewer that can fix its findings stops reviewing and starts agreeing."""
         front, _ = self._definitions()["reviewer"]
@@ -414,15 +438,40 @@ class TestRetireDefaultAgent:
 class TestLeadBrief:
     """The orchestration brief the hook injects, now that the session IS the lead."""
 
-    def test_the_lead_is_not_offered_as_a_dispatch_target(self):
-        """Offering pm re-creates the relay layer this design rejected."""
+    def test_the_lead_is_not_offered_as_a_dispatch_target(self, monkeypatch):
+        """Offering pm re-creates the relay layer this design rejected.
+
+        Read the repo's own definitions, not ~/.claude/agents: that directory
+        exists only where someone has run setup, so reading it made the assertion
+        pass on a developer machine and fail on CI, where installed_agents()
+        returns [] and `pm not in []` passes for the wrong reason.
+        """
         from memory_mcp import enforcement
 
+        monkeypatch.setattr(enforcement, "AGENT_TEAM_DIR", setup_mod.AGENTS_DIR)
+
         names = [n for n, _ in enforcement.installed_agents()]
+        assert names, "the repo's agent definitions must be readable"
         assert enforcement.LEAD_AGENT not in names
         assert enforcement.LEAD_AGENT in [
             n for n, _ in enforcement.installed_agents(include_lead=True)
         ]
+
+    def test_the_roster_carries_no_quote_characters(self, monkeypatch):
+        """Quoting six descriptions to make the frontmatter valid YAML put literal
+        quote characters into the brief injected at every SessionStart: the readers
+        split on the first colon and never stripped them. The quotes are syntax.
+        """
+        from memory_mcp import enforcement
+
+        monkeypatch.setattr(enforcement, "AGENT_TEAM_DIR", setup_mod.AGENTS_DIR)
+
+        roster = enforcement.installed_agents(include_lead=True)
+        assert roster, "the repo's agent definitions must be readable"
+        for name, desc in roster:
+            assert desc, f"{name} has no description"
+            assert not desc.startswith(('"', "'")), f"{name} description starts with a quote: {desc[:60]!r}"
+            assert not desc.endswith(('"', "'")), f"{name} description ends with a quote: {desc[-60:]!r}"
 
     def test_the_per_turn_line_stays_one_line(self):
         """It is injected on EVERY prompt; a long brief there is the waste itself."""

@@ -30,7 +30,7 @@ import uuid
 from memory_mcp.config import settings
 from memory_mcp.context import current_user
 from memory_mcp.db.connection import after_commit
-from memory_mcp.exceptions import MemoryMCPError, TaskNotFoundError
+from memory_mcp.exceptions import MemoryMCPError, TaskNotFoundError, ValidationError
 from memory_mcp.models import (
     CreateTaskRequest, Task, TaskComment, TaskCommentKind, TaskDetail, TaskFilter,
     TaskListResponse, TaskRowMeta, TaskState, TaskTimeEntry, UpdateTaskRequest,
@@ -141,10 +141,44 @@ class TaskService:
             raise TaskNotFoundError(f"Task not found: {task_id}")
         return task
 
+    def _check_parentable(self, project: str, parent_id: str) -> Task:
+        """A sub-task's parent must exist, and must not be a sub-task itself.
+
+        ONE LEVEL, stated by the user: "a task with a parentId can not have sub
+        tasks". Two reasons it is enforced here rather than left to callers:
+
+        - asoode nests one level too (`parentId` on create, `convert-to-task` to
+          promote), so a grandchild is a local shape the board cannot hold - it
+          would mirror as a sibling of its own parent and the hierarchy would be
+          a lie on one side or the other.
+        - Every write path goes through this method: memory_task_add, the
+          daemon's POST /tasks route, and memory_task_plan's parent_index (which
+          checks the shape of the plan first, so it can name the offending item
+          before anything is created). A guard in the tool layer would have left
+          the HTTP route as the hole in the fence.
+
+        The missing-parent check rides along because it was missing entirely: a
+        typo'd parent_id used to create a top-level task that quietly claimed to
+        be a child of nothing.
+        """
+        parent = self._task_repo.get(project, parent_id)
+        if parent is None:
+            raise TaskNotFoundError(f"No such parent task: {parent_id}")
+        if parent.parent_id:
+            raise ValidationError(
+                f"{parent.title!r} ({parent_id}) is itself a sub-task of "
+                f"{parent.parent_id}, and sub-tasks cannot have sub-tasks. Hang "
+                f"this under {parent.parent_id} instead, or promote the parent "
+                f"first with memory_task_convert."
+            )
+        return parent
+
     # ---------- create ----------
 
     def create(self, request: CreateTaskRequest) -> Task:
         task_id = str(uuid.uuid4())
+        if request.parent_id:
+            self._check_parentable(request.project, request.parent_id)
         position = self._task_repo.next_position(request.project, request.parent_id)
 
         task = self._task_repo.insert(

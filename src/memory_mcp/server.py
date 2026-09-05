@@ -422,8 +422,14 @@ def memory_task_plan(
       labels          list of strings, optional
       role            which agent the task is for ('backend', 'frontend', ...),
                       optional - a task with no role is claimable by anyone
-      parent_index    index of an EARLIER item in this list, to hang a step off a
-                      deliverable, optional
+      parent_index    index of an EARLIER item in this list, to hang a sub-task
+                      off a deliverable, optional. ONE level: an item that
+                      already has a parent_index cannot be one, and a plan that
+                      asks for it is rejected whole, before anything is created.
+
+    Descriptions are MARKDOWN and the board renders them - headings, lists,
+    bold, `code`. A description long enough to hide several deliverables is
+    usually a parent and its sub-tasks written as one paragraph.
 
     List them in dependency order - the queue is worked top-down. They are
     mirrored to the asoode board immediately when the project is bound.
@@ -1140,7 +1146,19 @@ def memory_task_add(
     rejected rather than guessed - a task silently landing on the wrong board is
     worse than a failed create.
 
+    `parent_id` makes this a SUB-TASK of that task, and a sub-task carries
+    every property a task does - description, priority, labels, assignee,
+    dates, estimate, role, comments, time. Use it when part of a task could be
+    assigned to someone else or finished on a different day; that is the test,
+    and a long description hiding several of those is the usual sign one was
+    missed. Exactly ONE level: a task that already has a parent cannot take
+    sub-tasks of its own, and asking for one is refused rather than flattened.
+
     Dates are ISO 8601 strings. priority is 0-3.
+
+    Descriptions are MARKDOWN - headings, lists, bold, `code`, fenced blocks.
+    Use them. The board renders it (the mirror converts to HTML on the way
+    out), so a wall of unformatted prose is a choice, not a constraint.
     """
     def _run():
         slug = _resolve(project)

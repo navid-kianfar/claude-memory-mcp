@@ -81,6 +81,17 @@ class TaskPlanner:
                     f"task {index + 1} has parent_index {parent}: it must point at a "
                     "task EARLIER in the list, so a plan cannot contain a cycle"
                 )
+            if parent is not None and items[parent].get("parent_index") is not None:
+                # One level only - the same rule TaskService.create enforces, but
+                # checked HERE so the whole plan is rejected before a single task
+                # is created and the message can name the item by its index.
+                raise PlanError(
+                    f"task {index + 1} ({item['title']!r}) hangs off task "
+                    f"{parent + 1} ({items[parent]['title']!r}), which is itself a "
+                    "sub-task. Sub-tasks cannot have sub-tasks: point it at task "
+                    f"{items[parent]['parent_index'] + 1} instead, or make it a "
+                    "task of its own."
+                )
 
         created, ids = [], []
         index = -1

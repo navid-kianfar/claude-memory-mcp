@@ -121,6 +121,17 @@ class TestTheBoundaryIsEnforced:
                 {"title": "B", "description": "x"},
             ])
 
+    def test_a_sub_task_cannot_carry_sub_tasks_of_its_own(self, planner, project):
+        """One level only, checked before anything is created so the message
+        can name the offending item by its position in the plan."""
+        with pytest.raises(PlanError, match="Sub-tasks cannot have sub-tasks"):
+            planner.plan(project, REQUEST, [
+                {"title": "Parent", "description": "x"},
+                {"title": "Child", "description": "x", "parent_index": 0},
+                {"title": "Grandchild", "description": "x", "parent_index": 1},
+            ])
+        assert container.task_service.list_tasks(project, limit=50).total == 0
+
     def test_nothing_is_created_when_validation_fails(self, planner, project):
         with pytest.raises(PlanError):
             planner.plan(project, REQUEST, [ITEMS[0], {"title": "No desc", "description": ""}])

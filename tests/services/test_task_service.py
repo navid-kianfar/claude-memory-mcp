@@ -8,7 +8,7 @@ import pytest
 
 from memory_mcp.container import Container
 from memory_mcp.db.connection import get_connection
-from memory_mcp.exceptions import TaskNotFoundError
+from memory_mcp.exceptions import TaskNotFoundError, ValidationError
 from memory_mcp.models import (
     CreateTaskRequest, MemoryCategory, StoreMemoryRequest, TaskCommentKind,
     TaskFilter, TaskSource, TaskState, UpdateTaskRequest,
@@ -704,6 +704,68 @@ class TestSubTaskPositionQuery:
             "it raises a DuckDB INTERNAL assertion when the parent has no "
             "children yet, which is every parent's first sub-task."
         )
+
+
+class TestSubTasksGoOnlyOneLevelDeep:
+    """"A task with a parentId can not have sub tasks" - the user, 2026-09-05.
+
+    It is not only a product preference: asoode nests one level too, so a
+    grandchild is a shape the board cannot hold. It would arrive there as a
+    sibling of its own parent, and the hierarchy would be a lie on one side.
+    """
+
+    def test_a_sub_task_cannot_take_a_sub_task(self, container):
+        slug = _project(container, "t-depth")
+        parent = _add(container, slug, title="Parent")
+        child = container.task_service.create(
+            CreateTaskRequest(project=slug, title="Child", parent_id=parent.id)
+        )
+        with pytest.raises(ValidationError) as caught:
+            container.task_service.create(
+                CreateTaskRequest(project=slug, title="Grandchild", parent_id=child.id)
+            )
+        message = str(caught.value)
+        # The error names the offender, so the caller knows which id to fix.
+        assert "Child" in message and child.id in message and parent.id in message
+
+    def test_the_first_level_still_works(self, container):
+        slug = _project(container, "t-depth-ok")
+        parent = _add(container, slug, title="Parent")
+        child = container.task_service.create(
+            CreateTaskRequest(project=slug, title="Child", parent_id=parent.id)
+        )
+        assert child.parent_id == parent.id
+
+    def test_an_unknown_parent_is_refused(self, container):
+        """It used to succeed, quietly making a child of nothing."""
+        slug = _project(container, "t-depth-missing")
+        with pytest.raises(TaskNotFoundError):
+            container.task_service.create(
+                CreateTaskRequest(project=slug, title="Orphan", parent_id="no-such-id")
+            )
+
+    def test_a_promoted_sub_task_can_take_sub_tasks_again(self, container):
+        """convert is the escape hatch the error message points at."""
+        slug = _project(container, "t-depth-convert")
+        parent = _add(container, slug, title="Parent")
+        child = container.task_service.create(
+            CreateTaskRequest(project=slug, title="Child", parent_id=parent.id)
+        )
+        container.task_service.convert_to_task(slug, child.id)
+        grandchild = container.task_service.create(
+            CreateTaskRequest(project=slug, title="Now legal", parent_id=child.id)
+        )
+        assert grandchild.parent_id == child.id
+
+    def test_deleting_a_parent_promotes_its_children(self, container):
+        """The other legal path out, and it must keep working."""
+        slug = _project(container, "t-depth-delete")
+        parent = _add(container, slug, title="Parent")
+        child = container.task_service.create(
+            CreateTaskRequest(project=slug, title="Child", parent_id=parent.id)
+        )
+        container.task_service.delete(slug, parent.id)
+        assert container.task_service.get(slug, child.id).parent_id is None
 
 
 class TestRoleAwareClaiming:

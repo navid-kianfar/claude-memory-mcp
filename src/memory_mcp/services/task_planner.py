@@ -21,6 +21,7 @@ edited into something narrower.
 
 from memory_mcp.db.connection import transaction
 from memory_mcp.exceptions import MemoryMCPError
+from memory_mcp.utils.decomposition import decomposition_hint
 from memory_mcp.models import CreateTaskRequest, TaskSource
 
 # A plan is for a request with several deliverables. One task is not a plan - it
@@ -146,6 +147,17 @@ class TaskPlanner:
             "count": len(created),
             "mirrored": False,
         }
+        # A plan is where decomposition is already on the caller's mind, so a
+        # top-level item that still reads like several deliverables is worth
+        # saying out loud - once, next to the task it is about.
+        hints = [
+            {"task_id": task.id, "title": task.title, "hint": hint}
+            for task in created
+            if task.parent_id is None
+            and (hint := decomposition_hint(task.description))
+        ]
+        if hints:
+            result["hints"] = hints
         # Straight onto the board: a plan the user cannot see outside the session
         # has solved half the problem. Never fatal - the local queue is the record.
         #

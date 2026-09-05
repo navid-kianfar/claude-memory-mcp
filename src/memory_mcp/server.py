@@ -23,6 +23,7 @@ from memory_mcp.context import (
 from memory_mcp.enforcement import rules_digest
 from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.exceptions import MemoryMCPError, MemoryNotFoundError
+from memory_mcp.utils.decomposition import decomposition_hint
 from memory_mcp.models import (
     CreateTaskRequest, MemoryCategory, StoreMemoryRequest, UpdateMemoryRequest,
     SearchRequest, MemoryFilter, Pagination, RULE_CATEGORIES, TaskFilter,
@@ -1177,7 +1178,7 @@ def memory_task_add(
             role=role,
         )
         task = container.task_service.create(req)
-        return {
+        answer = {
             "status": "ok",
             "task": task.model_dump(mode="json"),
             "note": (
@@ -1185,6 +1186,12 @@ def memory_task_add(
                 "user asks for this one."
             ),
         }
+        hint = decomposition_hint(
+            task.description, has_parent=task.parent_id is not None,
+        )
+        if hint:
+            answer["hint"] = hint
+        return answer
     return _safe(_run)
 
 
@@ -1292,11 +1299,22 @@ def memory_task_update(
             role=role,
         )
         task, changed = container.task_service.update(req)
-        return {
+        answer = {
             "status": "ok",
             "task": task.model_dump(mode="json"),
             "changed": changed,
         }
+        if "description" in changed:
+            # Only on a description edit, and only when the task has no
+            # sub-tasks yet - a parent's long overview is not a problem.
+            hint = decomposition_hint(
+                task.description,
+                has_parent=task.parent_id is not None,
+                child_count=len(container.task_repo.children_of(slug, task.id)),
+            )
+            if hint:
+                answer["hint"] = hint
+        return answer
     return _safe(_run)
 
 

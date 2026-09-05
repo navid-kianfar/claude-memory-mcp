@@ -152,7 +152,9 @@ class RemoteTask:
     """A task as the platform holds it, in OUR vocabulary.
 
     `state` is a local TaskState value, already translated by the provider -
-    shared code must never see a platform's own ordinal or status name.
+    shared code must never see a platform's own ordinal or status name. The same
+    goes for `description`: it is MARKDOWN, whatever the platform stores. A
+    provider whose editor is HTML (asoode's is) converts at this boundary.
     """
 
     id: str

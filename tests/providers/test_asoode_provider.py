@@ -107,6 +107,16 @@ class FakeAsoodeClient:
         lst["tasks"].append(task)
         return task
 
+    def change_title(self, task_id, title):
+        if task_id not in self.tasks:
+            raise AsoodeError(f"no task {task_id}")
+        self.tasks[task_id]["title"] = title
+
+    def change_description(self, task_id, description):
+        if task_id not in self.tasks:
+            raise AsoodeError(f"no task {task_id}")
+        self.tasks[task_id]["description"] = description
+
     def change_state(self, task_id, state):
         from memory_mcp.asoode_client import STATE_TO_ORDINAL
 
@@ -186,7 +196,7 @@ class TestAsoodeConformance(ProviderConformance):
 
 
 class TestAsoodeSpecificTranslation:
-    """The three translations that earn the adapter."""
+    """The four translations that earn the adapter."""
 
     @pytest.fixture
     def provider(self):
@@ -254,6 +264,38 @@ class TestAsoodeSpecificTranslation:
         assert sent_task == task.id
         assert isinstance(sent_begin, str) and "T" in sent_begin
         assert isinstance(sent_end, str)
+
+    def test_a_description_goes_up_as_html(self, provider, board):
+        """asoode renders it with dangerouslySetInnerHTML from a TipTap editor."""
+        provider.create_task(board.id, None, "T", description="## Plan\n\n- one\n- two")
+        stored = list(provider.client.tasks.values())[-1]["description"]
+        assert stored == "<h2>Plan</h2><ul><li>one</li><li>two</li></ul>"
+
+    def test_a_description_edit_goes_up_as_html(self, provider, board):
+        task = provider.create_task(board.id, None, "T")
+        provider.update_fields(task.id, {"description": "**bold**"})
+        assert provider.client.tasks[task.id]["description"] == "<p><strong>bold</strong></p>"
+
+    def test_a_comment_goes_up_as_html_without_headings(self, provider, board):
+        """The comment box is the same editor in compact mode - no heading node."""
+        task = provider.create_task(board.id, None, "T")
+        provider.comment(task.id, "## Finding\n\n- one")
+        assert provider.client.comments[-1][1] == (
+            "<p><strong>Finding</strong></p><ul><li>one</li></ul>"
+        )
+
+    def test_html_from_the_board_comes_back_as_markdown(self, provider, board):
+        """RemoteTask.description is defined as being in OUR vocabulary."""
+        task = provider.create_task(board.id, None, "T")
+        provider.client.tasks[task.id]["description"] = "<h2>Edited</h2><ul><li>by a human</li></ul>"
+        fetched = provider.fetch_container(board.id, with_tasks=True)
+        assert fetched.tasks[0].description == "## Edited\n\n- by a human"
+
+    def test_a_plain_description_is_not_rewritten(self, provider, board):
+        """The store is full of plain rows written before any of this existed."""
+        plain = "asoode has no optimistic concurrency (no version/etag)."
+        task = provider.create_task(board.id, None, "T", description=plain)
+        assert task.description == plain
 
     def test_capabilities_match_what_asoode_actually_does(self):
         assert _CAPABILITIES.supports_external_ref is True

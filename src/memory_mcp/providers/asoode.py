@@ -4,7 +4,7 @@ Everything asoode-specific stops here. Above this line the bridge sees spaces,
 containers, groups and local state names; below it are work packages, lists,
 WorkPackageTaskState ordinals and an OperationResult envelope.
 
-The three translations that earn the adapter:
+The four translations that earn the adapter:
 
 1. STATE ORDINALS. asoode's WorkPackageTaskState is 1-9; ours are names. The two
    vocabularies are the same list in the same order, which is why this is a
@@ -20,6 +20,13 @@ The three translations that earn the adapter:
    the only create route, so `create_task` resolves the container's first list
    when the caller names no group. That resolution costs a fetch, which is why
    callers that know the group pass it.
+
+4. DESCRIPTIONS AND COMMENTS ARE HTML HERE, MARKDOWN EVERYWHERE ELSE. asoode
+   renders both with `dangerouslySetInnerHTML` from a TipTap editor, so this
+   adapter converts on the way out and back on the way in (utils/richtext.py).
+   The conversion belongs HERE and not in the bridge: HTML is asoode's
+   vocabulary, and `RemoteTask.description` is defined as being in ours - a
+   provider that wanted markdown would otherwise have to undo it.
 """
 
 import contextlib
@@ -32,6 +39,8 @@ from memory_mcp.asoode_client import (
     AsoodeClient,
     AsoodeError,
 )
+from memory_mcp.utils.richtext import html_to_markdown, markdown_to_html
+
 from memory_mcp.providers.base import (
     Capabilities,
     Container,
@@ -180,16 +189,17 @@ class AsoodeProvider:
     ) -> RemoteTask:
         list_id = group_id or self._first_group(container_id)
         remote = self.client.create_task(
-            list_id, title, description=description, external_ref=external_ref,
-            parent_id=parent_id,
+            list_id, title, description=markdown_to_html(description),
+            external_ref=external_ref, parent_id=parent_id,
         )
         remote_id = (remote or {}).get("id")
         if not remote_id:
             raise AsoodeError("asoode returned a task without an id")
+        echoed = remote.get("description")
         return RemoteTask(
             id=remote_id, title=remote.get("title") or title,
             state=ORDINAL_TO_STATE.get(remote.get("state"), "todo"),
-            description=remote.get("description") or description,
+            description=html_to_markdown(echoed) if echoed else description,
             group_id=list_id, external_ref=external_ref,
         )
 
@@ -202,7 +212,10 @@ class AsoodeProvider:
         self.client.reposition(task_id, group_id)
 
     def comment(self, task_id: str, body: str) -> None:
-        self.client.comment(task_id, body)
+        # allow_headings=False: the comment box is the same TipTap editor in
+        # `compact` mode, which turns the heading node off (TaskEditor.tsx:152),
+        # so an h2 here is markup the editor could not give back.
+        self.client.comment(task_id, markdown_to_html(body, allow_headings=False))
 
     def update_fields(self, task_id: str, fields: dict) -> None:
         """One route per field - asoode has no general task update.
@@ -216,7 +229,9 @@ class AsoodeProvider:
         if fields.get("title"):
             self.client.change_title(task_id, fields["title"])
         if "description" in fields:
-            self.client.change_description(task_id, fields["description"] or "")
+            self.client.change_description(
+                task_id, markdown_to_html(fields["description"] or ""),
+            )
         if fields.get("priority") is not None:
             self.client.change_priority(
                 task_id, PRIORITY_TO_OBJECTIVE.get(int(fields["priority"]), 1),
@@ -442,7 +457,7 @@ class AsoodeProvider:
                         id=task["id"],
                         title=(task.get("title") or "").strip(),
                         state=ORDINAL_TO_STATE.get(task.get("state"), "todo"),
-                        description=task.get("description") or "",
+                        description=html_to_markdown(task.get("description")),
                         group_id=board_list.get("id"),
                         external_ref=task.get("externalRef"),
                     ))

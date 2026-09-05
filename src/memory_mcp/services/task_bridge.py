@@ -92,11 +92,16 @@ def _comment_text(comment: dict) -> str:
     A rule or a decision pinned to a task must not read as chatter there any
     more than it does here, and the author matters when several agents write
     to one card.
+
+    The kind gets its OWN line rather than sitting inline. Comment bodies are
+    markdown now, so `[decision] ## Heading` would push the heading off the
+    start of its line and render it as literal text - the one part of the
+    comment the prefix was meant to dignify.
     """
     body = comment.get("body") or ""
     kind = (comment.get("kind") or "note").strip().lower()
     if kind and kind != "note":
-        body = f"[{kind}] {body}"
+        body = f"**[{kind}]**\n\n{body}"
     author = (comment.get("author") or "").strip()
     if author:
         body = f"{body}\n\n— {author}"

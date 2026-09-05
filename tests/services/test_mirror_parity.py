@@ -491,7 +491,9 @@ class TestFlusherRobustness:
         bridge.flush(project)
 
         body = provider.comments[-1][1]
-        assert body.startswith("[decision] ship it")
+        # The kind sits on its own line: a markdown body must not have its
+        # first block pushed off the start of its line by the prefix.
+        assert body.startswith("**[decision]**\n\nship it")
         assert body.endswith("— reviewer")
 
     def test_the_done_note_reaches_the_board(self, project):

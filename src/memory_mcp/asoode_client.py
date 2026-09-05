@@ -53,11 +53,18 @@ ORDINAL_TO_STATE = {v: k for k, v in STATE_TO_ORDINAL.items()}
 PRIORITY_TO_OBJECTIVE = {0: 1, 1: 2, 2: 4, 3: 5}
 OBJECTIVE_TO_PRIORITY = {1: 0, 2: 1, 3: 1, 4: 2, 5: 3}
 
-# OperationResult.status (app.enum.ts) - 2 is Success; the rest are why not.
+# OperationResultStatus (packages/shared/src/enums/core.enum.ts) - 2 is Success;
+# the rest are why not. Verified against the enum on 2026-09-05: an earlier copy
+# of this table was off by one for 1, 3 and 4, so a Duplicate read as "access
+# denied" and every tolerant call site that matched on the string failed.
+STATUS_PENDING = 1
+STATUS_SUCCESS = 2
+STATUS_NOT_FOUND = 3
+STATUS_DUPLICATE = 4
 _STATUS_MESSAGE = {
-    1: "not found",
-    3: "already exists",
-    4: "access denied",
+    STATUS_PENDING: "pending",
+    STATUS_NOT_FOUND: "not found",
+    STATUS_DUPLICATE: "already exists",
     5: "rejected",
     6: "unauthorized",
     7: "validation failed",
@@ -73,8 +80,14 @@ class AsoodeError(ProviderError):
 
     Subclasses ProviderError so the flusher's retry logic treats every platform's
     failures alike, while the many existing `except AsoodeError` sites keep
-    working unchanged.
+    working unchanged. `status` carries the envelope's OperationResultStatus
+    when there was one, so a caller that tolerates Duplicate or NotFound checks
+    the NUMBER, never the message text.
     """
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class AsoodeAuthError(AsoodeError, ProviderAuthError):
@@ -142,10 +155,13 @@ class AsoodeClient:
         # The envelope. A 2xx with status != 2 is still a failure.
         if isinstance(payload, dict) and "status" in payload:
             status = payload.get("status")
-            if status != 2:
+            if status != STATUS_SUCCESS:
                 reason = _STATUS_MESSAGE.get(status, f"status {status}")
                 detail = payload.get("message") or payload.get("errors") or ""
-                raise AsoodeError(f"asoode {path}: {reason}{f' - {detail}' if detail else ''}")
+                raise AsoodeError(
+                    f"asoode {path}: {reason}{f' - {detail}' if detail else ''}",
+                    status=status if isinstance(status, int) else None,
+                )
             return payload.get("data")
         return payload
 
@@ -316,7 +332,7 @@ class AsoodeClient:
                 {"packageId": package_id, "externalRef": external_ref},
             ) or None
         except AsoodeError as e:
-            if "not found" in str(e):
+            if e.status == STATUS_NOT_FOUND:
                 return None
             raise
 
@@ -333,7 +349,10 @@ class AsoodeClient:
                 {"recordId": record_id, "isGroup": bool(is_group)},
             )
         except AsoodeError as e:
-            if "already exists" in str(e):
+            # TaskMember is unique per (task, recordId) and the service answers
+            # Duplicate - the state we wanted. The PAT owner is a member of every
+            # card the flusher creates (assignSelf), so this is the common case.
+            if e.status == STATUS_DUPLICATE:
                 return None
             raise
 

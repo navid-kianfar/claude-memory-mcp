@@ -127,28 +127,45 @@ class Container:
             self._flushing[project] = True
 
         def _run():
-            while True:
+            rerun = False
+            try:
+                while True:
+                    try:
+                        self.task_bridge.flush(project)
+                    except Exception:  # noqa: BLE001 - a mirror can never break a local write
+                        pass
+                    with self._flush_lock:
+                        if project in self._dirty:
+                            self._dirty.discard(project)
+                            continue
+                    break
+                # Then pull anything added on the board - ONCE per drain, not per
+                # pass: it is a full board read. Only NEW remote tasks - see
+                # TaskBridge.reconcile - so this can never overwrite local work,
+                # which is what makes it safe to run unattended.
                 try:
-                    self.task_bridge.flush(project)
-                    # Then pull anything added on the board. Only NEW remote
-                    # tasks - see TaskBridge.reconcile - so this can never
-                    # overwrite local work, which is what makes it safe to run
-                    # unattended.
                     self.task_bridge.reconcile(project)
-                except Exception:  # noqa: BLE001 - a mirror can never break a local write
+                except Exception:  # noqa: BLE001
                     pass
+            finally:
                 with self._flush_lock:
-                    if project in self._dirty:
-                        self._dirty.discard(project)
-                        continue
                     self._flushing.pop(project, None)
                     self._flush_threads.pop(project, None)
-                    return
+                    # A nudge that landed during the reconcile.
+                    rerun = project in self._dirty
+                    self._dirty.discard(project)
+            if rerun:
+                self._mirror_soon(project)
 
         thread = threading.Thread(target=_run, name=f"asoode-flush-{project}", daemon=True)
-        with self._flush_lock:
-            self._flush_threads[project] = thread
-        thread.start()
+        try:
+            with self._flush_lock:
+                self._flush_threads[project] = thread
+            thread.start()
+        except Exception:  # noqa: BLE001 - a spawn that fails must not jam the project
+            with self._flush_lock:
+                self._flushing.pop(project, None)
+                self._flush_threads.pop(project, None)
 
     # ---------- draining what a nudge could not ----------
     #

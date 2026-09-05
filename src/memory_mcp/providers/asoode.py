@@ -28,6 +28,7 @@ from memory_mcp.asoode_client import (
     ORDINAL_TO_STATE,
     PRIORITY_TO_OBJECTIVE,
     STATE_TO_ORDINAL,
+    STATUS_DUPLICATE,
     AsoodeClient,
     AsoodeError,
 )
@@ -263,9 +264,10 @@ class AsoodeProvider:
             try:
                 self.client.add_task_label(task_id, label_id)
             except AsoodeError as e:
-                # TaskLabel is unique per (task, label): a retried flush lands
-                # on "already exists", which is the state we wanted.
-                if "already exists" not in str(e):
+                # TaskLabel is unique per (task, label): a retried flush, or a
+                # label a human already put on the card, answers Duplicate -
+                # the state we wanted.
+                if e.status != STATUS_DUPLICATE:
                     raise
 
     def set_assignee(

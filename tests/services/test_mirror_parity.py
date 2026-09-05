@@ -261,7 +261,7 @@ class TestTheClock:
         tasks.start(project, task.id, session_id="dead")
         with connect(project) as conn:
             conn.execute(
-                "UPDATE tasks SET lease_expires_at = current_timestamp - INTERVAL 1 MINUTE "
+                "UPDATE tasks SET lease_expires_at = current_timestamp - INTERVAL 2 HOUR "
                 "WHERE id = ?", [task.id],
             )
 
@@ -279,6 +279,62 @@ class TestTheClock:
 
         assert tasks.sweep_expired(project) == {"released": [], "clocks_stopped": []}
         assert tasks.detail(project, task.id).running
+
+    def test_the_sweep_gives_a_quiet_holder_a_grace_period(self, project):
+        """A lease that expired minutes ago may be an agent forty minutes into a
+        build; an hour of silence is what says the session is gone."""
+        tasks, _, _ = _stack(project, _provider())
+        task = _create(tasks, project)
+        tasks.start(project, task.id, session_id="quiet")
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE tasks SET lease_expires_at = current_timestamp - INTERVAL 5 MINUTE "
+                "WHERE id = ?", [task.id],
+            )
+
+        assert tasks.sweep_expired(project) == {"released": [], "clocks_stopped": []}
+        assert tasks.detail(project, task.id).running
+
+    def test_deleting_a_parent_promotes_its_children_on_the_board(self, project):
+        provider = _provider()
+        tasks, bridge, outbox = _stack(project, provider)
+        parent = _create(tasks, project, "Parent")
+        child = _create(tasks, project, "Child", parent_id=parent.id)
+        bridge.flush(project)
+
+        tasks.delete(project, parent.id)
+
+        assert "parent" in _ops(outbox, project)
+        bridge.flush(project)
+        assert provider.promoted == ["r2"]
+        assert tasks.get(project, child.id).parent_id is None
+
+    def test_a_card_whose_field_sync_fails_is_not_remembered(self, project):
+        """Remembered first, the retry would find the card and never send the
+        fields it is missing."""
+        provider = _provider()
+        calls = {"n": 0}
+        real = provider.update_fields
+
+        def flaky(task_id, fields):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ProviderError("rejected once")
+            return real(task_id, fields)
+
+        provider.update_fields = flaky
+        tasks, bridge, outbox = _stack(project, provider)
+        task = _create(tasks, project, priority=3)
+        first = bridge.flush(project)
+        assert first["failed"] == 1
+        link = bridge.route(project, task)
+        assert outbox.remote_id(project, task.id, link["id"]) is None
+
+        bridge.flush(project)
+
+        assert outbox.remote_id(project, task.id, link["id"]) == "r1"
+        assert provider.field_updates[-1][1] == {"priority": 3}
+        assert len(provider.created_tasks) == 1, "the retry looked the card up by ref"
 
     def test_archive_mirrors_the_stretch_it_closes(self, project):
         provider = _provider()

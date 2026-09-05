@@ -405,7 +405,7 @@ class TaskBridge:
             total: dict = {"flushed": 0, "failed": 0, "skipped": 0, "abandoned": 0}
             for _ in range(_MAX_FLUSH_PASSES):
                 result = self._flush_locked(slug, limit)
-                for key in total:
+                for key in ("flushed", "failed", "skipped", "abandoned"):
                     total[key] += result.get(key, 0)
                 if result.get("reason"):
                     total["reason"] = result["reason"]
@@ -566,9 +566,15 @@ class TaskBridge:
         remote_id = remote.id
         if not remote_id:
             raise ProviderError("the provider returned a task without an id")
-        self._remember(slug, task.id, link["id"], remote_id, task.state.value)
         self.echo.note(remote_id)
+        # Fields first, mapping second. Remembered before the sync, a card
+        # whose field sync failed was found on the retry, reported as "already
+        # there", and never got its fields - the mirror looked healthy and the
+        # priority, dates, labels and assignee were simply gone. Unremembered,
+        # the retry creates-by-externalRef again (a lookup) and syncs again;
+        # every call in the sync is idempotent, so landing twice is harmless.
         self._sync_new_card(slug, task, link, provider, remote_id)
+        self._remember(slug, task.id, link["id"], remote_id, task.state.value)
         return remote_id, True
 
     def _remember(self, slug: str, task_id: str, link_id: int, remote_id: str,
@@ -757,8 +763,10 @@ class TaskBridge:
            to mean "this is new", which is how the duplicates happened.
         2. The remote externalRef, which for anything pushed from here is
            "memory-mcp:<local task id>" - a perfect identity when the platform
-           returns it. asoode's board fetch does not yet, so this is currently
-           dormant on asoode and correct everywhere else.
+           returns it. asoode's board fetch does (work-packages.service.ts maps
+           it), and it leaves archived cards out, so this is live on asoode and
+           the tombstone check below is what keeps a deleted task from coming
+           back through it.
         3. The title, within this board. Imperfect - two tasks can share one -
            but far better than creating a duplicate, which is unrecoverable
            without a human reading both.

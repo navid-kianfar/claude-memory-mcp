@@ -530,6 +530,16 @@ def migrate_v12_to_v13(conn: duckdb.DuckDBPyConnection) -> None:
         conn.execute("ALTER TABLE task_time_entries ADD COLUMN session_id VARCHAR")
     except Exception:
         pass
+    # Stamp the version only when the column is really there. Swallowing the
+    # ALTER and stamping anyway would leave a v12 table marked v13, and every
+    # time-entry read after that would fail on the missing column.
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info('task_time_entries')").fetchall()
+    }
+    if "session_id" not in columns:
+        raise RuntimeError(
+            "schema v13: could not add task_time_entries.session_id - not stamping"
+        )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS task_tombstones (

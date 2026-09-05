@@ -620,11 +620,18 @@ class TaskService:
         A claim whose lease has run out is already ignored by the next claim,
         but the clock its holder left running was not - it kept counting, and
         was never mirrored because only a closed stretch is sent. Called at
-        session start. Only EXPIRED leases: a live session refreshes its lease
-        on every mutation, so nothing here can touch a task someone is on.
+        session start.
+
+        Only leases expired by a full further lease period - an hour with no
+        mutation at all, since any comment, update or start refreshes the lease.
+        Expiry alone was too eager: an agent forty minutes into a build that
+        comments nothing meanwhile would have had its clock closed and its task
+        released by an unrelated session starting. An hour of silence is the
+        signal that a session is gone, and an agent that works longer than that
+        without a comment is violating its own brief.
         """
         released, clocks = [], []
-        for task in self._task_repo.expired_claims(project):
+        for task in self._task_repo.expired_claims(project, grace_minutes=CLAIM_LEASE_MINUTES):
             closed = self._stop_running(project, task.id)
             self._task_repo.release(project, task.id, None)
             self._record(project, task.id, "task_lease_expired",
@@ -805,6 +812,7 @@ class TaskService:
         # it. asoode has no delete route, so the card is archived - it must not
         # stay on the board as a live task nobody has locally.
         remotes = self._outbox.remote_ids_for(project, task_id) if self._outbox else {}
+        children = self._task_repo.children_of(project, task_id)
         self._task_repo.hard_delete(project, task_id)
         if remotes:
             # After the delete: hard_delete clears the task's outbox rows.
@@ -812,6 +820,10 @@ class TaskService:
                 "remote": {str(link_id): rid for link_id, rid in remotes.items()},
                 "title": task.title,
             })
+        # hard_delete promoted the children locally; the board must see the same
+        # or they stay nested under a card that has just been archived.
+        for child in children:
+            self._enqueue(project, child.id, "parent", {"parent_id": None})
         return {"status": "ok", "deleted": task_id, "title": task.title}
 
     def archive(self, project: str, task_id: str) -> Task:

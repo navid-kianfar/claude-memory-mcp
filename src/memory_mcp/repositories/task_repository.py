@@ -618,18 +618,22 @@ class TaskRepository:
             ).fetchall()
         return [r[0] for r in rows]
 
-    def expired_claims(self, project: str) -> list[Task]:
-        """Tasks still marked as held by a session whose lease has run out.
+    def expired_claims(self, project: str, grace_minutes: int = 0) -> list[Task]:
+        """Tasks still marked as held by a session whose lease ran out more than
+        `grace_minutes` ago.
 
         The claim itself is checked lazily by every claim attempt, so an expired
         holder never blocks anyone; what nothing checked until now is the clock
-        that holder left running. Session start sweeps these.
+        that holder left running. Session start sweeps these, with a grace
+        period so a holder that is merely quiet is not mistaken for one that is
+        gone.
         """
         with connect(project) as conn:
             rows = conn.execute(
                 f"SELECT {TASK_COLUMNS} FROM tasks WHERE claimed_by IS NOT NULL "
                 f"AND lease_expires_at IS NOT NULL "
-                f"AND lease_expires_at < current_timestamp::TIMESTAMP",
+                f"AND lease_expires_at < (current_timestamp - INTERVAL (?) MINUTE)::TIMESTAMP",
+                [int(grace_minutes)],
             ).fetchall()
         return [_row_to_task(r) for r in rows]
 

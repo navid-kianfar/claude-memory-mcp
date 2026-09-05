@@ -48,11 +48,10 @@ away. Hand-rolling the subset keeps the two halves in agreement.
 
 from __future__ import annotations
 
-import html as html_module
 import re
 from html.parser import HTMLParser
 
-__all__ = ["markdown_to_html", "html_to_markdown", "looks_like_html", "to_plain_text"]
+__all__ = ["markdown_to_html", "html_to_markdown", "looks_like_html"]
 
 # TipTap here is configured with `heading: { levels: [1, 2, 3] }`, so a deeper
 # heading is clamped rather than emitted as an h4 the editor cannot represent.
@@ -558,22 +557,3 @@ def html_to_markdown(html: str | None) -> str:
     # TipTap emits an empty paragraph for a blank line; collapse the runs of
     # blank lines that produces.
     return re.sub(r"\n{3,}", "\n\n", text).strip()
-
-
-def to_plain_text(text: str | None) -> str:
-    """One readable line, for a place that cannot render anything.
-
-    A log line, a board-card preview, a session brief. Markdown syntax is
-    stripped rather than rendered, and HTML is reduced to its text.
-    """
-    if not text:
-        return ""
-    plain = html_to_markdown(text) if looks_like_html(text) else text
-    plain = re.sub(r"```[^\n]*\n?", "", plain)
-    plain = re.sub(r"^\s{0,3}#{1,6}\s+", "", plain, flags=re.M)
-    plain = re.sub(r"^\s{0,3}>\s?", "", plain, flags=re.M)
-    plain = re.sub(r"^\s*[-*+]\s+", "", plain, flags=re.M)
-    plain = re.sub(r"^\s*\d+[.)]\s+", "", plain, flags=re.M)
-    plain = re.sub(r"(\*\*|__|~~|`)", "", plain)
-    plain = html_module.unescape(plain)
-    return re.sub(r"\s+", " ", plain).strip()

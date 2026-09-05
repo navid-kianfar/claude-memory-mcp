@@ -18,7 +18,6 @@ from memory_mcp.utils.richtext import (
     html_to_markdown,
     looks_like_html,
     markdown_to_html,
-    to_plain_text,
 )
 
 
@@ -217,12 +216,3 @@ class TestHelpers:
         assert not looks_like_html("plain text")
         assert not looks_like_html("2 < 3 and 4 > 1")
         assert not looks_like_html("")
-
-    def test_plain_text_strips_markdown(self):
-        assert to_plain_text("# Title\n\n- one\n- two") == "Title one two"
-
-    def test_plain_text_strips_html(self):
-        assert to_plain_text("<p><strong>b</strong> text</p>") == "b text"
-
-    def test_plain_text_of_empty(self):
-        assert to_plain_text(None) == ""

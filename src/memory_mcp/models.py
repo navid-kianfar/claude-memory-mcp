@@ -429,7 +429,23 @@ class TaskDetail(BaseModel):
     subtasks: list[Task] = Field(default_factory=list)
     attachments: list[TaskAttachment] = Field(default_factory=list)
     minutes_spent: int = 0
+    #: This task's own minutes PLUS every sub-task's. Equal to `minutes_spent`
+    #: for a task with no children.
+    #:
+    #: A parent's work happens on its sub-tasks, so its own clock is legitimately
+    #: 0 - and asoode shows exactly that, because time there belongs to the task
+    #: it was worked on. Rolling the total up REMOTELY would double-count in
+    #: asoode's package and project reports, which sum every task. So the roll-up
+    #: lives here, on the read side, where it can be shown without corrupting
+    #: anyone's totals. Decided with the user on 2026-09-05.
+    minutes_spent_total: int = 0
     running: bool = False
+    # Set only when a task was closed with no clock ever running: either the
+    # stretch recovered from the state history, or the reason none could be.
+    # Present so the agent SEES that a task went to Done at zero minutes,
+    # instead of the close succeeding in silence, which is how 39% of done
+    # tasks ended up with no time at all.
+    time_note: dict | None = None
 
 
 class TaskListResponse(BaseModel):

@@ -108,6 +108,10 @@ class Capabilities:
     supports_assignees: bool = False
     #: A task can be created under a parent and promoted out of one.
     supports_subtasks: bool = False
+    #: Groups/columns can be CREATED and STYLED (`ensure_group`), so a board we
+    #: build carries the same columns and colours a person would have chosen.
+    #: False means the platform's own board template is left exactly as it came.
+    supports_group_style: bool = False
     #: Local task states this platform can represent. A state outside this set is
     #: mapped to the nearest one by the provider, never dropped silently.
     states: tuple[str, ...] = ()
@@ -134,6 +138,10 @@ class Group:
 
     id: str
     title: str
+    #: The column's colour, "" when unset. Carried so `ensure_group` can tell a
+    #: colour someone chose from one the platform never set - the difference
+    #: between filling a blank in and repainting someone's board.
+    color: str = ""
 
 
 @dataclass(frozen=True)
@@ -361,6 +369,21 @@ class TaskProvider(Protocol):
         Only called when `supports_archive`. A provider without a bulk route may
         implement it as a loop, but it must exist so callers need not choose.
         """
+
+    def ensure_group(self, container_id: str, title: str,
+                     color: str = "") -> str | None:
+        """Make sure a column called `title` exists, and carries `color`.
+
+        Only called when `supports_group_style`. Returns the group id, or None
+        if the platform declined. Idempotent: called on a board that already has
+        the column, it must not create a second one.
+
+        MUST NOT REPAINT. A column whose colour someone has already set is
+        theirs - only an unset colour may be filled in. A board is a shared
+        artefact and a bootstrap that recoloured someone's columns would be
+        vandalism, not configuration.
+        """
+        return None
 
     def log_time(self, task_id: str, begin, end=None) -> None:
         """Record a stretch of work against a task. Only called when

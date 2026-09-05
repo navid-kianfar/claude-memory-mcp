@@ -415,6 +415,39 @@ class AsoodeClient:
         """
         return self._post(f"/work-packages/lists/{list_id}/archive-tasks", {})
 
+    def create_list(self, package_id: str, title: str, color: str = "",
+                    dark_color: bool = False) -> Any:
+        """POST /work-packages/:id/lists/create - CreateListBody
+        {title, color?, darkColor?, externalRef?} (work-package.dto.ts:66).
+
+        `color` is free text bounded to 32 chars, not a validated hex: the DTO
+        uses @IsString rather than @IsHexColor so that "" (the default) stays
+        valid. Pass one of the twelve swatches asoode's own column picker
+        offers, so a board we build looks like a board someone built.
+        """
+        body: dict = {"title": title}
+        if color:
+            body["color"] = color
+            body["darkColor"] = dark_color
+        return self._post(f"/work-packages/{package_id}/lists/create", body)
+
+    def edit_list(self, list_id: str, *, title: str | None = None,
+                  color: str | None = None, dark_color: bool | None = None) -> Any:
+        """POST /work-packages/lists/:id/edit - EditListBody
+        {title?, color?, darkColor?} (work-package.dto.ts:90).
+
+        NOT `rename`, which takes only a title (RenameListBody, dto.ts:337) and
+        would silently leave the colour alone.
+        """
+        body: dict = {}
+        if title is not None:
+            body["title"] = title
+        if color is not None:
+            body["color"] = color
+        if dark_color is not None:
+            body["darkColor"] = dark_color
+        return self._post(f"/work-packages/lists/{list_id}/edit", body)
+
     def spend_time(self, task_id: str, begin: str, end: str | None = None) -> Any:
         """Log a stretch of work. SpendTimeDto is {begin, end?} (task.dto.ts:116)."""
         body: dict = {"begin": begin}
@@ -428,7 +461,7 @@ class AsoodeClient:
         return self._post(f"/tasks/{task_id}/set-date", body)
 
     def create_label(self, package_id: str, title: str,
-                     color: str = "#6366f1") -> Any:
+                     color: str = "#9e9e9e") -> Any:
         """POST /work-packages/labels/:packageId/create -> the new label."""
         return self._post(
             f"/work-packages/labels/{package_id}/create",

@@ -26,6 +26,7 @@ import contextlib
 import contextvars
 import threading
 import uuid
+from datetime import datetime, timedelta
 
 from memory_mcp.config import settings
 from memory_mcp.context import current_user
@@ -56,6 +57,10 @@ _MIRRORED_FIELDS = frozenset({
     "state", "title", "description", "priority", "assignee", "labels",
     "due_at", "begin_at", "end_at", "estimated_minutes",
 })
+
+# The longest stretch _reconstruct_time will credit to a task closed with no
+# clock. A card left in In Progress overnight must not claim the whole night.
+_MAX_RECONSTRUCTED_MINUTES = 240
 
 # Set while an INBOUND write is being applied, so it is not mirrored straight
 # back out. A contextvar rather than an attribute on the service: the service is
@@ -277,13 +282,18 @@ class TaskService:
     def detail(self, project: str, task_id: str) -> TaskDetail:
         task = self._require(project, task_id)
         entries = self._task_repo.entries_for(project, task_id)
+        children = self._task_repo.children_of(project, task_id)
+        own_minutes = self._task_repo.seconds_spent(project, task_id) // 60
         return TaskDetail(
             attachments=self.attachments(project, task_id),
             task=task,
             comments=self._task_repo.comments_for(project, task_id),
             time_entries=entries,
-            subtasks=self._task_repo.children_of(project, task_id),
-            minutes_spent=self._task_repo.seconds_spent(project, task_id) // 60,
+            subtasks=children,
+            minutes_spent=own_minutes,
+            minutes_spent_total=own_minutes + sum(
+                self._task_repo.seconds_spent(project, c.id) // 60 for c in children
+            ),
             running=any(e.end_at is None for e in entries),
         )
 
@@ -368,6 +378,7 @@ class TaskService:
 
         state_changed = request.state is not None and request.state != before.state
         closed: list = []
+        recovered: dict | None = None
         # done_at follows the state, and is stamped from the DB clock so every
         # timestamp in the file comes from one source.
         if state_changed:
@@ -385,9 +396,39 @@ class TaskService:
             # because only `stop` and `done` knew about the clock.
             if before.state == TaskState.IN_PROGRESS:
                 closed = self._stop_running(request.project, request.task_id)
+            # ...and entering it STARTS one, which is the other half of the same
+            # rule and was missing. `update(state='in_progress')` moved the card
+            # to In Progress on the board and started no clock, so every task
+            # closed that way recorded zero minutes: 39% of done tasks had no
+            # time entry at all. "Move the task" is the natural call for an
+            # agent not thinking about the clock, which is what made it the
+            # biggest single source of lost time.
+            #
+            # NOT for an inbound apply. The importer holds suppress_mirroring
+            # while it writes what the board already says; opening an entry
+            # there would invent local time for a card a person dragged, and
+            # then mirror it straight back as a time entry nobody worked.
+            elif (
+                request.state == TaskState.IN_PROGRESS
+                and not _MIRROR_SUPPRESSED.get()
+                and self._task_repo.running_entry(
+                    request.project, request.task_id,
+                ) is None
+            ):
+                self._task_repo.start_entry(
+                    request.project, str(uuid.uuid4()), request.task_id, None,
+                )
             # A finished task is nobody's work any more, whichever verb finished it.
             if request.state == TaskState.DONE:
                 self._task_repo.release(request.project, request.task_id, None)
+            # Closed with nothing ever clocked: recover the stretch if the state
+            # history evidences one. Same rule as done(), because `update(state=
+            # 'done')` is the other way to finish a task and must not be the
+            # cheap way to finish it at zero minutes.
+            if request.state in _CLOSED_STATES and not closed:
+                recovered = self._reconstruct_time(
+                    request.project, request.task_id,
+                )
 
         changed = sorted(fields.keys())
         self._touch_lease(request.project, request.task_id)
@@ -398,6 +439,7 @@ class TaskService:
                 "state_from": before.state.value,
                 "state_to": task.state.value,
                 "clock_stopped": bool(closed),
+                "time_recovered": recovered,
             },
         )
         # Every field the board can hold. A local-only edit (position, claim,
@@ -411,7 +453,7 @@ class TaskService:
             if "assignee" in changed:
                 payload["assignee_before"] = before.assignee
             self._enqueue(request.project, request.task_id, "update", payload)
-        if closed:
+        if closed or (recovered or {}).get("recorded"):
             self._enqueue(request.project, request.task_id, "time", {})
         if role_changed:
             # Its own op: the update op reconciles state, and the role label is a
@@ -779,6 +821,80 @@ class TaskService:
             self._enqueue(project, task_id, "time", {"entry_id": closed[0].id})
         return self.detail(project, task_id)
 
+    def _reconstruct_time(self, project: str, task_id: str) -> dict | None:
+        """Recover the stretch for a task being closed with NO time entry at all.
+
+        Measured on 2026-09-05: 29 of 74 done tasks (39%) had no time entry,
+        because closing a task never objected to closing it at zero minutes.
+        The clock is now started by every path that enters in_progress, so this
+        covers what that cannot - a task closed straight out of todo, and rows
+        that predate the fix.
+
+        NOT invention. The task's move into in_progress is in the provenance
+        log with a timestamp; the stretch between that and now is the interval
+        the card demonstrably sat in In Progress, which is what the clock would
+        have recorded. A task that was never in_progress has no such interval,
+        and this returns a warning rather than a number - the honest answer to
+        "how long did this take" is sometimes "nothing recorded it".
+
+        Capped: a card left in In Progress overnight would otherwise claim the
+        whole night. A capped entry says so, so the number is never silently
+        wrong.
+        """
+        if self._task_repo.entries_for(project, task_id):
+            return None
+
+        began: datetime | None = None
+        try:
+            for entry in self._provenance_repo.for_memory(project, task_id):
+                details = entry.details or {}
+                if entry.operation == "task_start" or (
+                    details.get("state_to") == TaskState.IN_PROGRESS.value
+                ):
+                    began = entry.created_at
+        except Exception:  # noqa: BLE001 - bookkeeping must never fail a close
+            began = None
+
+        if began is None:
+            return {
+                "recorded": False,
+                "reason": (
+                    "closed with no time tracked: this task was never in "
+                    "in_progress, so there is no interval to recover. Use "
+                    "memory_task_start before working a task, or set "
+                    "estimated_minutes if the work happened elsewhere."
+                ),
+            }
+
+        ended = datetime.now(began.tzinfo) if began.tzinfo else datetime.now()
+        minutes = max(int((ended - began).total_seconds() // 60), 0)
+        capped = minutes > _MAX_RECONSTRUCTED_MINUTES
+        if capped:
+            minutes = _MAX_RECONSTRUCTED_MINUTES
+            began = ended - timedelta(minutes=minutes)
+        if minutes <= 0:
+            return {"recorded": False, "reason": "closed in under a minute"}
+
+        self._task_repo.add_manual_entry(
+            project, str(uuid.uuid4()), task_id, began, ended,
+        )
+        return {
+            "recorded": True, "minutes": minutes, "from": "state-history",
+            "capped": capped,
+            "note": (
+                "no clock was running, so this stretch was recovered from when "
+                "the task entered in_progress and marked manual"
+                + (f"; capped at {_MAX_RECONSTRUCTED_MINUTES} minutes" if capped else "")
+            ),
+        }
+
+    @staticmethod
+    def _with_time_note(detail: TaskDetail, recovered: dict | None) -> TaskDetail:
+        """Attach the close-time bookkeeping to what the caller gets back."""
+        if recovered is not None:
+            detail.time_note = recovered
+        return detail
+
     def _stop_running(self, project: str, task_id: str) -> list[TaskTimeEntry]:
         """Close EVERY open entry, so a task can never be left clocking.
 
@@ -792,6 +908,10 @@ class TaskService:
     def done(self, project: str, task_id: str, note: str | None = None) -> TaskDetail:
         task = self._require(project, task_id)
         closed = self._stop_running(project, task_id)
+        # Closing a task that was never clocked used to succeed in silence, and
+        # the card went to Done reading zero minutes. Recover the stretch if the
+        # state history evidences one, and say either way on the response.
+        recovered = None if closed else self._reconstruct_time(project, task_id)
         self._task_repo.mark_done(project, task_id, TaskState.DONE.value)
         # A finished task is nobody's work any more: drop the claim rather than
         # letting it sit held until the lease runs out.
@@ -799,7 +919,7 @@ class TaskService:
         self._record(
             project, task_id, "task_done",
             {"state_from": task.state.value, "note": bool(note),
-             "clock_stopped": bool(closed)},
+             "clock_stopped": bool(closed), "time_recovered": recovered},
         )
         self._enqueue(project, task_id, "state", {"state": TaskState.DONE.value})
         if note and note.strip():
@@ -809,7 +929,7 @@ class TaskService:
             self.comment(project, task_id, note, kind=TaskCommentKind.NOTE.value)
         # done() stops the clock too, so the stretch it just closed needs sending.
         self._enqueue(project, task_id, "time", {})
-        return self.detail(project, task_id)
+        return self._with_time_note(self.detail(project, task_id), recovered)
 
     def convert_to_task(self, project: str, task_id: str) -> Task:
         """Promote a sub-task to a task of its own.

@@ -30,6 +30,7 @@ The four translations that earn the adapter:
 """
 
 import contextlib
+from datetime import timezone
 
 from memory_mcp.asoode_client import (
     ORDINAL_TO_STATE,
@@ -72,6 +73,8 @@ _CAPABILITIES = Capabilities(
     supports_assignees=True,
     # parentId on create, and convert-to-task to promote.
     supports_subtasks=True,
+    # POST /work-packages/:id/lists/create and /work-packages/lists/:id/edit
+    supports_group_style=True,
     states=tuple(STATE_TO_ORDINAL),
 )
 
@@ -83,6 +86,84 @@ MAX_CHANGE_PAGES = 50
 #: Role labels are prefixed so they are obviously ours and cannot collide with a
 #: label a human made for their own purposes on the same board.
 ROLE_LABEL_PREFIX = "agent:"
+
+# asoode's LABEL palette - the twenty swatches its label picker offers
+# (COLOR_PALETTE in the frontend's WpSettingsPanel.tsx). Deliberately NOT the
+# board-column palette in task_bridge.BOARD_COLUMNS: labels and columns have
+# separate pickers in asoode, and sharing one constant would make a change to
+# either quietly wrong on the other.
+LABEL_PALETTE: tuple[str, ...] = (
+    "#f44336", "#e91e63", "#9c27b0", "#673ab7", "#3f51b5",
+    "#2196f3", "#03a9f4", "#00bcd4", "#009688", "#4caf50",
+    "#8bc34a", "#cddc39", "#ffeb3b", "#ffc107", "#ff9800",
+    "#ff5722", "#795548", "#9e9e9e", "#607d8b", "#000000",
+)
+
+# One fixed colour per agent, so `agent:backend` is the same red on every board
+# in every project. Asked for by the user on 2026-09-05: "use different colors
+# for different agents; but keep a convension. so ex: agent backend is always
+# red; agent dotnet is always blue".
+#
+# backend/red and dotnet/blue are the user's own two examples. The rest recall
+# the technology where there is one to recall.
+ROLE_COLORS: dict[str, str] = {
+    "backend": "#f44336",   # red - stated by the user
+    "dotnet": "#2196f3",    # blue - stated by the user
+    "nodejs": "#4caf50",    # green, Node's brand
+    "react": "#00bcd4",     # cyan, React's brand
+    "app": "#9c27b0",       # purple, Kotlin
+    "frontend": "#ff9800",  # orange
+    "designer": "#e91e63",  # pink
+    "devops": "#607d8b",    # blue gray
+    "docs": "#795548",      # brown
+    "reviewer": "#673ab7",  # deep purple
+    "test": "#cddc39",      # lime
+    "pm": "#3f51b5",        # indigo, the lead
+}
+
+
+def _utc_iso(value) -> str:
+    """An instant asoode will read as the instant we meant.
+
+    asoode stores what it is sent and hands it back with a `Z`, so a NAIVE
+    datetime sent as-is is read as UTC whatever the machine's clock meant. The
+    local store's timestamps come from DuckDB's `current_timestamp` and are
+    naive LOCAL, so on a UTC+03:00 machine every mirrored stretch landed on the
+    board three hours after the work happened - the duration right, the clock
+    wrong. Found by the test agent on 2026-09-06 against the live board:
+    a stretch worked at 21:09Z was stored as 00:09Z.
+
+    A naive value is therefore interpreted as local (`astimezone()` with no
+    argument attaches the machine's offset) and converted; an aware one is
+    already unambiguous and just normalised. `Z` rather than `+00:00` to match
+    the shape asoode itself returns.
+    """
+    if not hasattr(value, "isoformat"):
+        return str(value)
+    if value.tzinfo is None:
+        value = value.astimezone()
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def role_color(role: str) -> str:
+    """The colour for an agent's label. STABLE for a given role, always.
+
+    A role outside ROLE_COLORS still gets a fixed colour rather than a default
+    or a random one: the agent set grows (four were added on 2026-09-05), and a
+    colour that depended on insertion order or chance would differ between two
+    boards and break the convention the table exists to keep.
+
+    md5 rather than hash(): Python's hash() is randomised per process by PYTHONHASHSEED,
+    so it would give the same agent a different colour on every daemon restart.
+    """
+    import hashlib
+
+    key = (role or "").strip().lower()
+    fixed = ROLE_COLORS.get(key)
+    if fixed:
+        return fixed
+    digest = hashlib.md5(key.encode("utf-8")).digest()
+    return LABEL_PALETTE[digest[0] % len(LABEL_PALETTE)]
 
 
 class AsoodeProvider:
@@ -240,7 +321,7 @@ class AsoodeProvider:
         for local, remote in (("begin_at", "beginAt"), ("end_at", "endAt"), ("due_at", "dueAt")):
             value = fields.get(local)
             if value is not None:
-                dates[remote] = value.isoformat() if hasattr(value, "isoformat") else str(value)
+                dates[remote] = _utc_iso(value)
         if dates:
             self.client.set_dates(task_id, **dates)
         if "estimated_minutes" in fields:
@@ -358,33 +439,52 @@ class AsoodeProvider:
         """Attach `agent:<role>` to the task, removing any other role label.
 
         asoode labels are ENTITIES scoped to a work package, attached by id - not
-        free strings - so this resolves the label on the board and creates it
-        only when absent. Existing labels are read from the board rather than
-        cached across calls, because another client can add one at any time and a
-        stale cache would mean creating a duplicate.
+        free strings - so the BOARD is the catalogue this resolves the label in,
+        and creates it only when absent. Read fresh rather than cached across
+        calls: another client can add one at any time and a stale cache would
+        mean creating a duplicate.
+
+        The TASK's own labels decide what to remove and whether to add. That
+        distinction is the fix for two bugs the test agent found on 2026-09-06:
+
+        - Iterating the BOARD's labels issued `remove_task_label` for every
+          `agent:*` on the board, including three the card never had - wasted
+          calls that grow with the board's label count.
+        - Re-adding a label the task already carries returns "already exists",
+          which lands in the outbox as a failure and burns retry attempts. It
+          also became VISIBLE noise the moment tool responses started reporting
+          `last_error`. A role write that changes nothing must now do nothing.
         """
         board = self.client.fetch_work_package(container_id) or {}
-        existing = {
+        catalogue = {
             (lbl.get("title") or ""): lbl.get("id")
             for lbl in (board.get("labels") or [])
+            if lbl.get("id")
+        }
+        detail = self.client.task_detail(task_id) or {}
+        on_task = {
+            (lbl.get("title") or ""): lbl.get("id")
+            for lbl in (detail.get("labels") or [])
             if lbl.get("id")
         }
 
         wanted = f"{ROLE_LABEL_PREFIX}{role}" if role else None
 
-        # Take off any role label that is not the one we want. Leaves labels a
-        # human added alone - only ours carry the prefix.
-        for title, label_id in existing.items():
+        # Take off role labels the TASK actually carries. Leaves labels a human
+        # added alone - only ours carry the prefix.
+        for title, label_id in on_task.items():
             if title.startswith(ROLE_LABEL_PREFIX) and title != wanted:
                 with contextlib.suppress(Exception):
                     self.client.remove_task_label(task_id, label_id)
 
-        if not wanted:
+        if not wanted or wanted in on_task:
             return
 
-        label_id = existing.get(wanted)
+        label_id = catalogue.get(wanted)
         if not label_id:
-            created = self.client.create_label(container_id, wanted) or {}
+            created = self.client.create_label(
+                container_id, wanted, role_color(role),
+            ) or {}
             label_id = created.get("id") or (created.get("data") or {}).get("id")
         if label_id:
             self.client.add_task_label(task_id, label_id)
@@ -397,7 +497,9 @@ class AsoodeProvider:
         out of pages returns no watermark, so the next sweep asks from the same
         instant and makes progress the honest way.
         """
-        since_iso = since.isoformat() if hasattr(since, "isoformat") else str(since)
+        # Naive-local here asked asoode for changes since an instant in the
+        # FUTURE on any machine east of UTC, which silently skipped them.
+        since_iso = _utc_iso(since)
         containers: set[str] = set()
         cursor: str | None = None
         watermark: str | None = None
@@ -419,12 +521,39 @@ class AsoodeProvider:
         """One call for a whole column - asoode has a real bulk route."""
         self.client.archive_list_tasks(group_id)
 
+    def ensure_group(self, container_id: str, title: str,
+                     color: str = "") -> str | None:
+        """Create the column if it is missing; colour it if it has none.
+
+        Two calls at most, and usually zero on a board that is already right.
+        The colour goes through `lists/:id/edit` rather than `rename`, because
+        RenameListBody carries only a title.
+        """
+        wanted = (title or "").strip().lower()
+        if not wanted:
+            return None
+        container = self.fetch_container(container_id)
+        existing = next(
+            (g for g in container.groups if g.title.strip().lower() == wanted),
+            None,
+        )
+        if existing is None:
+            created = self.client.create_list(container_id, title, color)
+            row = created.get("list") if isinstance(created, dict) else None
+            row = row or (created if isinstance(created, dict) else {})
+            return row.get("id")
+        # Someone's colour is theirs. Only an unset one gets filled in - which
+        # is what an untouched template column carries ("").
+        if color and not (existing.color or "").strip():
+            self.client.edit_list(existing.id, color=color)
+        return existing.id
+
     def log_time(self, task_id: str, begin, end=None) -> None:
         """asoode takes ISO instants; a datetime is what the local store holds."""
         self.client.spend_time(
             task_id,
-            begin.isoformat() if hasattr(begin, "isoformat") else str(begin),
-            (end.isoformat() if hasattr(end, "isoformat") else end) if end else None,
+            _utc_iso(begin),
+            _utc_iso(end) if end else None,
         )
 
     # ---------- translation ----------
@@ -467,7 +596,10 @@ class AsoodeProvider:
             external_ref=board.get("externalRef"),
             space_id=board.get("projectId"),
             groups=tuple(
-                Group(id=item["id"], title=item.get("title") or "")
+                Group(
+                    id=item["id"], title=item.get("title") or "",
+                    color=item.get("color") or "",
+                )
                 for item in lists if item.get("id")
             ),
             tasks=tuple(tasks),

@@ -44,6 +44,7 @@ that is still an open decision. `import_all` is the explicit path that does
 overwrite title and state.
 """
 
+import logging
 import threading
 
 from memory_mcp.asoode import get_endpoints
@@ -70,6 +71,8 @@ _FIELD_KEYS = frozenset({
     "estimated_minutes",
 })
 
+logger = logging.getLogger(__name__)
+
 # Board-list titles a state maps onto, in preference order. asoode's Kanban
 # template names its columns in English; anything unmatched falls back to the
 # first list, because `state` - not the column - is what the local store means.
@@ -84,6 +87,29 @@ _LIST_ALIASES = {
     "incomplete": ("incomplete",),
     "blocker": ("blocker",),
 }
+
+
+# The columns a board we create should have, and the colour each one carries.
+#
+# The hexes are NOT invented: they are six of the twelve swatches asoode's own
+# board-column picker offers (AVAILABLE_COLORS in the frontend's
+# WpBoardColumn.tsx), so a board this code builds is indistinguishable from one
+# a person built with the picker. #59a8ef is additionally asoode's own
+# In-Progress colour across its Gantt, calendar, list and roadmap views.
+#
+# Asked for by the user on 2026-09-05: "when creating the lists for the board,
+# use the color from the pre selected list we have" - backlog gray, todo yellow,
+# in progress blue, done green, cancelled red.
+#
+# Order matters: it is the order the columns are created in, so a board that is
+# missing several gets them left to right the way a person reads a board.
+BOARD_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("Backlog", "#626971"),      # slate gray
+    ("To Do", "#fbb900"),        # yellow
+    ("In Progress", "#59a8ef"),  # blue
+    ("Done", "#4caf50"),         # green
+    ("Cancelled", "#f44336"),    # red
+)
 
 
 def _comment_text(comment: dict) -> str:
@@ -243,6 +269,10 @@ class TaskBridge:
             space_id=space.id,
         )
         project_id, package_id = space.id, container.id
+        # Give the board its columns and their colours before the state map is
+        # built - a Cancelled column created here is one the map can then find,
+        # and a `cancelled` task stops falling back to whatever column is first.
+        container = self._ensure_columns(impl, container)
         state_map, default_list = build_state_list_map(container)
         endpoints = get_endpoints()
         link = upsert_project_link(
@@ -264,6 +294,97 @@ class TaskBridge:
             "url": f"{endpoints.app_url}/projects/{project_id}",
             **self._backfill_offer(slug, backfill),
         }
+
+    def column_plan(self, slug: str) -> list[dict]:
+        """What ensure_board_columns WOULD do, changing nothing.
+
+        A board is a shared artefact, so the default answer to "make my columns
+        standard" is a preview rather than an edit.
+        """
+        link = get_default_project_link(slug)
+        if link is None:
+            raise ProviderError(f"'{slug}' is not linked to a board")
+        container = self.provider_for(link).fetch_container(
+            link["remote_work_package_id"],
+        )
+        have = {g.title.strip().lower(): g for g in container.groups}
+        plan = []
+        for title, color in BOARD_COLUMNS:
+            group = have.get(title.strip().lower())
+            if group is None:
+                plan.append({"column": title, "action": "create", "color": color})
+            elif (group.color or "").strip():
+                plan.append({
+                    "column": title, "action": "keep", "color": group.color,
+                    "note": "colour already set - never repainted",
+                })
+            else:
+                plan.append({"column": title, "action": "colour", "color": color})
+        return plan
+
+    def ensure_board_columns(self, slug: str) -> dict:
+        """Apply BOARD_COLUMNS to a project's already-linked board.
+
+        Separate from `bootstrap` on purpose. Bootstrap styles a board WE just
+        created, which is uncontroversial. This one touches a board that already
+        existed and may be someone else's, so it is only ever run when asked -
+        never on attach, and never on a sweep. It still cannot repaint: the
+        provider fills a blank colour and leaves a chosen one alone.
+        """
+        link = get_default_project_link(slug)
+        if link is None:
+            raise ProviderError(f"'{slug}' is not linked to a board")
+        provider = self.provider_for(link)
+        before = provider.fetch_container(link["remote_work_package_id"])
+        after = self._ensure_columns(provider, before)
+        return {
+            "columns": [
+                {"title": g.title, "color": g.color} for g in after.groups
+            ],
+            "added": [
+                g.title for g in after.groups
+                if g.title.strip().lower() not in {
+                    b.title.strip().lower() for b in before.groups
+                }
+            ],
+        }
+
+    def _ensure_columns(self, provider, container: Container) -> Container:
+        """Give a board the BOARD_COLUMNS it is missing, with their colours.
+
+        Best-effort and non-fatal: a board with the wrong columns is a cosmetic
+        problem, and failing `bootstrap` over it would leave the project
+        unlinked - much worse. Re-fetches only when something actually changed.
+
+        The provider does the not-repainting: `ensure_group` fills in a blank
+        colour and leaves a set one alone, so re-running this on a board whose
+        columns someone has styled changes nothing.
+        """
+        if not provider.capabilities.supports_group_style:
+            return container
+        changed = False
+        for title, color in BOARD_COLUMNS:
+            existing = next(
+                (g for g in container.groups
+                 if g.title.strip().lower() == title.strip().lower()),
+                None,
+            )
+            # Nothing to do for a column that is present and already coloured.
+            if existing is not None and (existing.color or "").strip():
+                continue
+            try:
+                provider.ensure_group(container.id, title, color)
+                changed = True
+            except Exception as e:  # noqa: BLE001 - never fail a bootstrap on cosmetics
+                logger.warning(
+                    "could not ensure column %r on %s: %s", title, container.id, e,
+                )
+        if not changed:
+            return container
+        try:
+            return provider.fetch_container(container.id)
+        except Exception:  # noqa: BLE001
+            return container
 
     def attach(
         self, slug: str, *, work_package_id: str | None = None,

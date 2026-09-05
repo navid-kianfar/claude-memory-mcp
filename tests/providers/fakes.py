@@ -221,6 +221,22 @@ class FakeProvider:
         self._require_task(task_id)
         self.comments.append((task_id, body))
 
+    def ensure_group(self, container_id, title, color=""):
+        """Create the column if missing; colour it only when it has none."""
+        container = self._containers[container_id]
+        for group in container["groups"]:
+            if group.title.strip().lower() == (title or "").strip().lower():
+                if color and not (group.color or "").strip():
+                    container["groups"] = [
+                        Group(id=g.id, title=g.title, color=color)
+                        if g.id == group.id else g
+                        for g in container["groups"]
+                    ]
+                return group.id
+        gid = self._next("g")
+        container["groups"].append(Group(id=gid, title=title, color=color))
+        return gid
+
     def log_time(self, task_id, begin, end=None):
         self._require_task(task_id)
         self.time_logs.append((task_id, begin, end))

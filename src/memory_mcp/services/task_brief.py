@@ -99,6 +99,12 @@ _BOUND_STEPS = (
     "memory_task_add(title, description=..., source='claude'). Give it a "
     "description that states the requirement in full - a bare title loses the "
     "implementation detail the list exists to keep.",
+    "8. THIS BRIEF BINDS THE LEAD SESSION - the one talking to the user. If you "
+    "are a DISPATCHED SUBAGENT, work only the task you were briefed on: take "
+    "another solely through memory_task_claim_next(session_id, role) when you "
+    "are idle and your brief allows it, and if you are verifying or reviewing "
+    "(test, reviewer) start nothing on the board at all, whatever is queued. "
+    "One dispatch must not become a swarm.",
 )
 
 _UNREACHABLE = (

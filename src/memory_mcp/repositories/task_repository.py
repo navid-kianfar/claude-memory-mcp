@@ -557,6 +557,29 @@ class TaskRepository:
             ).fetchone()
         return _row_to_entry(row)
 
+    def add_manual_entry(
+        self, project: str, entry_id: str, task_id: str, begin_at, end_at,
+    ) -> TaskTimeEntry:
+        """Record a CLOSED stretch with explicit bounds, marked `manual`.
+
+        For reconstructing work that was done but never clocked - the task sat
+        in in_progress and was closed with no running entry. `manual` is the
+        honest label: this stretch was derived from the state history, not
+        measured by the clock, and the flag is what lets anyone reading the
+        table tell the two apart.
+        """
+        with connect(project) as conn:
+            conn.execute(
+                "INSERT INTO task_time_entries (id, task_id, begin_at, end_at, manual, session_id) "
+                "VALUES (?, ?, ?, ?, TRUE, NULL)",
+                [entry_id, task_id, begin_at, end_at],
+            )
+            row = conn.execute(
+                f"SELECT {TIME_ENTRY_COLUMNS} FROM task_time_entries WHERE id = ?",
+                [entry_id],
+            ).fetchone()
+        return _row_to_entry(row)
+
     def running_entry(self, project: str, task_id: str) -> TaskTimeEntry | None:
         with connect(project) as conn:
             row = conn.execute(
@@ -929,6 +952,23 @@ class OutboxRepository:
                 conn.execute("DELETE FROM task_outbox WHERE id = ?", [row_id])
                 return True
         return False
+
+    def last_failure(self, project: str) -> str | None:
+        """The newest error still sitting in the outbox, if any.
+
+        So a bad token or a 4xx surfaces on the NEXT task call instead of never:
+        the mirror runs on a thread and swallows its exceptions, which is right
+        for latency and wrong for silence.
+        """
+        try:
+            with connect(project) as conn:
+                row = conn.execute(
+                    "SELECT last_error FROM task_outbox WHERE last_error IS NOT NULL "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                ).fetchone()
+        except Exception:
+            return None
+        return row[0] if row else None
 
     def depth(self, project: str) -> int:
         try:

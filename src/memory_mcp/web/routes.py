@@ -1122,7 +1122,32 @@ def _task_update(params, body, query):
         role=body["role"] if "role" in body else None,
     )
     task, changed = container.task_service.update(req)
-    return {"status": "ok", "task": task.model_dump(mode="json"), "changed": changed}
+    answer = {"status": "ok", "task": task.model_dump(mode="json"), "changed": changed}
+    # Finishing a task through PUT is the same close as POST /done, so it says
+    # the same thing about the clock. Without this the web UI could move a card
+    # to Done at zero minutes and show nothing - the silence this change exists
+    # to remove, left in place on the one path a person uses by hand.
+    if "state" in changed and task.state in _CLOSED_TASK_STATES:
+        detail = container.task_service.detail(params["slug"], task.id)
+        answer["time"] = {
+            "minutes_spent": detail.minutes_spent,
+            "minutes_spent_total": detail.minutes_spent_total,
+        }
+        if detail.time_entries and detail.time_entries[-1].manual:
+            answer["time"]["recovered"] = (
+                "no clock was running; recovered from the state history"
+            )
+        elif not detail.minutes_spent:
+            answer["time"]["warning"] = (
+                "closed with NO time tracked - start the task before working it"
+            )
+    return answer
+
+
+# States that finish a task - the transition where time was either recorded or
+# lost for good. Mirrors _CLOSED_TASK_STATES in server.py; both are small and
+# local rather than shared, because the two layers report different shapes.
+_CLOSED_TASK_STATES = {TaskState.DONE, TaskState.CANCELLED, TaskState.DUPLICATE}
 
 
 def _task_comment(params, body, query):

@@ -839,3 +839,197 @@ class TestRoleAwareClaiming:
         )
 
         assert updated.role is None
+
+
+def _backdate_clock(slug, task_id, *, minutes):
+    """Push a running entry's start back so a stretch has real duration.
+
+    Tests finish in milliseconds; without this every recorded stretch is zero
+    minutes and a total tells you nothing.
+    """
+    from datetime import datetime, timedelta
+
+    get_connection(slug).execute(
+        "UPDATE task_time_entries SET begin_at = ? WHERE task_id = ? AND end_at IS NULL",
+        [datetime.now() - timedelta(minutes=minutes), task_id],
+    )
+
+
+def _wipe_clock(slug, task_id, *, minutes_ago):
+    """Drop a task's time entries and backdate its state history.
+
+    Simulates a task that really was worked - the provenance says it entered
+    in_progress `minutes_ago` - but whose clock was never running, which is the
+    shape of every row written before the clock became mechanical.
+    """
+    from datetime import datetime, timedelta
+
+    conn = get_connection(slug)
+    conn.execute("DELETE FROM task_time_entries WHERE task_id = ?", [task_id])
+    conn.execute(
+        "UPDATE provenance SET created_at = ? WHERE memory_id = ?",
+        [datetime.now() - timedelta(minutes=minutes_ago), task_id],
+    )
+
+
+class TestClockIsMechanical:
+    """The clock must not depend on the caller remembering to start it.
+
+    Measured on 2026-09-05 against the live board: 29 of 74 done tasks (39%)
+    had no time entry at all, while state and column mirroring were 34/34
+    correct. The mirror was never the problem - nothing started the clock, and
+    nothing objected when a task was closed without one.
+    """
+
+    def test_moving_to_in_progress_starts_the_clock(self, container):
+        slug = _project(container, "t-clock-start")
+        task = _add(container, slug)
+        container.task_service.update(
+            UpdateTaskRequest(
+                project=slug, task_id=task.id, state=TaskState.IN_PROGRESS,
+            )
+        )
+        entries = container.task_repo.entries_for(slug, task.id)
+        assert len(entries) == 1
+        assert entries[0].end_at is None, "the entry must still be running"
+
+    def test_moving_to_in_progress_twice_does_not_double_the_clock(self, container):
+        slug = _project(container, "t-clock-idempotent")
+        task = _add(container, slug)
+        for _ in range(2):
+            container.task_service.update(
+                UpdateTaskRequest(
+                    project=slug, task_id=task.id, state=TaskState.IN_PROGRESS,
+                )
+            )
+        # The second update is not a state CHANGE, but an overlapping entry
+        # would be the bug either way.
+        assert len(container.task_repo.entries_for(slug, task.id)) == 1
+
+    def test_start_then_update_to_in_progress_keeps_one_entry(self, container):
+        slug = _project(container, "t-clock-after-start")
+        task = _add(container, slug)
+        container.task_service.start(slug, task.id)
+        container.task_service.update(
+            UpdateTaskRequest(project=slug, task_id=task.id, priority=1)
+        )
+        assert len(container.task_repo.entries_for(slug, task.id)) == 1
+
+    def test_inbound_apply_does_not_invent_a_clock(self, container):
+        """A card someone drags on the board must not open a local entry.
+
+        It would be time nobody worked, and the mirror would send it straight
+        back to the board as a real stretch.
+        """
+        slug = _project(container, "t-clock-inbound")
+        task = _add(container, slug)
+        with container.task_service.suppress_mirroring():
+            container.task_service.update(
+                UpdateTaskRequest(
+                    project=slug, task_id=task.id, state=TaskState.IN_PROGRESS,
+                )
+            )
+        assert container.task_repo.entries_for(slug, task.id) == []
+
+    def test_done_after_working_recovers_the_stretch(self, container):
+        """in_progress -> (clock stopped by hand) -> done still records time."""
+        slug = _project(container, "t-recover")
+        task = _add(container, slug)
+        container.task_service.start(slug, task.id)
+        container.task_service.stop(slug, task.id)
+        # Wipe the entry to simulate the pre-fix rows, leaving the state history,
+        # and backdate that history so there is a real stretch to recover.
+        _wipe_clock(slug, task.id, minutes_ago=10)
+        detail = container.task_service.done(slug, task.id)
+        assert detail.time_note is not None
+        assert detail.time_note["recorded"] is True
+        assert detail.time_note["from"] == "state-history"
+        entries = container.task_repo.entries_for(slug, task.id)
+        assert len(entries) == 1
+        assert entries[0].manual is True, "a recovered stretch is not clocked time"
+
+    def test_done_on_a_never_started_task_warns_and_invents_nothing(self, container):
+        slug = _project(container, "t-no-clock")
+        task = _add(container, slug)
+        detail = container.task_service.done(slug, task.id)
+        assert detail.time_note is not None
+        assert detail.time_note["recorded"] is False
+        assert "never in" in detail.time_note["reason"]
+        assert container.task_repo.entries_for(slug, task.id) == []
+
+    def test_a_real_clock_is_left_alone(self, container):
+        slug = _project(container, "t-real-clock")
+        task = _add(container, slug)
+        container.task_service.start(slug, task.id)
+        detail = container.task_service.done(slug, task.id)
+        assert detail.time_note is None, "nothing to recover, nothing to report"
+        entries = container.task_repo.entries_for(slug, task.id)
+        assert len(entries) == 1
+        assert entries[0].manual is False
+        assert entries[0].end_at is not None
+
+    def test_update_to_done_recovers_like_done_does(self, container):
+        slug = _project(container, "t-recover-update")
+        task = _add(container, slug)
+        container.task_service.update(
+            UpdateTaskRequest(
+                project=slug, task_id=task.id, state=TaskState.IN_PROGRESS,
+            )
+        )
+        _wipe_clock(slug, task.id, minutes_ago=10)
+        container.task_service.update(
+            UpdateTaskRequest(project=slug, task_id=task.id, state=TaskState.DONE)
+        )
+        entries = container.task_repo.entries_for(slug, task.id)
+        assert len(entries) == 1 and entries[0].manual is True
+
+    def test_recovered_stretch_is_capped(self, container):
+        """A card left in In Progress overnight must not claim the night."""
+        from memory_mcp.services.task_service import _MAX_RECONSTRUCTED_MINUTES
+
+        slug = _project(container, "t-cap")
+        task = _add(container, slug)
+        container.task_service.update(
+            UpdateTaskRequest(
+                project=slug, task_id=task.id, state=TaskState.IN_PROGRESS,
+            )
+        )
+        _wipe_clock(slug, task.id, minutes_ago=24 * 60)
+        detail = container.task_service.done(slug, task.id)
+        assert detail.time_note["capped"] is True
+        assert detail.time_note["minutes"] == _MAX_RECONSTRUCTED_MINUTES
+
+
+class TestParentTimeRollsUpOnRead:
+    """A parent's card reads 0 on asoode because the time is on its children.
+
+    Decided with the user on 2026-09-05: roll the total up HERE, on the read
+    side, and leave the board alone. Posting the children's time onto the
+    parent's card as well would double-count in asoode's package and project
+    reports, which sum every task - wrong in a direction nobody checks.
+    """
+
+    def test_a_parents_total_includes_its_children(self, container):
+        slug = _project(container, "t-rollup")
+        parent = _add(container, slug, title="Parent")
+        for title in ("Child A", "Child B"):
+            child = container.task_service.create(
+                CreateTaskRequest(project=slug, title=title, parent_id=parent.id)
+            )
+            container.task_service.start(slug, child.id)
+            _backdate_clock(slug, child.id, minutes=5)
+            container.task_service.stop(slug, child.id)
+
+        detail = container.task_service.detail(slug, parent.id)
+        assert detail.minutes_spent == 0, "the parent's own clock never ran"
+        assert detail.minutes_spent_total == 10, "5 + 5 from the two children"
+
+    def test_a_task_with_no_children_totals_its_own(self, container):
+        slug = _project(container, "t-rollup-leaf")
+        task = _add(container, slug)
+        container.task_service.start(slug, task.id)
+        _backdate_clock(slug, task.id, minutes=7)
+        container.task_service.stop(slug, task.id)
+        detail = container.task_service.detail(slug, task.id)
+        assert detail.minutes_spent == 7
+        assert detail.minutes_spent_total == detail.minutes_spent

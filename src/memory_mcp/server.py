@@ -181,6 +181,74 @@ def _remote(slug: str):
     return None
 
 
+# States that finish a task. A close is where time either got recorded or was
+# lost for good, so it is the one transition worth reporting the clock on.
+_CLOSED_TASK_STATES = {
+    TaskState.DONE, TaskState.CANCELLED, TaskState.DUPLICATE,
+}
+
+
+def _with_mirror(answer: dict, slug: str) -> dict:
+    """Add the board's queue state to a task tool's answer, when there is one."""
+    report = _mirror_report(slug)
+    if report is not None:
+        answer["mirror"] = report
+    return answer
+
+
+def _mirror_report(slug: str) -> dict | None:
+    """Whether the board is actually up to date with the local store.
+
+    The mirror is fire-and-forget by design - `_enqueue` hands it to a thread
+    and swallows exceptions, which keeps a task write fast and keeps an
+    unreachable asoode from failing a local edit. The cost was that NOTHING
+    ever told the caller the board write had not landed.
+
+    This reports the queue rather than blocking on it: `pending: 0` means the
+    outbox drained, anything else means the board is behind and
+    memory_asoode_push is the remedy. Returns None for an unlinked project -
+    no ceremony where there is no board.
+    """
+    try:
+        from memory_mcp.db.registry import get_project_links
+
+        outbox = container.outbox_repo
+        if outbox is None or not get_project_links(slug):
+            return None
+        report: dict = {"pending": outbox.depth(slug)}
+        failure = outbox.last_failure(slug)
+        if failure:
+            report["last_error"] = failure
+        return report
+    except Exception:  # noqa: BLE001 - a report must never fail the write
+        return None
+
+
+def _close_time_report(slug: str, task_id: str) -> dict:
+    """What the clock ended up holding for a task that just closed.
+
+    Reported because the alternative is silence: a task closed with no clock
+    running went to Done reading zero minutes and said nothing about it, which
+    is how 39% of done tasks ended up with no time at all (measured 2026-09-05).
+    """
+    try:
+        detail = container.task_service.detail(slug, task_id)
+    except Exception:  # noqa: BLE001 - a report must never fail the close
+        return {}
+    report: dict = {"minutes_spent": detail.minutes_spent}
+    if detail.time_entries and detail.time_entries[-1].manual:
+        report["recovered"] = (
+            "no clock was running; this stretch was recovered from the state "
+            "history and marked manual"
+        )
+    elif not detail.minutes_spent:
+        report["warning"] = (
+            "closed with NO time tracked. Call memory_task_start before working "
+            "a task so the stretch is clocked and mirrored to the board."
+        )
+    return report
+
+
 def _safe(fn):
     """Wrap a tool body with uniform error handling."""
     try:
@@ -342,6 +410,28 @@ def memory_asoode_import(project: str | None = None) -> dict:
 
 
 @mcp.tool()
+def memory_asoode_columns(project: str | None = None, apply: bool = False) -> dict:
+    """Show - or apply - the standard column scheme on the linked board.
+
+    Backlog gray, To Do yellow, In Progress blue, Done green, Cancelled red,
+    using the swatches asoode's own column picker offers. A board created by
+    memory_asoode_link gets these automatically; this is for a board that
+    already existed.
+
+    Reports by default and only changes anything with apply=True, because an
+    existing board may be someone else's. It can never REPAINT: a column whose
+    colour somebody chose is left exactly as it is, and only an unset colour is
+    filled in. Missing columns (usually Cancelled) are created.
+    """
+    def _run():
+        slug = _resolve(project)
+        if not apply:
+            return {"slug": slug, "planned": container.task_bridge.column_plan(slug)}
+        return {"slug": slug, **container.task_bridge.ensure_board_columns(slug)}
+    return _safe(_run)
+
+
+@mcp.tool()
 def memory_asoode_links(project: str | None = None) -> dict:
     """Show which asoode boards this memory project is linked to."""
     def _run():
@@ -374,7 +464,9 @@ def memory_task_attach(
     def _run():
         slug = _resolve(project)
         attachment = container.task_service.attach(slug, task_id, path, filename)
-        return {"status": "ok", "attachment": attachment.model_dump(mode="json")}
+        return _with_mirror(
+            {"status": "ok", "attachment": attachment.model_dump(mode="json")}, slug,
+        )
     return _safe(_run)
 
 
@@ -437,7 +529,7 @@ def memory_task_plan(
     """
     def _run():
         slug = _resolve(project)
-        return container.task_planner.plan(slug, request, tasks)
+        return _with_mirror(container.task_planner.plan(slug, request, tasks), slug)
     return _safe(_run)
 
 
@@ -1191,7 +1283,7 @@ def memory_task_add(
         )
         if hint:
             answer["hint"] = hint
-        return answer
+        return _with_mirror(answer, slug)
     return _safe(_run)
 
 
@@ -1304,6 +1396,11 @@ def memory_task_update(
             "task": task.model_dump(mode="json"),
             "changed": changed,
         }
+        # Finishing a task through update is the other way to finish one, so it
+        # reports the clock exactly as memory_task_done does. A card going to
+        # Done at zero minutes is the thing that must not pass unremarked.
+        if "state" in changed and task.state in _CLOSED_TASK_STATES:
+            answer["time"] = _close_time_report(slug, task.id)
         if "description" in changed:
             # Only on a description edit, and only when the task has no
             # sub-tasks yet - a parent's long overview is not a problem.
@@ -1314,7 +1411,7 @@ def memory_task_update(
             )
             if hint:
                 answer["hint"] = hint
-        return answer
+        return _with_mirror(answer, slug)
     return _safe(_run)
 
 
@@ -1342,7 +1439,9 @@ def memory_task_comment(
     def _run():
         slug = _resolve(project)
         comment = container.task_service.comment(slug, task_id, body, kind, author)
-        return {"status": "ok", "comment": comment.model_dump(mode="json")}
+        return _with_mirror(
+            {"status": "ok", "comment": comment.model_dump(mode="json")}, slug,
+        )
     return _safe(_run)
 
 
@@ -1370,7 +1469,8 @@ def memory_task_start(
     def _run():
         slug = _resolve(project)
         session = session_id or current_memory_session()
-        return container.task_service.start(slug, task_id, session).model_dump(mode="json")
+        answer = container.task_service.start(slug, task_id, session).model_dump(mode="json")
+        return _with_mirror(answer, slug)
     return _safe(_run)
 
 
@@ -1385,7 +1485,8 @@ def memory_task_stop(task_id: str, project: str | None = None) -> dict:
     """
     def _run():
         slug = _resolve(project)
-        return container.task_service.stop(slug, task_id).model_dump(mode="json")
+        answer = container.task_service.stop(slug, task_id).model_dump(mode="json")
+        return _with_mirror(answer, slug)
     return _safe(_run)
 
 
@@ -1401,7 +1502,8 @@ def memory_task_done(
     """
     def _run():
         slug = _resolve(project)
-        return container.task_service.done(slug, task_id, note).model_dump(mode="json")
+        answer = container.task_service.done(slug, task_id, note).model_dump(mode="json")
+        return _with_mirror(answer, slug)
     return _safe(_run)
 
 
@@ -1415,7 +1517,7 @@ def memory_task_archive(task_id: str, project: str | None = None) -> dict:
     def _run():
         slug = _resolve(project)
         task = container.task_service.archive(slug, task_id)
-        return {"status": "ok", "task": task.model_dump(mode="json")}
+        return _with_mirror({"status": "ok", "task": task.model_dump(mode="json")}, slug)
     return _safe(_run)
 
 
@@ -1429,7 +1531,7 @@ def memory_task_convert(task_id: str, project: str | None = None) -> dict:
     def _run():
         slug = _resolve(project)
         task = container.task_service.convert_to_task(slug, task_id)
-        return {"status": "ok", "task": task.model_dump(mode="json")}
+        return _with_mirror({"status": "ok", "task": task.model_dump(mode="json")}, slug)
     return _safe(_run)
 
 
@@ -1446,7 +1548,7 @@ def memory_task_delete(task_id: str, project: str | None = None) -> dict:
     """
     def _run():
         slug = _resolve(project)
-        return container.task_service.delete(slug, task_id)
+        return _with_mirror(container.task_service.delete(slug, task_id), slug)
     return _safe(_run)
 
 
@@ -1519,7 +1621,7 @@ def memory_task_release(
     def _run():
         slug = _resolve(project)
         task = container.task_service.release(slug, task_id, session_id)
-        return {"status": "ok", "task": task.model_dump(mode="json")}
+        return _with_mirror({"status": "ok", "task": task.model_dump(mode="json")}, slug)
     return _safe(_run)
 
 

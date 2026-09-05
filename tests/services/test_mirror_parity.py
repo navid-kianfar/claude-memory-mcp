@@ -185,6 +185,92 @@ class TestFieldsMirror:
         assert provider.promoted == ["r2"]
 
 
+class TestSubTasksMirrorLikeTasks:
+    """A sub-task is a task with a parent, on both sides.
+
+    Verified live on 2026-09-05 against work package a67ab907: four sub-tasks
+    under the right parentId, each carrying its state, objectiveValue, labels,
+    the agent role label, an assignee, its description, its comments and its
+    tracked time. These are the regression tests for that.
+    """
+
+    @staticmethod
+    def _remote(provider, task):
+        """The card for a local task - the fake keys them by externalRef."""
+        ref = f"memory-mcp:{task.id}"
+        return next(t["id"] for t in provider._tasks.values() if t["ref"] == ref)
+
+    def _child(self, tasks, slug, parent, **kw):
+        return tasks.create(CreateTaskRequest(
+            project=slug, title="Child", parent_id=parent.id, **kw,
+        ))
+
+    def test_a_child_is_created_under_its_parent(self, project):
+        provider = _provider()
+        tasks, bridge, _ = _stack(project, provider)
+        parent = _create(tasks, project, title="Parent")
+        child = self._child(tasks, project, parent)
+        bridge.flush(project)
+
+        card = next(c for c in provider.created_tasks if c["title"] == "Child")
+        assert card["parent_id"] == self._remote(provider, parent)
+
+    def test_a_child_carries_every_field_a_task_does(self, project):
+        provider = _provider()
+        tasks, bridge, _ = _stack(project, provider)
+        parent = _create(tasks, project, title="Parent")
+        child = self._child(
+            tasks, project, parent,
+            description="the body", priority=3, labels=["bridge"],
+            assignee="reviewer", estimated_minutes=45, role="backend",
+        )
+        bridge.flush(project)
+
+        remote = self._remote(provider, child)
+        fields = {}
+        for task_id, sent in provider.field_updates:
+            if task_id == remote:
+                fields.update(sent)
+        assert fields["priority"] == 3
+        assert fields["estimated_minutes"] == 45
+        assert any(s[0] == remote and "bridge" in s[2] for s in provider.label_syncs)
+        assert any(a[0] == remote and a[1] == "reviewer" for a in provider.assignees)
+        assert any(r[0] == remote for r in provider.role_labels)
+        card = next(c for c in provider.created_tasks if c["title"] == "Child")
+        assert card["description"] == "the body"
+
+    def test_an_unmirrored_parent_is_created_first(self, project):
+        """Otherwise the child lands at the top level and the nesting is a lie."""
+        provider = _provider()
+        tasks, bridge, _ = _stack(project, provider)
+        # No outbox row for the parent at all: the child's own flush is the
+        # first thing that ever asks the board about either of them.
+        with tasks.suppress_mirroring():
+            parent = _create(tasks, project, title="Parent")
+        child = self._child(tasks, project, parent)
+        bridge.flush(project)
+
+        titles = [c["title"] for c in provider.created_tasks]
+        assert "Parent" in titles, "the parent must be created before its child"
+        card = next(c for c in provider.created_tasks if c["title"] == "Child")
+        assert card["parent_id"] == self._remote(provider, parent)
+
+    def test_a_child_comment_and_its_time_reach_the_board(self, project):
+        provider = _provider()
+        tasks, bridge, _ = _stack(project, provider)
+        parent = _create(tasks, project, title="Parent")
+        child = self._child(tasks, project, parent)
+        tasks.start(project, child.id, session_id="s1")
+        tasks.comment(project, child.id, "found it", kind="note")
+        tasks.done(project, child.id)
+        bridge.flush(project)
+
+        remote = self._remote(provider, child)
+        assert any(task_id == remote for task_id, _ in provider.comments)
+        assert any(entry[0] == remote for entry in provider.time_logs)
+        assert (remote, "done") in provider.states
+
+
 class TestTheClock:
     def test_moving_to_done_through_update_stops_the_clock(self, project):
         """The other half of the reported bug: `update(state=done)` stamped

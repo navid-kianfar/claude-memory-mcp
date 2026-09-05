@@ -94,11 +94,31 @@ def markdown_to_html(text: str | None, *, allow_headings: bool = True) -> str:
 
     Returns "" for empty input - not "<p></p>", which asoode would show as a
     description that exists and is blank.
+
+    A body that is ALREADY HTML is normalised rather than escaped. "Support md
+    or basic html" was the requirement, and a description pasted from a rich
+    editor would otherwise arrive on the board as literal `<ul>` characters.
+    Round-tripping it through markdown is also what strips the tags TipTap
+    cannot hold, so a pasted `<table>` or `<script>` comes out as the subset or
+    as text - never as itself.
     """
     if not text or not text.strip():
         return ""
+    if _is_html_document(text):
+        text = html_to_markdown(text)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     return "".join(_blocks_to_html(lines, allow_headings=allow_headings))
+
+
+def _is_html_document(text: str) -> bool:
+    """Whether the WHOLE string is HTML, not markdown that mentions a tag.
+
+    Deliberately stricter than `looks_like_html`: it must OPEN with a block
+    tag, the way every TipTap document does. A markdown description containing
+    `<p>` inside backticks starts with prose, so it stays markdown and its
+    example survives.
+    """
+    return text.lstrip().startswith("<") and looks_like_html(text)
 
 
 def _blocks_to_html(lines: list[str], *, allow_headings: bool) -> list[str]:

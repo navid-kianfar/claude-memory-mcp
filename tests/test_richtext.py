@@ -101,6 +101,29 @@ class TestMarkdownToHtml:
         assert markdown_to_html("```\nx = 1") == "<pre><code>x = 1</code></pre>"
 
 
+class TestHtmlInput:
+    """"Must support md or basic html" - a body that is already HTML."""
+
+    def test_html_is_normalised_rather_than_escaped(self):
+        html = markdown_to_html("<h2>Pasted</h2><ul><li>one</li><li>two</li></ul>")
+        assert html == "<h2>Pasted</h2><ul><li>one</li><li>two</li></ul>"
+
+    def test_tags_outside_the_subset_are_dropped_not_shown(self):
+        """A pasted table would vanish in TipTap anyway; keep the text."""
+        html = markdown_to_html("<p>a</p><table><tr><td>x</td></tr></table>")
+        assert "<table" not in html and "x" in html
+
+    def test_a_script_is_not_html_input(self):
+        """It opens with a tag, but not one of ours - so it is escaped text."""
+        html = markdown_to_html("<script>alert(1)</script>")
+        assert "<script>" not in html and "&lt;script&gt;" in html
+
+    def test_markdown_mentioning_a_tag_stays_markdown(self):
+        """The strict opener check is what protects an example in backticks."""
+        html = markdown_to_html("Use `<p>` for a paragraph.")
+        assert html == "<p>Use <code>&lt;p&gt;</code> for a paragraph.</p>"
+
+
 class TestEscaping:
     """asoode does not sanitize and renders with dangerouslySetInnerHTML."""
 

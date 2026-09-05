@@ -4,13 +4,13 @@
     "approved_at": null,
     "approved_by": null,
     "category": "forbidden_rules",
-    "content": "Do not add, edit or \"correct\" project knowledge in CLAUDE.md - decisions, architecture notes, contracts, rules, workflow guidance. All of it belongs in the memory MCP (memory_store / memory_add_rule), which loads into every session, is searchable, and is what this project exists to provide. Stated by the user on 2026-09-05 after a session edited three paragraphs of CLAUDE.md: \"we never use it; all the memory must be inside memory mcp, not the claude md file.\"\n\nThe file still exists in the repo with older text about the bridge and the agent team; that text is the user's to trim or delete, not something to keep in step by hand. If it contradicts a memory, the memory wins - say so rather than editing the file.",
+    "content": "Do not create a CLAUDE.md, and do not put project knowledge in one - decisions, architecture notes, contracts, rules, workflow guidance. All of it belongs in the memory MCP (memory_store / memory_add_rule), which loads into every session, is searchable, and is what this project exists to provide. Stated by the user on 2026-09-05 after a session edited three paragraphs of the old CLAUDE.md: \"we never use it; all the memory must be inside memory mcp, not the claude md file.\" The file was deleted from the repo the same day (commit e8a62c0); the session hooks and the memory server carry everything it used to.\n\nIf a tool or a habit reaches for CLAUDE.md - memory_import_claude_md exists for OTHER projects that have one - the answer for this project is the memory, not a file.",
     "created_at": "2026-09-05T04:39:40.535652",
     "created_by": null,
     "entities": [
       "CLAUDE",
       "MCP",
-      "correct"
+      "OTHER"
     ],
     "expires_at": null,
     "id": "2be66041-b3f5-475c-9e99-1a2ddf58aa2f",
@@ -19,9 +19,9 @@
     "related_ids": [],
     "source": "assistant",
     "status": "active",
-    "summary": "Do not add, edit or \"correct\" project knowledge in CLAUDE",
+    "summary": "Do not create a CLAUDE",
     "tags": [],
     "title": "Never write project knowledge into CLAUDE.md; memory lives in the memory MCP",
-    "updated_at": "2026-09-05T04:39:40.535652"
+    "updated_at": "2026-09-05T04:48:56.897415"
   }
 ]

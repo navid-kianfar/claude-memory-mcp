@@ -130,6 +130,30 @@
     "approved_at": null,
     "approved_by": null,
     "category": "mandatory_rules",
+    "content": "Whenever a full task is done and tested - the change complete, the suite green, the test agent's live verification green - increment the version and push. Stated by the user on 2026-09-05: \"whenever a full task is done and tested you shall increment the version and push.\"\n\nHow, in this repo: `./scripts/release.sh` (patch by default; `minor` for a feature-level change such as a new mirror path or a new agent; `major` for a breaking one). It bumps pyproject.toml, src/memory_mcp/__init__.py and uv.lock, commits \"Release vX.Y.Z\", tags vX.Y.Z and pushes both; the tag is what publishes the Docker image. The script runs the full suite first; pass SKIP_TESTS=1 when the suite has just run on the same code - one gate, not two. The working tree must be clean and on main. There is no pre-commit hook any more (the user found a four-minute commit unacceptable), so the suite is a deliberate step, never a hook. Then `uv run memory-mcp-setup` so the daemon reports the new version.\n\nWhy it is a rule and not a habit: the installed daemon records its install commit and the update checker compares it against the branch tip, so an unversioned pile of commits is invisible as a release, and the version the daemon reports (memory_version, /api/health) stops meaning anything. One task, one version: the board's done task, the commit and the tag then tell the same story.",
+    "created_at": "2026-09-05T04:43:43.001649",
+    "created_by": null,
+    "entities": [
+      "Docker",
+      "Release vX.Y.Z"
+    ],
+    "expires_at": null,
+    "id": "3c16ed7c-bd1d-4fa4-ac5f-5023e2d900ae",
+    "metadata": null,
+    "priority": 3,
+    "related_ids": [],
+    "source": "assistant",
+    "status": "active",
+    "summary": "Whenever a full task is done and tested - the change complete, the suite green, the test agent's live verification...",
+    "tags": [],
+    "title": "A finished, tested task bumps the version and pushes",
+    "updated_at": "2026-09-05T04:48:30.902248"
+  },
+  {
+    "approval_status": "approved",
+    "approved_at": null,
+    "approved_by": null,
+    "category": "mandatory_rules",
     "content": "TWO HALVES, both from the same incident on 2026-09-04.\n\nFOR THE AGENT: pass `project=` on every task and memory WRITE. Never rely on the resolved active project for a mutation. memory_task_plan was called without it, resolved to a different project than the session was working in, created seven tasks there, and auto-mirroring pushed them onto that project's asoode board within seconds. The cleanup needed archiving seven remote cards and deleting seven local rows. A read resolving loosely is a papercut; a WRITE resolving loosely is data in the wrong project, which the \"never cross-link projects\" rule exists to prevent and cannot repair after the fact.\n\nFOR THE CODE: the daemon's active project is a PROCESS GLOBAL shared by the daemon, every MCP session, every subagent and the management UI at once. The UI's project switcher used to call set_active_project(), so clicking a project in the panel silently redirected the writes of every running Claude session to it. Fixed: web/routes.py keeps the UI's selection under its own key (UI_ACTIVE_PROJECT_KEY) and only memory_use / memory_session_start - called by the client that owns the session - may set the MCP active project.\n\nDO NOT re-wire the UI to the shared global for convenience, and do not add any other reader-side surface that writes it. A viewer must never steer a writer. tests/test_active_project_isolation.py asserts the web routes cannot even reach set_active_project.\n\nSTILL OPEN, and the reason the explicit-project half of this rule is not optional: the global is still ONE value for ALL MCP sessions. Two Claude sessions working different projects through the same daemon can still redirect each other. Until that is per-session, explicitness is the only real protection.",
     "created_at": "2026-09-04T20:02:39.670584",
     "created_by": null,
@@ -166,7 +190,7 @@
     "approved_at": null,
     "approved_by": null,
     "category": "mandatory_rules",
-    "content": "Before a commit, the lead dispatches the `test` agent to verify the change that is about to be committed - against the RUNNING instance where the change is observable (the installed daemon, the UI, the bound board), not only the repo's own pytest suite. The commit waits for its report and happens only on a green one; a red report goes back to the implementing agent with the reproduction.\n\nStated by the user on 2026-09-05, correcting an earlier wording: \"before the commit the test agent comes along and tests the work that has been done and is about to commit. The test suite is a set of tests you have for the mcp server code project, not its running instance.\"\n\nThe pytest suite is a different gate: it proves the code is internally consistent and runs once per finished change (.githooks/pre-commit automates it for this repo). The test agent proves the product still works - it exercises the daemon, the board and the browser like a person would, and reports what it actually saw. Both, in that order: suite first (seconds to minutes, catches your own mistakes), then the test agent (a dispatch, ~60k tokens, catches what the fixtures cannot), then the commit.\n\nThe brief to the test agent must say: what changed, where it is observable, the exact checks (create, change, read back), how to clean up what it creates, and that it must report failures with the actual output.",
+    "content": "Before a commit, the lead dispatches the `test` agent to verify the change that is about to be committed - against the RUNNING instance where the change is observable (the installed daemon, the UI, the bound board), not only the repo's own pytest suite. The commit waits for its report and happens only on a green one; a red report goes back to the implementing agent with the reproduction.\n\nStated by the user on 2026-09-05, correcting an earlier wording: \"before the commit the test agent comes along and tests the work that has been done and is about to commit. The test suite is a set of tests you have for the mcp server code project, not its running instance.\"\n\nThe pytest suite is a different gate: it proves the code is internally consistent and runs once per finished change, by hand - there is no pre-commit hook (one was tried and removed the same day; a four-minute commit is not acceptable). The test agent proves the product still works - it exercises the daemon, the board and the browser like a person would, and reports what it actually saw. Both, in that order: suite first (seconds to minutes, catches your own mistakes), then the test agent (a dispatch, ~60k tokens, catches what the fixtures cannot), then the commit.\n\nThe brief to the test agent must say: what changed, where it is observable, the exact checks (create, change, read back), how to clean up what it creates, that it must run repo-side commands in the main checkout (its worktree is at the last commit), and that it must report failures with the actual output. Dispatch it in parallel with anything else that waits - a verification agent does not need to block the lead.",
     "created_at": "2026-09-05T00:01:55.715240",
     "created_by": null,
     "entities": [
@@ -183,7 +207,7 @@
     "summary": "Before a commit, the lead dispatches the `test` agent to verify the change that is about to be committed -...",
     "tags": [],
     "title": "The test agent verifies the work before it is committed",
-    "updated_at": "2026-09-05T00:01:55.715240"
+    "updated_at": "2026-09-05T04:48:45.399132"
   },
   {
     "approval_status": "approved",

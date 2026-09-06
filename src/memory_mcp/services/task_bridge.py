@@ -300,30 +300,49 @@ class TaskBridge:
 
         A board is a shared artefact, so the default answer to "make my columns
         standard" is a preview rather than an edit.
+
+        EVERY linked board, not just the default. A monorepo project has one
+        board per app, and reporting on the default alone said "all done" while
+        eight boards still had unstyled columns and no Cancelled - which is
+        exactly what happened to the asoode project on 2026-09-06.
         """
-        link = get_default_project_link(slug)
-        if link is None:
+        links = get_project_links(slug)
+        if not links:
             raise ProviderError(f"'{slug}' is not linked to a board")
-        container = self.provider_for(link).fetch_container(
-            link["remote_work_package_id"],
-        )
-        have = {g.title.strip().lower(): g for g in container.groups}
-        plan = []
-        for title, color in BOARD_COLUMNS:
-            group = have.get(title.strip().lower())
-            if group is None:
-                plan.append({"column": title, "action": "create", "color": color})
-            elif (group.color or "").strip():
-                plan.append({
-                    "column": title, "action": "keep", "color": group.color,
-                    "note": "colour already set - never repainted",
+        out = []
+        for link in links:
+            board = link.get("label") or link["remote_work_package_id"]
+            try:
+                provider = self.provider_for(link)
+                container = provider.fetch_container(link["remote_work_package_id"])
+            except Exception as e:  # noqa: BLE001 - one unreachable board must
+                # not hide the plan for the others.
+                out.append({"board": board, "error": str(e)})
+                continue
+            have = {g.title.strip().lower(): g for g in container.groups}
+            for title, color in BOARD_COLUMNS:
+                group = have.get(title.strip().lower())
+                if group is None:
+                    out.append({"board": board, "column": title,
+                                "action": "create", "color": color})
+                elif (group.color or "").strip():
+                    out.append({
+                        "board": board, "column": title, "action": "keep",
+                        "color": group.color,
+                        "note": "colour already set - never repainted",
+                    })
+                else:
+                    out.append({"board": board, "column": title,
+                                "action": "colour", "color": color})
+            for item in self._role_label_plan(provider, container.id):
+                out.append({
+                    "board": board, "label": item["title"], "action": "recolour",
+                    "from": item["from"], "color": item["to"],
                 })
-            else:
-                plan.append({"column": title, "action": "colour", "color": color})
-        return plan
+        return out
 
     def ensure_board_columns(self, slug: str) -> dict:
-        """Apply BOARD_COLUMNS to a project's already-linked board.
+        """Apply BOARD_COLUMNS to EVERY board this project is linked to.
 
         Separate from `bootstrap` on purpose. Bootstrap styles a board WE just
         created, which is uncontroversial. This one touches a board that already
@@ -331,23 +350,65 @@ class TaskBridge:
         never on attach, and never on a sweep. It still cannot repaint: the
         provider fills a blank colour and leaves a chosen one alone.
         """
-        link = get_default_project_link(slug)
-        if link is None:
+        links = get_project_links(slug)
+        if not links:
             raise ProviderError(f"'{slug}' is not linked to a board")
-        provider = self.provider_for(link)
-        before = provider.fetch_container(link["remote_work_package_id"])
-        after = self._ensure_columns(provider, before)
-        return {
-            "columns": [
-                {"title": g.title, "color": g.color} for g in after.groups
-            ],
-            "added": [
-                g.title for g in after.groups
-                if g.title.strip().lower() not in {
-                    b.title.strip().lower() for b in before.groups
-                }
-            ],
-        }
+        boards = []
+        for link in links:
+            name = link.get("label") or link["remote_work_package_id"]
+            try:
+                provider = self.provider_for(link)
+                before = provider.fetch_container(link["remote_work_package_id"])
+                after = self._ensure_columns(provider, before)
+                relabelled = self._ensure_role_labels(provider, after.id)
+            except Exception as e:  # noqa: BLE001 - a board that is gone or
+                # unreachable is reported, never fatal to the rest.
+                boards.append({"board": name, "error": str(e)})
+                continue
+            boards.append({
+                "board": name,
+                "columns": [
+                    {"title": g.title, "color": g.color} for g in after.groups
+                ],
+                "added": [
+                    g.title for g in after.groups
+                    if g.title.strip().lower() not in {
+                        b.title.strip().lower() for b in before.groups
+                    }
+                ],
+                "labels_recoloured": [
+                    {"title": r["title"], "from": r["from"], "to": r["to"]}
+                    for r in relabelled
+                ],
+            })
+        return {"boards": boards}
+
+    def _role_label_plan(self, provider, container_id: str) -> list[dict]:
+        """Role labels off-convention on one board; [] when unsupported."""
+        if not getattr(provider, "role_label_plan", None):
+            return []
+        if not provider.capabilities.supports_labels:
+            return []
+        try:
+            return provider.role_label_plan(container_id)
+        except Exception:  # noqa: BLE001 - cosmetics never break a report
+            return []
+
+    def _ensure_role_labels(self, provider, container_id: str) -> list[dict]:
+        """Repaint off-convention role labels on one board.
+
+        Only `agent:` labels. An ordinary label's colour is somebody's choice
+        and is left alone, the same way a column's chosen colour is.
+        """
+        if not getattr(provider, "ensure_role_label_colors", None):
+            return []
+        if not provider.capabilities.supports_labels:
+            return []
+        try:
+            return provider.ensure_role_label_colors(container_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not fix role labels on %s: %s", container_id, e)
+            return []
 
     def _ensure_columns(self, provider, container: Container) -> Container:
         """Give a board the BOARD_COLUMNS it is missing, with their colours.

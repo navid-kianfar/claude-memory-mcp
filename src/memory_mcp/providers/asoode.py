@@ -30,6 +30,7 @@ The four translations that earn the adapter:
 """
 
 import contextlib
+import logging
 from datetime import timezone
 
 from memory_mcp.asoode_client import (
@@ -85,6 +86,8 @@ MAX_CHANGE_PAGES = 50
 
 #: Role labels are prefixed so they are obviously ours and cannot collide with a
 #: label a human made for their own purposes on the same board.
+logger = logging.getLogger(__name__)
+
 ROLE_LABEL_PREFIX = "agent:"
 
 # asoode's LABEL palette - the twenty swatches its label picker offers
@@ -433,6 +436,44 @@ class AsoodeProvider:
     def archive(self, task_id: str, archived: bool = True) -> None:
         """POST /tasks/:id/archive - {archived} sets the state absolutely."""
         self.client.archive_task(task_id, archived)
+
+    def role_label_plan(self, container_id: str) -> list[dict]:
+        """Role labels on this board whose colour is not the convention's.
+
+        Only `agent:` labels are considered. An ordinary label's colour is a
+        person's choice - `#9e9e9e` is merely what create_label defaults to,
+        not a rule - so repainting one would be exactly the kind of edit the
+        column scheme refuses to make. A role label IS a rule: the whole point
+        of ROLE_COLORS is that `agent:backend` is the same red on every board.
+        """
+        board = self.client.fetch_work_package(container_id) or {}
+        out: list[dict] = []
+        for lbl in board.get("labels") or []:
+            title = (lbl.get("title") or "").strip()
+            if not lbl.get("id") or not title.lower().startswith(ROLE_LABEL_PREFIX):
+                continue
+            want = role_color(title[len(ROLE_LABEL_PREFIX):])
+            have = (lbl.get("color") or "").strip()
+            if have.lower() != want.lower():
+                out.append({
+                    "id": lbl["id"], "title": title,
+                    "from": have or None, "to": want,
+                })
+        return out
+
+    def ensure_role_label_colors(self, container_id: str) -> list[dict]:
+        """Repaint this board's role labels to the convention. Best-effort."""
+        fixed = []
+        for item in self.role_label_plan(container_id):
+            try:
+                self.client.rename_label(item["id"], item["title"], item["to"])
+                fixed.append(item)
+            except AsoodeError as e:
+                logger.warning(
+                    "could not recolour label %r on %s: %s",
+                    item["title"], container_id, e,
+                )
+        return fixed
 
     def set_role_label(self, task_id: str, container_id: str,
                        role: str | None) -> None:

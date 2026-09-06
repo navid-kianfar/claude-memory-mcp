@@ -411,17 +411,28 @@ def memory_asoode_import(project: str | None = None) -> dict:
 
 @mcp.tool()
 def memory_asoode_columns(project: str | None = None, apply: bool = False) -> dict:
-    """Show - or apply - the standard column scheme on the linked board.
+    """Show - or apply - the standard column and role-label scheme on EVERY
+    board this project is linked to.
 
-    Backlog gray, To Do yellow, In Progress blue, Done green, Cancelled red,
-    using the swatches asoode's own column picker offers. A board created by
-    memory_asoode_link gets these automatically; this is for a board that
-    already existed.
+    Columns: Backlog gray, To Do yellow, In Progress blue, Done green,
+    Cancelled red, using the swatches asoode's own column picker offers. A
+    board created by memory_asoode_link gets these automatically; this is for
+    boards that already existed.
+
+    ALL linked boards, not just the default one. A monorepo project has a board
+    per app, and doing only the default reported success while every other
+    board still had unstyled columns and no Cancelled.
+
+    Role labels: `agent:<role>` is repainted to its fixed colour, so
+    `agent:backend` is the same red on every board. Ordinary labels are NOT
+    touched - their colour is somebody's choice, where a role label's is a
+    convention.
 
     Reports by default and only changes anything with apply=True, because an
-    existing board may be someone else's. It can never REPAINT: a column whose
-    colour somebody chose is left exactly as it is, and only an unset colour is
-    filled in. Missing columns (usually Cancelled) are created.
+    existing board may be someone else's. It can never REPAINT A COLUMN: one
+    whose colour somebody chose is left exactly as it is, and only an unset
+    colour is filled in. Missing columns (usually Cancelled) are created. One
+    unreachable board is reported against that board and never stops the rest.
     """
     def _run():
         slug = _resolve(project)

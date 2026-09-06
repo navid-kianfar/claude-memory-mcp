@@ -468,6 +468,18 @@ class AsoodeClient:
             {"title": title, "color": color, "darkColor": False},
         )
 
+    def rename_label(self, label_id: str, title: str, color: str) -> Any:
+        """POST /work-packages/labels/:id/rename.
+
+        Despite the name it carries BOTH title and colour - RenameLabelBody
+        requires each - so it is also the only way to recolour a label that
+        already exists.
+        """
+        return self._post(
+            f"/work-packages/labels/{label_id}/rename",
+            {"title": title, "color": color},
+        )
+
     def add_task_label(self, task_id: str, label_id: str) -> Any:
         return self._post(f"/tasks/{task_id}/label/add/{label_id}")
 

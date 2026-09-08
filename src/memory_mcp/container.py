@@ -80,7 +80,9 @@ class Container:
         self.update_service = UpdateService()
         self.claude_md_service = ClaudeMdService(self.memory_service)
         self.template_service = TemplateService(self.template_repo, self.memory_service)
-        self.sync_service = SyncService(self.memory_repo, self.project_repo)
+        self.sync_service = SyncService(
+            self.memory_repo, self.project_repo, self.provenance_repo,
+        )
         # The asoode client is built lazily inside the bridge, so a machine
         # with no PAT stored still constructs the container fine.
         self.task_bridge = TaskBridge(

@@ -790,10 +790,15 @@ def _provenance(params, body, query):
 
 
 def _sync_export(params, body, query):
-    """Return the project's memory as a category-keyed snapshot for the CLI."""
+    """Return everything the committed snapshot carries, for the CLI to write.
+
+    `categories` keeps its old shape and meaning; `provenance` and `tombstones`
+    are additions the DuckDB snapshot carries. An older CLI reading only
+    `categories` still works against this route.
+    """
     slug = params["slug"]
     container.project_service.get(slug)
-    return {"categories": container.sync_service.build_snapshot(slug)}
+    return container.sync_service.build_full_snapshot(slug)
 
 
 def _sync_import(params, body, query):
@@ -804,7 +809,11 @@ def _sync_import(params, body, query):
     reconcile = body.get("reconcile")
     if reconcile is None:
         reconcile = list(categories.keys())
-    result = container.sync_service.apply_snapshot(slug, categories, reconcile)
+    result = container.sync_service.apply_snapshot(
+        slug, categories, reconcile,
+        provenance=body.get("provenance") or [],
+        tombstones=body.get("tombstones") or [],
+    )
     return {"status": "ok", **result}
 
 

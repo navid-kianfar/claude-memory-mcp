@@ -11,6 +11,7 @@ Sets up the shared HTTP daemon model:
   8. Claude Code hooks -> rule injection / session lifecycle
   9. Agent definitions -> ~/.claude/agents/ (the standing agent team)
  10. retire `agent: pm` -> the hook carries the lead brief instead
+ 11. git merge driver -> reconciles two .claude-memory snapshot databases
 
 The runtime is installed under ~/.memory-mcp/ (not in the repo) so the launchd
 background agent can run it even when the repo lives in a macOS TCC-protected
@@ -27,6 +28,7 @@ import sys
 from pathlib import Path
 
 from memory_mcp.config import settings
+from memory_mcp.constants import MERGE_DRIVER_NAME
 
 LAUNCHD_LABEL = "com.claude-memory-mcp.daemon"
 REPO_DIR = Path(__file__).resolve().parents[2]
@@ -582,6 +584,57 @@ def retire_default_agent() -> None:
     print("    Removed `agent: pm` - the lead brief now rides the hook instead.")
 
 
+# ---------- 11. git merge driver for the memory snapshot ----------
+
+def merge_driver_command() -> str:
+    """The command git runs to merge two snapshot databases.
+
+    The runtime venv's binary, not whatever `memory-mcp` happens to be on PATH:
+    git runs the driver from inside a merge, with the environment of whatever
+    started it (a GUI client, an IDE, a hook), and PATH there is not the shell's.
+    The hooks resolve the same binary the same way for the same reason.
+    """
+    binary = runtime_dir() / "bin" / "memory-mcp"
+    return f'"{binary}" merge-snapshot %O %A %B %P'
+
+
+def setup_merge_driver() -> None:
+    """Register the snapshot merge driver in the user's global git config.
+
+    Two halves make this work, and only this one is machine-wide:
+
+      1. HERE: `merge.<name>.driver` in ~/.gitconfig, so git knows what to run.
+      2. PER PROJECT: `.claude-memory/.gitattributes`, written by every
+         `memory-mcp sync export`, which points the snapshot at that driver.
+         It is committed, so a teammate gets it from the repo - but it only
+         does anything on a machine that has run this step.
+
+    A clone WITHOUT the driver registered does not break: git finds no driver by
+    that name and records an ordinary binary conflict, which is visible and
+    fixable by hand. That is the safe failure, and it is why the driver is
+    registered rather than the snapshot being marked `merge=ours` or `binary`.
+    """
+    driver = f"merge.{MERGE_DRIVER_NAME}"
+    for key, value in (
+        (f"{driver}.name", "memory-mcp snapshot merge (SQL, union + tombstones)"),
+        (f"{driver}.driver", merge_driver_command()),
+        # How git merges the BASE of a recursive merge. 'binary' means "do not
+        # try to text-merge it, hand the driver the two sides" - the driver is
+        # the only thing here that understands the format.
+        (f"{driver}.recursive", "binary"),
+    ):
+        result = subprocess.run(
+            ["git", "config", "--global", key, value],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"git config --global {key} failed: "
+                f"{result.stderr.strip() or result.returncode}"
+            )
+    print(f"    Merge driver: {MERGE_DRIVER_NAME} -> {merge_driver_command()}")
+
+
 # ---------- lean update ----------
 
 def run_update() -> None:
@@ -590,11 +643,20 @@ def run_update() -> None:
     Lighter than full setup (skips the model/VSS/hosts/MCP-config/hooks
     steps) - used by the auto-update hook when the repo source changes. Agent
     definitions ARE source, so they refresh here too.
+
+    The merge driver is re-registered here as well, and it is the reason an
+    install that predates it does not need a full setup: the registration is one
+    idempotent `git config`, and a machine without it silently loses one side of
+    every snapshot conflict.
     """
     print("Updating the local installation...")
     setup_runtime()
     setup_agents()
     setup_launchd()
+    try:
+        setup_merge_driver()
+    except Exception as e:  # noqa: BLE001 - no git, or a locked config
+        print(f"    Warning: merge driver not registered: {e}")
     print("Local installation updated.")
 
 
@@ -618,6 +680,7 @@ def main() -> None:
         ("Installing Claude Code hooks", setup_hooks),
         ("Installing the agent team", setup_agents),
         ("Retiring the `agent` setting (the hook carries it)", retire_default_agent),
+        ("Registering the memory snapshot git merge driver", setup_merge_driver),
     ]
     total = len(steps)
     for i, (msg, fn) in enumerate(steps, 1):

@@ -247,15 +247,54 @@ def _uid_from_manifest(path: Path) -> str | None:
     Returns None for anything unreadable - a folder the daemon has no rights to,
     a half-written file, an unresolved git conflict. Identity then falls back to
     path and name matching, exactly as before uids existed.
+
+    THIS IS WHY THE MANIFEST STAYED JSON when the memories moved into DuckDB:
+    it is read here on every project detection, in the daemon, for every folder
+    walked up from the cwd. Opening a DuckDB file to answer "which project is
+    this?" would take a lock and cost milliseconds per candidate directory. The
+    snapshot database carries the same uid as a fallback (below) for the case
+    where the manifest is lost, and nothing more.
     """
     try:
         manifest = path / SNAPSHOT_DIRNAME / MANIFEST_NAME
         if not manifest.is_file():
-            return None
+            return _uid_from_snapshot_db(path)
         uid = json.loads(manifest.read_text()).get("project_id")
-        return uid if isinstance(uid, str) and uid else None
+        if isinstance(uid, str) and uid:
+            return uid
+        return _uid_from_snapshot_db(path)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _uid_from_snapshot_db(path: Path) -> str | None:
+    """Fallback only: the uid the snapshot database carries in snapshot_meta.
+
+    Reached when manifest.json is missing or does not name a project - a
+    hand-deleted manifest, a conflict resolved by removing the file. Guarded by
+    the file existing first so the common path never opens DuckDB at all.
+    """
+    from memory_mcp.constants import SNAPSHOT_DB_NAME
+
+    db_path = path / SNAPSHOT_DIRNAME / SNAPSHOT_DB_NAME
+    if not db_path.is_file():
+        return None
+    try:
+        import duckdb
+
+        conn = duckdb.connect()
+        try:
+            conn.execute(
+                "ATTACH '{}' AS s (READ_ONLY)".format(str(db_path).replace("'", "''"))
+            )
+            row = conn.execute(
+                "SELECT value FROM s.snapshot_meta WHERE key = 'project_id'"
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - a locked or corrupt snapshot is not fatal
+        return None
+    return row[0] if row and isinstance(row[0], str) and row[0] else None
 
 
 def _slug_from_uid(path: Path) -> str | None:

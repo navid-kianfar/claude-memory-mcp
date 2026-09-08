@@ -5,6 +5,7 @@
   memory-mcp serve      -> run the shared HTTP daemon (MCP + management UI)
   memory-mcp rules      -> print the current project's rules (used by hooks)
   memory-mcp sync ...   -> export/import the project memory snapshot (hooks)
+  memory-mcp merge-snapshot %O %A %B -> git merge driver for the snapshot DB
   memory-mcp setup      -> run interactive setup
   memory-mcp update     -> rebuild the runtime from source + reload the daemon
   memory-mcp user ...   -> manage server-mode users (create/list/rotate tokens)
@@ -17,7 +18,7 @@ import sys
 
 USAGE = (
     "Usage: memory-mcp "
-    "[stdio|serve|rules|sync|setup|update|user|bind|asoode|provider]"
+    "[stdio|serve|rules|sync|merge-snapshot|setup|update|user|bind|asoode|provider]"
 )
 
 
@@ -37,6 +38,11 @@ def main() -> None:
     elif cmd == "sync":
         from memory_mcp.sync_cli import main as sync_main
         sync_main(args[1:])
+    elif cmd == "merge-snapshot":
+        # git reads the EXIT CODE to decide merged-vs-conflict, so this one
+        # propagates it instead of returning None like the others.
+        from memory_mcp.merge_cli import main as merge_main
+        sys.exit(merge_main(args[1:]))
     elif cmd == "setup":
         rest = args[1:]
         if "--client" in rest:

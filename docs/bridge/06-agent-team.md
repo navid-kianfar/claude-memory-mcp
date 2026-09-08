@@ -1,7 +1,7 @@
 # Phase 3 — the agent team
 
-> Status: **built and dispatched.** TWELVE definitions live in [`agents/`](../../agents/) —
-> eight roles and four stack experts that `extends:` a role — plus the shared base
+> Status: **built and dispatched.** SIXTEEN definitions live in [`agents/`](../../agents/) —
+> eight roles and eight stack experts that `extends:` a role — plus the shared base
 > `_base.md` every definition inherits; `memory-mcp-setup` composes and installs them to
 > `~/.claude/agents/`. Role-aware claiming is in the task store (schema v12), and the first
 > real dispatch happened on 2026-09-05: `test` verified the mirror change on the live board
@@ -92,11 +92,42 @@ its identity, craft and hand-offs; an expert file `extends:` a role and adds the
 | `nodejs` | `backend` | xhigh | worktree | Node layout: always NestJS / Next.js / pnpm — consulted before backend |
 | `react` | `frontend` | xhigh | worktree | pnpm + Vite + Tailwind + shadcn, every shadcn component wrapped once |
 | `app` | `frontend` | xhigh | worktree | Kotlin Multiplatform mobile, Android and iOS pixel-identical |
+| `python` | `backend` | xhigh | worktree | FastAPI + Pydantic v2, uv, ruff, mypy strict, SQLAlchemy 2.0 |
+| `go` | `backend` | xhigh | worktree | stdlib `net/http`, `cmd/`+`internal/`, sqlc over an ORM |
+| `rust` | `backend` | xhigh | worktree | tokio + axum, thiserror/anyhow, sqlx compile-time-checked queries |
+| `kotlin` | `backend` | xhigh | worktree | **Server-side** Kotlin: Ktor, coroutines, Exposed/jOOQ + Flyway |
 
-All twelve pin `claude-opus-5`. No definition names its MCP tools in frontmatter: subagents
+`kotlin` and `app` are deliberately separate: `app` owns Kotlin Multiplatform for phones,
+`kotlin` owns Kotlin on a server. Each disowns the other's territory in writing, because a
+brief sent to the wrong one costs a full dispatch before anyone notices.
+
+All sixteen pin `claude-opus-5`. No definition names its MCP tools in frontmatter: subagents
 inherit the memory server in full, and an allowlist would filter it out — `reviewer` is the one
 denylist. Skills are invoked on demand (`designer` names `/design` in its body); only `reviewer`
 preloads.
+
+## The standard every definition meets
+
+Added 2026-09-08, after the four language experts were written to a higher bar than the eight
+roles. Each definition carries three sections, and `TestEveryAgentMeetsTheStandard` asserts all
+sixteen do — on the **composed** body, so a section inherited from a parent counts:
+
+- **Non-negotiables** — the opinions the agent will not re-litigate per task, each with its
+  reason. Without them every dispatch re-derives the same decision, differently.
+- **Currency without hallucination** — read the target's own versions first, name the release a
+  feature arrived in, mark **unverified** what cannot be confirmed. The test also asserts the
+  word *unverified* is actually present: the heading alone is decoration, and that word is the
+  escape hatch that lets an agent answer without inventing a flag or a config key.
+- **What you produce** — exactly what the hand-off contains, so the next agent can build from it
+  without a second dispatch.
+
+A fourth check asserts **no role file restates `_base.md`**: two copies of the shared contract
+are two copies that will drift apart.
+
+The standard is enforced rather than agreed for the same reason the PreToolUse gate exists — a
+convention that lives only in whichever files happen to follow it decays the moment someone adds
+a seventeenth agent.
+
 
 **The main session is the lead**, not `pm`: the orchestration brief rides the
 `UserPromptSubmit` hook (`enforcement.agent_team_intro` at session start, one line per turn),

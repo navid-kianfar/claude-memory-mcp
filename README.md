@@ -13,7 +13,7 @@ One local daemon, three things:
 |---|---|
 | 🧠 **Memory for Claude** | Decisions, rules and architecture notes per project — searched by meaning, reloaded every session, re-injected every turn. |
 | ✅ **Task management** | A real backlog with states, sub-tasks, comments and a stopwatch — parked mid-session, mirrored to a live board. |
-| 👥 **AI team management** | Twelve specialised agents on one shared contract, so the lead session delegates instead of doing everything itself. |
+| 👥 **AI team management** | Sixteen specialised agents on one shared contract, so the lead session delegates instead of doing everything itself. |
 
 Everything is local: your own DuckDB files, your own embedding model, nothing
 leaving the machine.
@@ -64,7 +64,7 @@ cd claude-memory-mcp
 
 `install.sh` installs dependencies, builds the UI, downloads the embedding
 model, installs a launchd agent so the daemon auto-starts, points Claude Code at
-the daemon, installs the rule-enforcement hooks, and installs the twelve agents.
+the daemon, installs the rule-enforcement hooks, and installs the sixteen agents.
 It prints a one-time `sudo` command to add a `claude-memory-mcp` entry to
 `/etc/hosts` so the UI resolves at <http://claude-memory-mcp:8765/>.
 </details>
@@ -147,6 +147,25 @@ because one is not enough:
 2. **Server instructions** — the MCP server tells Claude to load and honor rules.
 3. **Tool responses** — search/store responses carry a compact rules reminder.
 
+Those three all do the same thing: they *tell* Claude. That is enough for a rule
+that shapes judgement, and demonstrably not enough for one that must happen every
+single time — a rule saying "put the work on the board before doing it" held about
+70% of the time. So there is a fourth, different in kind:
+
+4. **A `PreToolUse` gate that can REFUSE.** On `Edit`, `Write` and `NotebookEdit`
+   it asks the daemon whether a task is in progress, and blocks the tool call when
+   an asoode-bound project has none — replying with the exact calls to make
+   (`memory_task_plan`, or `memory_task_add` + `memory_task_start`). It is the only
+   hook here whose exit status decides whether the tool runs.
+
+   **It fails open on every path**: not a memory project, not bound to a board,
+   daemon unreachable, timeout, unreadable answer, or any unexpected error. A gate
+   that stopped you editing a file because a board was down would be worse than the
+   problem it fixes.
+
+   **To switch it off**, set `MEMORY_MCP_NO_GATE=1`. Reads are never gated, so
+   exploring, searching and diagnosing are untouched either way.
+
 Hooks stay silent in directories that are not registered memory projects, so
 they can be installed globally without noise.
 
@@ -204,17 +223,45 @@ You can also set the folder when creating a project: the New Project dialog has
 a **Project folder** field, and `memory_load_from_folder` binds it automatically.
 
 Once bound, the project's rules and decisions mirror to a committable
-**`.claude-memory/`** snapshot in the project folder — one JSON file per
-category, diff- and merge-friendly, no binary database and no embeddings. A
-`git push` carries the latest memory; a teammate's `git pull` plus their next
-session imports it back. Export runs at the end of each turn and import at
-session start (both via hooks); the central database stays the daemon's fast
-working copy.
+**`.claude-memory/`** snapshot in the project folder — a **`memory.duckdb`**
+carrying the memories, both rule kinds and the audit trail, alongside a small
+`manifest.json`. A `git push` carries the latest memory; a teammate's `git pull`
+plus their next session imports it back. Export runs at the end of each turn and
+import at session start (both via hooks); the central database stays the daemon's
+fast working copy.
 
-Import is **safe by design**: it only adds new entries and applies edits that
-are strictly newer. It never deletes, and never reverts a more recent local
-change — removing a rule is always explicit. Each project's memory is separate,
-so sharing one never exposes the others.
+It used to be one JSON file per category. Those grew without bound — one project
+here reached **1.1MB**, rewritten in full on every export, so every session added
+another large blob to git history. **A migration is automatic**: the first import
+in a project that still has JSON reads it, writes the database, verifies the rows
+came back, and only then deletes the JSON.
+
+`manifest.json` deliberately stays JSON. `context` reads it on *every* project
+detection, walking up from the working directory, and putting a DuckDB open and
+its file lock on that path would be a real regression. It is ~300 bytes and does
+not grow.
+
+> **On size**: the win arrives with scale, not immediately. On this repo, 8 JSON
+> files were 131KB raw / 39KB compressed and the database is 291KB / **48KB** —
+> slightly worse. At roughly eight times the data it is 1.08MB / 223KB versus
+> 668KB / **96KB**. The consistent win is in *git history*, where a small binary
+> delta replaces a full rewrite of several large text files every session.
+
+Import is **safe by design**: absence is never deletion. It adds new entries and
+applies edits that are strictly newer, and it never reverts a more recent local
+change. The one exception is an explicit **tombstone** — the record of somebody
+running a hard delete — which is a different thing from a row simply being
+missing, and without which a delete could never reach another machine. Even then
+a local edit newer than the tombstone wins. Each project's memory is separate, so
+sharing one never exposes the others.
+
+**A DuckDB file is a binary blob to git**, so `memory-mcp-setup` registers a **git
+merge driver** and a `.gitattributes` entry for it. When two machines both add a
+rule, the driver merges them with SQL — union what each side added, last write
+wins on a genuine conflict, union the audit trail — instead of git's default of
+taking one side and silently discarding the other's memories. **Install
+`memory-mcp-setup` on every machine that clones the repo**: without the driver
+registered locally, git falls back to that default.
 
 The snapshot's `manifest.json` carries a **`project_id`**, the project's stable
 identity. Because it is committed with the code, moving or renaming the project
@@ -432,20 +479,35 @@ fake written in this repo is not a verified integration.
 
 # 👥 AI team management
 
-`memory-mcp-setup` installs twelve specialised agents to `~/.claude/agents/`
-from [`agents/`](agents/) — eight roles and four stack experts that extend a
+`memory-mcp-setup` installs sixteen specialised agents to `~/.claude/agents/`
+from [`agents/`](agents/) — eight roles, and eight stack experts that extend a
 role:
 
 | Roles | Stack experts |
 |---|---|
-| `pm` · technical lead, breaks work down and integrates it | `dotnet` — solution layout, DI, services (before `backend`) |
-| `backend` · APIs, services, data models, migrations | `nodejs` — NestJS for APIs/workers, Next.js for SSR, pnpm (before `backend`) |
-| `frontend` · UI to the designer's spec, verified in a browser | `react` — pnpm + Vite + Tailwind + shadcn, every shadcn component wrapped once |
-| `designer` · tokens, component specs, flows, visual review | `app` — Kotlin Multiplatform, Android and iOS pixel-identical |
-| `test` · verifies work on the running product | |
-| `reviewer` · independent review, reports and never fixes | |
-| `devops` · CI, builds, deploys, monitoring | |
-| `docs` · READMEs, API docs, changelogs, guides | |
+| `pm` · technical lead, breaks work down and integrates it | `dotnet` — solution layout, DI, services |
+| `backend` · APIs, services, data models, migrations | `nodejs` — NestJS, Next.js for SSR, pnpm |
+| `frontend` · UI to the designer's spec, verified in a browser | `python` — FastAPI + Pydantic v2, uv, ruff, mypy strict |
+| `designer` · tokens, component specs, flows, visual review | `go` — stdlib `net/http`, `cmd/`+`internal/`, sqlc over an ORM |
+| `test` · verifies work on the running product | `rust` — tokio + axum, thiserror/anyhow, sqlx checked queries |
+| `reviewer` · independent review, reports and never fixes | `kotlin` — **server-side**: Ktor, coroutines, Flyway |
+| `devops` · CI, builds, deploys, monitoring | `react` — pnpm + Vite + Tailwind + shadcn, each wrapped once |
+| `docs` · READMEs, API docs, changelogs, guides | `app` — **mobile**: Kotlin Multiplatform, Android and iOS identical |
+
+The first six experts extend `backend`, the last two extend `frontend`. An expert
+is **consulted before** its role to decide the layout, and **dispatched instead of**
+it when the work is that stack through and through.
+
+> `kotlin` and `app` are not interchangeable — `app` owns Kotlin Multiplatform for
+> phones, `kotlin` owns Kotlin on a server. Both say so in their own definition,
+> because a brief sent to the wrong one wastes a whole dispatch.
+
+Every definition carries three sections, and a test asserts all sixteen do:
+**Non-negotiables** (the opinions it will not re-litigate per task, each with its
+reason), **Currency without hallucination** (read the target's own versions, name
+the release a feature arrived in, mark *unverified* what cannot be confirmed), and
+**What you produce** (exactly what the hand-off contains, so the next agent does
+not need a second dispatch).
 
 **The session talking to you is the lead.** It orchestrates directly and
 dispatches specialists; it never dispatches a `pm` to do that, because a

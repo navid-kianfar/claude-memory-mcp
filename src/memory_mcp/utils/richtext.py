@@ -393,7 +393,17 @@ class _MarkdownWriter(HTMLParser):
 
     # -- helpers
 
-    def _pending(self) -> bool:
+    def _has_buffered_text(self) -> bool:
+        """Is there unflushed text in the buffer?
+
+        NOT named `_pending`: `HTMLParser.reset()` — called from its
+        `__init__` — sets an instance attribute `self._pending = []` for its
+        own feed buffering, and an instance attribute shadows a method of the
+        same name. Current CPython point releases of 3.12, 3.13 and 3.14 all
+        carry it, so a method called `_pending` here is a list by the time
+        anyone calls it. `test_no_method_is_shadowed_by_htmlparser` guards the
+        whole class of collision.
+        """
         return bool("".join(self._buffer).strip())
 
     def _flush(self, prefix: str = "", kind: str = "block") -> None:
@@ -413,7 +423,7 @@ class _MarkdownWriter(HTMLParser):
         counter, so calling it for a `</li>` whose text was already flushed (a
         nested list does exactly that) would skip a number.
         """
-        if not self._pending():
+        if not self._has_buffered_text():
             return
         self._flush(self._list_prefix(), kind="item")
 

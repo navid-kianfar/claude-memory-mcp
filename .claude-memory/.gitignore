@@ -1,0 +1,4 @@
+# Written by memory-mcp. Transient files of the snapshot database.
+.*.tmp
+.*.tmp.wal
+*.duckdb.wal

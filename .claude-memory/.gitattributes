@@ -1,0 +1,6 @@
+# Written by memory-mcp. The memory snapshot is a DuckDB file, so git
+# cannot merge it textually; `memory-mcp-setup` registers a merge driver
+# that reconciles two snapshots with SQL instead of discarding one side.
+memory.duckdb merge=claude-memory-snapshot
+memory.duckdb -diff
+memory.duckdb -text

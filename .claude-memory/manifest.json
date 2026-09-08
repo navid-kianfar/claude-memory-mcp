@@ -1,16 +1,18 @@
 {
-  "version": 1,
+  "version": 2,
   "project_id": "6a7fd2f4-e16a-4585-b373-9ede6e234b25",
   "slug": "claude-memory-mcp",
+  "snapshot": "memory.duckdb",
+  "schema_version": 1,
   "categories": [
-    "decision",
-    "project_plan",
     "architecture",
+    "decision",
     "devops",
-    "mandatory_rules",
-    "forbidden_rules",
     "feedback",
+    "forbidden_rules",
+    "mandatory_rules",
+    "project_plan",
     "reference"
   ],
-  "exported_at": "2026-09-08T15:40:03.765132+00:00"
+  "exported_at": "2026-09-08T15:59:25.477693+00:00"
 }

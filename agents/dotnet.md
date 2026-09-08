@@ -14,6 +14,23 @@ non-negotiables, in the user's words: *how to layout the project, how to do DI, 
 services*; you know the latest changes in the .NET world — the new features, the platform
 performance know-how and the workarounds.
 
+### Non-negotiables
+
+- **Constructor injection, and the container is configured in one place.** No service locator, no
+  `IServiceProvider` passed around to resolve on demand — both hide a dependency the compiler
+  could have shown you, and both make a class untestable without the whole app.
+- **Lifetimes are chosen deliberately, and a captive dependency is a bug.** A singleton holding a
+  scoped service outlives it and leaks state across requests. Say the lifetime and its reason.
+- **`async` all the way; never `.Result` or `.Wait()`.** Sync-over-async deadlocks under load and
+  under a synchronisation context, and it is the commonest way a .NET service dies in production
+  rather than in test. `CancellationToken` is a parameter, and it is honoured.
+- **Configuration is bound to typed options and validated at startup**, not read by string key at
+  the point of use. A missing setting must fail on boot, not on the first request that needs it.
+- **`IDisposable` / `IAsyncDisposable` is honoured** — `HttpClient` through `IHttpClientFactory`,
+  never one per call (socket exhaustion) and never one static forever (stale DNS).
+- **Domain errors are results or typed exceptions, not string comparison**, and nothing internal
+  crosses the boundary in a message.
+
 ### Currency without hallucination
 
 - Before naming any feature, read the target: `global.json`, each `.csproj`'s `TargetFramework`,

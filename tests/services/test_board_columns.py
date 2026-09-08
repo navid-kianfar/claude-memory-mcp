@@ -244,3 +244,144 @@ class TestRoleLabels:
         result = _bridge(p).ensure_board_columns(slug)
 
         assert result["boards"][0]["labels_recoloured"] == []
+
+
+class TestStateMapRefresh:
+    """A column added AFTER bootstrap must reach the state -> column map.
+
+    The map was built once by `build_state_list_map` during bootstrap and never
+    refreshed. On the real board that meant a Cancelled column created on
+    2026-09-05 sat there unused: `_apply_state` looked up `cancelled`, found no
+    target list, and left the card in whatever column it was already in - which
+    is step 10 of the user's process silently not happening.
+    """
+
+    def test_a_column_added_later_lands_in_the_map(self, slug):
+        provider = StyleableProvider()
+        _seed(provider, "wp1", FULL)
+        link = _link(slug, "wp1", "Board", is_default=True)
+        bridge = _bridge(provider)
+
+        assert "cancelled" not in (link["state_list_map"] or {})
+
+        provider.ensure_group("wp1", "Cancelled", "#f44336")
+        result = bridge.refresh_state_map(slug)
+
+        assert result["changed"] is True
+        assert "cancelled" in result["added"]
+        assert result["state_list_map"]["cancelled"]
+
+    def test_it_is_persisted_not_just_returned(self, slug):
+        """The next session reads the link, not this return value."""
+        from memory_mcp.db.registry import get_default_project_link
+
+        provider = StyleableProvider()
+        _seed(provider, "wp1", FULL)
+        _link(slug, "wp1", "Board", is_default=True)
+        bridge = _bridge(provider)
+
+        provider.ensure_group("wp1", "Cancelled", "#f44336")
+        bridge.refresh_state_map(slug)
+
+        stored = get_default_project_link(slug)["state_list_map"]
+        assert "cancelled" in stored
+
+    def test_no_change_reports_no_change(self, slug):
+        """So a caller can tell a refresh that mattered from one that did not."""
+        provider = StyleableProvider()
+        _seed(provider, "wp1", FULL)
+        _link(slug, "wp1", "Board", is_default=True)
+        bridge = _bridge(provider)
+
+        bridge.refresh_state_map(slug)          # settle whatever FULL implies
+        again = bridge.refresh_state_map(slug)
+        assert again["changed"] is False
+
+    def test_applying_the_column_scheme_refreshes_the_map(self, slug):
+        """The operation that CREATES the staleness must not leave it behind."""
+        provider = StyleableProvider()
+        _seed(provider, "wp1", FULL)          # no Cancelled column
+        _link(slug, "wp1", "Board", is_default=True)
+        bridge = _bridge(provider)
+
+        result = bridge.ensure_board_columns(slug)
+
+        board = result["boards"][0]
+        assert "Cancelled" in board["added"]
+        assert board["state_map_refreshed"] is True
+        assert "cancelled" in board["state_list_map"], (
+            "a Cancelled column was created and the map still cannot find it"
+        )
+
+    def test_a_cancelled_task_now_has_a_column_to_move_to(self, slug):
+        """The end the whole task is for, checked at the map level."""
+        provider = StyleableProvider()
+        _seed(provider, "wp1", FULL)
+        _link(slug, "wp1", "Board", is_default=True)
+        bridge = _bridge(provider)
+
+        bridge.ensure_board_columns(slug)
+
+        from memory_mcp.db.registry import get_default_project_link
+
+        target = get_default_project_link(slug)["state_list_map"].get("cancelled")
+        assert target, "cancelled has no column"
+        titles = {g.id: g.title for g in provider.fetch_container("wp1").groups}
+        assert titles[target] == "Cancelled"
+
+
+class TestDeleteClosesTheCard:
+    """A deleted task's card must not stay archived in a working state.
+
+    Found by auditing the live board on 2026-09-08: 22 archived cards were
+    sitting at todo or in_progress. asoode has no delete route, so a local
+    delete archives the card - and archiving alone left the state untouched, so
+    every task deleted mid-flight became a card that claimed forever that it was
+    still waiting to be worked.
+
+    `cancelled`, not `done`: it was deleted, not finished. Tidying the counts by
+    recording something untrue is worse than the stuck state it replaces.
+    """
+
+    def _deleted(self, slug, provider, title="Scratch"):
+        """Create a task, mirror it, then delete it - returning the remote id."""
+        from memory_mcp.db.registry import get_default_project_link
+        from memory_mcp.models import CreateTaskRequest
+
+        # The shared _bridge() helper passes no outbox, so nothing would record
+        # the local -> remote mapping and the delete would have nothing to close.
+        bridge = TaskBridge(
+            container.project_service, container.task_service, provider,
+            outbox_repo=container.outbox_repo,
+        )
+        task = container.task_service.create(
+            CreateTaskRequest(project=slug, title=title)
+        )
+        bridge.push(slug)
+        link_id = get_default_project_link(slug)["id"]
+        remote = container.outbox_repo.remote_id(slug, task.id, link_id)
+        container.task_service.delete(slug, task.id)
+        bridge.flush(slug)
+        return remote
+
+    def test_the_card_is_cancelled_not_left_in_progress(self, slug):
+        from memory_mcp.models import TaskState
+
+        provider = StyleableProvider()
+        _seed(provider, "wp1", FULL)
+        _link(slug, "wp1", "Board", is_default=True)
+
+        remote = self._deleted(slug, provider)
+        assert remote, "the task never reached the board, so this proves nothing"
+        assert provider._tasks[remote]["state"] == TaskState.CANCELLED.value, (
+            f"archived card left at {provider._tasks[remote]['state']!r}"
+        )
+
+    def test_it_is_still_archived(self, slug):
+        """Closing must not replace archiving - the re-import guard needs both."""
+        provider = StyleableProvider()
+        _seed(provider, "wp1", FULL)
+        _link(slug, "wp1", "Board", is_default=True)
+
+        remote = self._deleted(slug, provider)
+        assert provider._tasks[remote]["archived"] is True

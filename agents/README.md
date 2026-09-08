@@ -1,10 +1,10 @@
 # The agent team
 
-Twelve specialised agents that work on projects using this server's memory and task board:
+Sixteen specialised agents that work on projects using this server's memory and task board:
 eight roles — `pm`, `backend`, `frontend`, `designer`, `test`, `reviewer`, `devops`, `docs` —
-and four stack experts that extend a role — `dotnet` and `nodejs` (extend `backend`), `react`
-and `app` (extend `frontend`). All of them extend `_base.md`, the shared contract. The design
-and its verification status are in
+and eight stack experts that extend a role. Extending `backend`: `dotnet`, `nodejs`, `python`,
+`go`, `rust`, `kotlin`. Extending `frontend`: `react`, `app`. All of them extend `_base.md`, the
+shared contract. The design and its verification status are in
 [`docs/bridge/06-agent-team.md`](../docs/bridge/06-agent-team.md).
 
 **The main session is the lead.** It orchestrates directly rather than dispatching `pm` to do
@@ -12,6 +12,27 @@ it, because a subagent's output is never shown to the user and cannot be redirec
 running. The brief that says so is injected by the `UserPromptSubmit` hook
 (`enforcement.agent_team_intro` / `agent_team_line`), and `pm` is excluded from the roster it
 advertises. The `pm.md` file still exists, for a planning job worth doing in isolated context.
+
+## Which expert to reach for
+
+A stack expert is **consulted before** its role to decide the layout, and **dispatched instead
+of** it when the work is that stack through and through. Each one carries the non-negotiables it
+will not argue about again, so a decision is made once and not re-litigated per task.
+
+| Expert | Reach for it when | The floor it insists on |
+|---|---|---|
+| `dotnet` | .NET solutions, projects, DI, configuration | the .NET layer's own conventions |
+| `nodejs` | Node APIs, workers, socket apps, SSR | NestJS, Next.js, pnpm |
+| `python` | Python services and APIs | FastAPI + Pydantic v2, uv, ruff, mypy strict |
+| `go` | Go services and CLIs | stdlib `net/http`, `cmd/`+`internal/`, sqlc over an ORM |
+| `rust` | Rust services | tokio + axum, thiserror/anyhow, sqlx checked queries |
+| `kotlin` | **server-side** Kotlin | Ktor (or Spring where it already runs), coroutines |
+| `react` | the pnpm + Vite + Tailwind + shadcn/ui stack | one app-owned wrapper per shadcn component |
+| `app` | **mobile** — Android and iOS from one codebase | Kotlin Multiplatform + Compose Multiplatform |
+
+**`kotlin` and `app` are not interchangeable.** `app` owns Kotlin Multiplatform for phones;
+`kotlin` owns Kotlin on a server. Both say so in their own definition, because a brief sent to
+the wrong one wastes a whole dispatch before anyone notices.
 
 ## This folder is the source of truth
 

@@ -369,6 +369,72 @@ async def _hook_rules(request):
     return PlainTextResponse(text)
 
 
+async def _hook_gate(request):
+    """Should a mutating tool call be allowed to proceed? (PreToolUse hook.)
+
+    Answers `{"allow": bool, "reason": str}`. The hook denies ONLY on an
+    explicit `allow: false`; every other outcome - a non-project directory, an
+    unbound project, an unreachable daemon, an exception in here - is an allow.
+
+    That asymmetry is the whole design. This gate exists because a rule saying
+    "start a task first" was followed about 70% of the time, and text cannot
+    require anything. But a gate that blocks a person from editing a file
+    because a board is down would be far worse than the problem it fixes, so
+    every failure mode opens it.
+
+    Gates on the PROJECT having a task in progress rather than THIS session
+    having one: a Claude Code hook is handed Claude Code's session id, which is
+    not the memory session id that claims a task, and there is no mapping
+    between them. Project-level is the honest check the available data supports
+    - and a task somebody else left in progress opening the gate is a much
+    smaller problem than a gate that cannot be satisfied.
+    """
+    if not _hook_authorized(request):
+        return JSONResponse({"allow": True, "reason": "unauthorized - failing open"})
+    cwd = request.query_params.get("cwd", "")
+
+    def _decide() -> dict:
+        from memory_mcp.context import detect_project_from_cwd
+        from memory_mcp.db.registry import get_project_links
+
+        slug = detect_project_from_cwd(cwd)
+        if not slug:
+            return {"allow": True, "reason": "not a memory project"}
+        if not get_project_links(slug):
+            return {"allow": True, "reason": "project is not bound to a board"}
+        open_tasks = container.task_service.list_tasks(
+            slug, TaskFilter(state=TaskState.IN_PROGRESS), limit=1,
+        ).tasks
+        if open_tasks:
+            return {
+                "allow": True,
+                "reason": f"working: {open_tasks[0].title}",
+                "task_id": open_tasks[0].id,
+            }
+        return {
+            "allow": False,
+            "slug": slug,
+            "reason": (
+                f"No task is in progress for '{slug}', and this project's board "
+                "is its work queue.\n\n"
+                "Put the work on the board BEFORE doing it, so it is tracked and "
+                "time is recorded:\n"
+                "  - several deliverables -> memory_task_plan(request=..., tasks=[...])\n"
+                "  - one deliverable      -> memory_task_add(...) then "
+                "memory_task_start(task_id)\n"
+                "  - already on the board -> memory_task_start(task_id)\n\n"
+                "Then make this edit again. Set MEMORY_MCP_NO_GATE=1 to switch "
+                "this off."
+            ),
+        }
+
+    try:
+        answer = await to_thread.run_sync(_decide)
+    except Exception as e:  # noqa: BLE001 - a gate that errors must not block work
+        answer = {"allow": True, "reason": f"gate error, failing open: {e}"}
+    return JSONResponse(answer)
+
+
 async def _login(request):
     """Exchange a username + API token for an HttpOnly session cookie."""
     try:
@@ -1448,6 +1514,7 @@ def build_routes() -> list:
         Route("/api/health", _api(_health, public=True), methods=["GET"]),
         Route("/api/hook/rules", _hook_rules, methods=["GET"]),
         Route("/api/hook/auto-register", _hook_auto_register, methods=["GET"]),
+        Route("/api/hook/gate", _hook_gate, methods=["GET"]),
         Route("/api/hook/claim", _hook_claim, methods=["POST"]),
         Route("/api/hook/update", _hook_update, methods=["GET"]),
         Route("/api/hook/update-done", _hook_update_done, methods=["POST"]),

@@ -53,6 +53,18 @@ HOOK_EVENTS = {
     "UserPromptSubmit": ["inject-rules.sh"],
     "SessionStart": ["session-start.sh"],
     "Stop": ["session-end.sh", "auto-update-install.sh"],
+    # The only hook here that can REFUSE anything. The other three print into
+    # the model's context and hope; this one's exit status decides whether the
+    # tool runs, which is what makes "put the work on the board first" an
+    # invariant instead of a rule that held about 70% of the time.
+    "PreToolUse": ["require-task.sh"],
+}
+
+#: Events that only fire for matching tools. PreToolUse without this would run
+#: on every Read and Grep - a needless round trip before each one, and a gate on
+#: exploration, which must always stay free.
+HOOK_MATCHERS = {
+    "PreToolUse": "Edit|Write|NotebookEdit",
 }
 
 #: Where the source repo lives. The installed hooks run from
@@ -222,14 +234,24 @@ def claude_settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
-def _add_hook(settings_obj: dict, event: str, command: str) -> bool:
+def _add_hook(
+    settings_obj: dict, event: str, command: str, matcher: str | None = None,
+) -> bool:
     hooks = settings_obj.setdefault("hooks", {})
     groups = hooks.setdefault(event, [])
     for group in groups:
         for hook in group.get("hooks", []):
             if hook.get("command") == command:
+                # Already installed - but an older install may predate the
+                # matcher, and PreToolUse without one runs on every tool call.
+                if matcher and group.get("matcher") != matcher:
+                    group["matcher"] = matcher
+                    return True
                 return False
-    groups.append({"hooks": [{"type": "command", "command": command}]})
+    group: dict = {"hooks": [{"type": "command", "command": command}]}
+    if matcher:
+        group["matcher"] = matcher
+    groups.append(group)
     return True
 
 
@@ -288,7 +310,9 @@ def setup_hooks(remote_url: str | None = None, token: str | None = None) -> None
             command = (
                 f"{env_prefix}{shlex.quote(str(dst))}" if env_prefix else str(dst)
             )
-            if _add_hook(settings_obj, event, command):
+            if _add_hook(
+                settings_obj, event, command, HOOK_MATCHERS.get(event),
+            ):
                 added += 1
 
     # Record the source repo so the installed hooks can find it. They live in

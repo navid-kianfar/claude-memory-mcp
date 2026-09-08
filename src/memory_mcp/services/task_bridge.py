@@ -44,6 +44,7 @@ that is still an open decision. `import_all` is the explicit path that does
 overwrite title and state.
 """
 
+import contextlib
 import logging
 import threading
 
@@ -295,6 +296,56 @@ class TaskBridge:
             **self._backfill_offer(slug, backfill),
         }
 
+    def refresh_state_map(self, slug: str, link: dict | None = None,
+                          container: Container | None = None) -> dict:
+        """Re-read a board's columns into that link's state -> column map.
+
+        The map is built ONCE at bootstrap and was never refreshed, so a column
+        added or renamed afterwards stayed invisible: `_apply_state` looked up
+        the state, found no target list, and left the card where it was.
+        Concretely, a Cancelled column added on 2026-09-05 never received a
+        cancelled task, because the map still held only todo/in_progress/done.
+
+        Renaming is the nastier half - the map keeps a list id whose title has
+        changed, so cards move to a column that no longer means what it did and
+        nothing looks wrong anywhere.
+
+        `container` is taken when the caller already has one, so refreshing
+        costs nothing where the board was fetched anyway. NOT called from
+        `_flush_row`: that runs per mutation, and a fetch there would turn every
+        task edit into two round trips.
+        """
+        link = link or get_default_project_link(slug)
+        if link is None:
+            raise ProviderError(f"'{slug}' is not linked to a board")
+        provider = self.provider_for(link)
+        if container is None:
+            container = provider.fetch_container(link["remote_work_package_id"])
+        state_map, default_list = build_state_list_map(container)
+        before = link.get("state_list_map") or {}
+        if state_map == before:
+            return {"changed": False, "state_list_map": before}
+        endpoints = get_endpoints()
+        upsert_project_link(
+            slug,
+            base_url=link.get("base_url") or endpoints.api_url,
+            socket_url=link.get("socket_url"),
+            remote_project_id=link["remote_project_id"],
+            remote_work_package_id=link["remote_work_package_id"],
+            label=link.get("label"),
+            default_list_id=link.get("default_list_id") or default_list,
+            default_assignee_id=link.get("default_assignee_id"),
+            state_list_map=state_map,
+            provider=link.get("provider") or "asoode",
+            is_default=bool(link.get("is_default", True)),
+        )
+        return {
+            "changed": True,
+            "state_list_map": state_map,
+            "added": sorted(set(state_map) - set(before)),
+            "removed": sorted(set(before) - set(state_map)),
+        }
+
     def column_plan(self, slug: str) -> list[dict]:
         """What ensure_board_columns WOULD do, changing nothing.
 
@@ -361,6 +412,10 @@ class TaskBridge:
                 before = provider.fetch_container(link["remote_work_package_id"])
                 after = self._ensure_columns(provider, before)
                 relabelled = self._ensure_role_labels(provider, after.id)
+                # A column we just created is precisely the staleness the
+                # refresh exists for: without it the new Cancelled column
+                # would sit there, correct and unused.
+                remapped = self.refresh_state_map(slug, link, after)
             except Exception as e:  # noqa: BLE001 - a board that is gone or
                 # unreachable is reported, never fatal to the rest.
                 boards.append({"board": name, "error": str(e)})
@@ -380,6 +435,8 @@ class TaskBridge:
                     {"title": r["title"], "from": r["from"], "to": r["to"]}
                     for r in relabelled
                 ],
+                "state_map_refreshed": remapped["changed"],
+                "state_list_map": remapped["state_list_map"],
             })
         return {"boards": boards}
 
@@ -830,9 +887,21 @@ class TaskBridge:
         self._remember(slug, task.id, link["id"], remote_id, task.state.value)
 
     def _flush_delete(self, slug: str, payload: dict) -> bool:
-        """A task deleted locally: archive its card(s). asoode has no delete
-        route, and a card that stays live for a task nobody has is the shape
-        that re-imports itself."""
+        """A task deleted locally: close its card(s), then archive them.
+
+        asoode has no delete route, and a card that stays live for a task
+        nobody has is the shape that re-imports itself.
+
+        THE STATE MATTERS TOO, and used to be skipped. Archiving alone left the
+        card at whatever state it held, so every task deleted while todo or
+        in_progress became an archived card stuck claiming it was still waiting
+        to be worked. An audit on 2026-09-08 found 22 of them on this project's
+        board - all the scratch cards verification runs had created and removed.
+
+        `cancelled`, not `done`: the task was deleted, not completed. Marking
+        them done would make the board's counts tidy by putting something untrue
+        in the record, which is worse than the stuck state it replaces.
+        """
         remotes = payload.get("remote") or {}
         if not remotes:
             return False
@@ -846,6 +915,13 @@ class TaskBridge:
             if not provider.capabilities.supports_archive:
                 continue
             self.echo.note(remote_id)
+            # State first: archiving may take the card out of reach of a later
+            # state write, and a half-applied close is what stranded the 22.
+            # Best-effort - a provider that refuses the state must still get
+            # the archive, which is the half that stops the re-import.
+            if TaskState.CANCELLED.value in (provider.capabilities.states or ()):
+                with contextlib.suppress(Exception):
+                    provider.set_state(remote_id, TaskState.CANCELLED.value)
             provider.archive(remote_id, True)
             sent = True
         return sent
@@ -874,6 +950,12 @@ class TaskBridge:
         container = self.provider_for(link).fetch_container(
             link["remote_work_package_id"], with_tasks=True,
         )
+        # The columns came back with the tasks, so keeping the state -> column
+        # map current is free here. reconcile runs on every socket event and
+        # after every mirror, which makes this the path that notices a column
+        # somebody added or renamed in asoode by hand.
+        with contextlib.suppress(Exception):
+            self.refresh_state_map(slug, link, container)
         with self._tasks.suppress_mirroring():
             return self._import_rows(slug, link, container, limit, update_existing)
 

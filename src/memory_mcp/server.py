@@ -438,7 +438,12 @@ def memory_asoode_columns(project: str | None = None, apply: bool = False) -> di
         slug = _resolve(project)
         if not apply:
             return {"slug": slug, "planned": container.task_bridge.column_plan(slug)}
-        return {"slug": slug, **container.task_bridge.ensure_board_columns(slug)}
+        answer = {"slug": slug, **container.task_bridge.ensure_board_columns(slug)}
+        # Re-reading the columns is also how a board someone edited BY HAND gets
+        # its state -> column map back in step, so do it even when we changed
+        # nothing ourselves.
+        answer["state_map"] = container.task_bridge.refresh_state_map(slug)
+        return answer
     return _safe(_run)
 
 

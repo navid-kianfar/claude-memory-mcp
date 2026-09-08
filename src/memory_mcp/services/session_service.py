@@ -155,7 +155,21 @@ class SessionService:
                 return base
         except Exception:  # noqa: BLE001 - a config read must not break session start
             return base
-        return (base or "") + unbound_hint(project)
+        # The boards the credential can already see, so the ask can be answered
+        # by NAME instead of sending the user off to look up an id - which is
+        # how an offer quietly turns back into a note nobody acts on.
+        #
+        # Best-effort and time-boxed: this is a network call on the path that
+        # opens a session. An asoode that is slow, down or refusing the PAT
+        # falls back to the create-one-for-this-project ask, which is still a
+        # real question. Session start must never wait on a board.
+        boards: list = []
+        if self._task_bridge is not None:
+            try:
+                boards = self._task_bridge.boards() or []
+            except Exception:  # noqa: BLE001 - unreachable/revoked/slow: still ask
+                boards = []
+        return (base or "") + unbound_hint(project, boards)
 
     def end(
         self,

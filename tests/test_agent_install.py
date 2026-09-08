@@ -8,6 +8,8 @@ installer never created. The manifest is what separates the two.
 
 import json
 
+import re
+
 import pytest
 
 from memory_mcp import setup as setup_mod
@@ -187,7 +189,10 @@ class TestShippedAgentDefinitions:
     REQUIRED = {
         "pm", "backend", "frontend", "designer",
         "test", "reviewer", "devops", "docs",
-        "dotnet", "nodejs", "react", "app",
+        # extend backend
+        "dotnet", "nodejs", "python", "go", "rust", "kotlin",
+        # extend frontend
+        "react", "app",
     }
 
     @staticmethod
@@ -207,7 +212,7 @@ class TestShippedAgentDefinitions:
             found[stem] = parsed
         return found
 
-    def test_the_team_is_all_twelve_agents(self):
+    def test_the_team_is_the_whole_roster(self):
         assert set(self._definitions()) == self.REQUIRED
 
     def test_the_shared_base_is_not_installed_on_its_own(self):
@@ -282,6 +287,7 @@ class TestShippedAgentDefinitions:
             "backend": "xhigh", "frontend": "xhigh", "devops": "xhigh",
             "docs": "high",
             "dotnet": "xhigh", "nodejs": "xhigh", "react": "xhigh", "app": "xhigh",
+            "python": "xhigh", "go": "xhigh", "rust": "xhigh", "kotlin": "xhigh",
         }
         for stem, (front, _) in self._definitions().items():
             effort = front.get("effort")
@@ -490,3 +496,133 @@ class TestLeadBrief:
         monkeypatch.setattr(enforcement, "AGENT_TEAM_DIR", tmp_path / "none")
         assert enforcement.agent_team_line() == ""
         assert enforcement.agent_team_intro() == ""
+
+
+class TestTheLanguageExperts:
+    """The four added on 2026-09-08, where the user delegated the stack choice.
+
+    "im not proficieent in these agents so YOU, determine the frameworks and
+    skills they have to have" - so each one has to carry its opinion explicitly,
+    or the next session re-decides it and the point is lost.
+    """
+
+    STACKS = {
+        "python": ("FastAPI", "uv", "ruff", "mypy"),
+        "go": ("net/http", "sqlc", "internal/", "context"),
+        "rust": ("tokio", "axum", "thiserror", "clippy"),
+        "kotlin": ("Ktor", "coroutines", "Flyway", "Gradle"),
+    }
+
+    @staticmethod
+    def _body(stem):
+        return TestShippedAgentDefinitions._definitions()[stem][1]
+
+    def test_each_names_the_stack_it_will_not_argue_about(self):
+        # Case-insensitive: prose capitalises at the start of a sentence, and
+        # what matters is that the choice is stated, not how it is cased.
+        for stem, needles in self.STACKS.items():
+            body = self._body(stem).lower()
+            for needle in needles:
+                assert needle.lower() in body, f"{stem}.md never mentions {needle}"
+
+    def test_each_extends_backend(self):
+        for stem in self.STACKS:
+            front = TestShippedAgentDefinitions._definitions()[stem][0]
+            assert front["name"] == stem
+
+    def test_kotlin_and_app_say_they_are_different_agents(self):
+        """A brief sent to the wrong one wastes a whole dispatch before anyone
+        notices, so both have to disown the other's territory in writing."""
+        kotlin = self._body("kotlin")
+        assert "app" in kotlin and "mobile" in kotlin.lower()
+        assert "server" in kotlin.lower()
+
+    def test_each_refuses_to_hallucinate_a_version(self):
+        """Every expert carries this; a new one that forgot it would invent
+        crate features and decorator names with total confidence."""
+        for stem in self.STACKS:
+            assert "unverified" in self._body(stem).lower(), (
+                f"{stem}.md has no currency-without-hallucination clause"
+            )
+
+    def test_the_four_have_their_own_fixed_label_colours(self):
+        from memory_mcp.providers.asoode import (
+            LABEL_PALETTE, ROLE_COLORS, role_color,
+        )
+
+        for stem in self.STACKS:
+            assert stem in ROLE_COLORS, f"{stem} falls back to the md5 colour"
+            assert role_color(stem) in LABEL_PALETTE
+        assert role_color("kotlin") != role_color("app"), (
+            "the two Kotlin agents must be tellable apart on the board"
+        )
+        assert len(set(ROLE_COLORS.values())) == len(ROLE_COLORS)
+
+
+class TestEveryAgentMeetsTheStandard:
+    """The three sections that separate a formidable agent from a job title.
+
+    Asked for by the user on 2026-09-08, after the four language experts were
+    written to a higher bar than the eight roles: "the new 4 agents you created
+    are better documented... we must incrementally extend the md files so we
+    have warrior agents."
+
+    Asserted rather than agreed, because a standard that lives only in whichever
+    files happen to follow it decays the moment someone adds a seventeenth
+    agent - which is the same lesson as the PreToolUse gate: an invariant needs
+    a mechanism, not a good intention.
+    """
+
+    SECTIONS = {
+        "Non-negotiables": (
+            "the opinions the agent will not re-litigate per task. Without them "
+            "every dispatch re-derives the same decision, differently."
+        ),
+        "Currency without hallucination": (
+            "read the target's own versions first, name the release a feature "
+            "arrived in, mark unverified what cannot be confirmed. This is what "
+            "stops an agent inventing a flag or a config key with confidence."
+        ),
+        "What you produce": (
+            "exactly what the output contains, so the next agent can build from "
+            "it without a second dispatch (~60k tokens)."
+        ),
+    }
+
+    @staticmethod
+    def _composed():
+        # The COMPOSED body: _base + role + expert. A section inherited from a
+        # parent counts, so a role file need not repeat what its experts say.
+        return TestShippedAgentDefinitions._definitions()
+
+    @pytest.mark.parametrize("section", sorted(SECTIONS))
+    def test_every_definition_carries_the_section(self, section):
+        missing = [
+            stem for stem, (_, body) in self._composed().items()
+            if not re.search(rf"^#+\s+{re.escape(section)}", body, re.M)
+        ]
+        assert not missing, (
+            f"{sorted(missing)} lack a '{section}' section - {self.SECTIONS[section]}"
+        )
+
+    def test_the_currency_clause_actually_says_unverified(self):
+        """The word is the load-bearing part: it is the escape hatch that lets an
+        agent answer without inventing something."""
+        for stem, (_, body) in self._composed().items():
+            assert "unverified" in body.lower(), (
+                f"{stem}.md has the heading but never tells the agent to mark "
+                "anything unverified"
+            )
+
+    def test_no_role_file_restates_the_base_contract(self):
+        """_base.md owns the memory/task/board contract. A role file repeating it
+        is drift waiting to happen - two copies that will disagree."""
+        base = (setup_mod.AGENTS_DIR / "_base.md").read_text(encoding="utf-8")
+        marker = "You have no transcript; you have a brief."
+        assert marker in base, "the base contract moved; update this test"
+        for path in setup_mod.AGENTS_DIR.glob("*.md"):
+            if path.name.startswith("_") or path.name == "README.md":
+                continue
+            assert marker not in path.read_text(encoding="utf-8"), (
+                f"{path.name} restates _base.md instead of inheriting it"
+            )

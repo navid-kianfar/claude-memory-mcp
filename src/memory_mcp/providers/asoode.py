@@ -122,6 +122,13 @@ ROLE_COLORS: dict[str, str] = {
     "reviewer": "#673ab7",  # deep purple
     "test": "#cddc39",      # lime
     "pm": "#3f51b5",        # indigo, the lead
+    # The four language experts added 2026-09-08. Explicit entries rather than
+    # the md5 fallback: that fallback is stable, but arbitrary, and the user
+    # asked for a convention a person can read off the board.
+    "python": "#ffc107",    # amber, Python's yellow
+    "go": "#03a9f4",        # light blue, the gopher
+    "rust": "#ff5722",      # deep orange, Rust's brand
+    "kotlin": "#009688",    # teal - NOT app's purple; they are different agents
 }
 
 

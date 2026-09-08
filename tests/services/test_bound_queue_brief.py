@@ -162,16 +162,42 @@ class TestDiscoverability:
         # the credential rule has to travel with it, or a session will ask in chat
         assert "stays in the transcript" in SERVER_INSTRUCTIONS
 
-    def test_an_unbound_project_is_told_binding_is_possible(self, project, monkeypatch):
+    def test_an_unbound_project_is_ASKED_where_to_bind(self, project, monkeypatch):
+        """A note gets skimmed past. The user asked for a question."""
         monkeypatch.setattr("memory_mcp.asoode.get_pat", lambda *a, **k: "asoode_pat_x")
         ctx = _service(project, bind=False).start(project)
-        assert "NOT bound to an asoode board" in ctx.task_instructions
+        assert "NOT BOUND TO AN ASOODE BOARD" in ctx.task_instructions
+        assert "ASK THEM" in ctx.task_instructions
         assert f"memory_asoode_link(project='{project}')" in ctx.task_instructions
+
+    def test_the_ask_offers_boards_that_already_exist(self, project, monkeypatch):
+        """So the choice can be made by NAME, without going to look up an id."""
+        monkeypatch.setattr("memory_mcp.asoode.get_pat", lambda *a, **k: "asoode_pat_x")
+        service = _service(project, bind=False)
+        service._task_bridge.boards = lambda *a, **k: [
+            {"id": "wp-1", "title": "Acha Web", "project_title": "AchaSoft"},
+        ]
+        ctx = service.start(project)
+        assert "Acha Web" in ctx.task_instructions
+        assert "memory_asoode_attach" in ctx.task_instructions
+
+    def test_an_unreachable_asoode_still_asks(self, project, monkeypatch):
+        """A dead board lookup must not turn the question back into silence."""
+        monkeypatch.setattr("memory_mcp.asoode.get_pat", lambda *a, **k: "asoode_pat_x")
+        service = _service(project, bind=False)
+
+        def boom(*a, **k):
+            raise RuntimeError("asoode unreachable")
+
+        service._task_bridge.boards = boom
+        ctx = service.start(project)
+        assert "ASK THEM" in ctx.task_instructions
+        assert "create one for this project" in ctx.task_instructions
 
     def test_but_never_binds_on_its_own(self, project, monkeypatch):
         monkeypatch.setattr("memory_mcp.asoode.get_pat", lambda *a, **k: "asoode_pat_x")
         ctx = _service(project, bind=False).start(project)
-        assert "Do NOT bind on your own" in ctx.task_instructions
+        assert "DO NOT CHOOSE FOR THEM" in ctx.task_instructions
         assert ctx.asoode is None
 
     def test_no_pat_means_no_asoode_noise(self, project, monkeypatch):

@@ -99,7 +99,14 @@ _BOUND_STEPS = (
     "memory_task_add(title, description=..., source='claude'). Give it a "
     "description that states the requirement in full - a bare title loses the "
     "implementation detail the list exists to keep.",
-    "8. THIS BRIEF BINDS THE LEAD SESSION - the one talking to the user. If you "
+    "8. WHEN THE WORK IS DONE, the final report to the user NAMES THE TASKS. "
+    "One line each: title, the state it ended in, and the minutes recorded - "
+    "plus the board link once. A task left blocked or paused is named as such "
+    "and says what it is waiting on; leaving it out is the failure this step "
+    "exists to prevent, because a silent queue is indistinguishable from a "
+    "broken one. Report tasks you CREATED but did not start too, so the user "
+    "sees what is now queued for later.",
+    "9. THIS BRIEF BINDS THE LEAD SESSION - the one talking to the user. If you "
     "are a DISPATCHED SUBAGENT, work only the task you were briefed on: take "
     "another solely through memory_task_claim_next(session_id, role) when you "
     "are idle and your brief allows it, and if you are verifying or reviewing "
@@ -141,22 +148,62 @@ def unreachable_brief(project: str, error: str) -> str:
     return _UNREACHABLE.format(project=project, error=error)
 
 
-_UNBOUND_HINT = (
-    "\n\nThis project is NOT bound to an asoode board, and an asoode PAT is "
-    "configured on this machine - so memory_asoode_link(project='{project}') "
-    "would create a board and mirror this queue onto it, making the work visible "
-    "outside this session. Offer that if the user asks about asoode or about "
-    "getting the queue out of the terminal. Do NOT bind on your own: linking is "
-    "always an explicit choice, so a private project cannot end up on a server "
-    "the user did not pick."
+_UNBOUND_ASK = (
+    "\n\nTHIS PROJECT IS NOT BOUND TO AN ASOODE BOARD, and a PAT is configured "
+    "on this machine - so the queue can be mirrored where the user can see it "
+    "outside this terminal. ASK THEM, in your next reply, before doing the "
+    "work: which board should '{project}' use?"
+)
+
+_UNBOUND_ASK_TAIL = (
+    "\nWhichever they pick, it is stored once and every later session starts "
+    "bound and says nothing about this again.\n"
+    "DO NOT CHOOSE FOR THEM. Binding writes real cards to a real board, and a "
+    "guess puts a private project on a server nobody picked - ask, then call "
+    "the tool. If they decline, carry on with the local queue and do not raise "
+    "it again this session."
+)
+
+_UNBOUND_NO_BOARDS = (
+    "\nNo existing boards were readable, so the offer is simply: create one "
+    "for this project?\n"
+    "  create -> memory_asoode_link(project='{project}')"
 )
 
 
-def unbound_hint(project: str) -> str:
-    """Told to unbound projects when a PAT exists, so binding is discoverable.
+def unbound_hint(project: str, boards: list | None = None) -> str:
+    """ASK an unbound project's session where to bind, when a PAT exists.
 
-    Without this a new project's session has the asoode tools available and no
-    idea they apply to it - which is exactly how the feature went unnoticed on a
-    second project.
+    It used to say only that binding was possible and to "offer that if the
+    user asks about asoode" - a note a session skims past, so nothing happened
+    and the next session started from exactly the same place. The user asked
+    for a question instead: check for the integration at session start, and if
+    it is missing, ask where to bind or where to create.
+
+    `boards` is what the credential can already see, so the choice can be made
+    BY NAME. Without them the ask is real but unanswerable without a lookup
+    first, which is how an offer turns back into a note.
+
+    Never binds anything: a wrong guess writes cards to somebody else's board,
+    which is the failure the never-cross-link-projects rule exists to prevent.
     """
-    return _UNBOUND_HINT.format(project=project)
+    lines = [_UNBOUND_ASK.format(project=project)]
+    if boards:
+        lines.append("\nBoards this credential can already see:")
+        for board in boards[:12]:
+            title = board.get("title") or "(untitled)"
+            space = board.get("project_title") or ""
+            where = f" - in {space}" if space else ""
+            lines.append(f"  - {title}{where}   [{board.get('id')}]")
+        if len(boards) > 12:
+            lines.append(f"  ... and {len(boards) - 12} more")
+        lines.append(
+            "\n  use one of these -> memory_asoode_attach(project='"
+            + project + "', work_package_id='<id from above>')"
+            "\n  or a new board   -> memory_asoode_link(project='"
+            + project + "')"
+        )
+    else:
+        lines.append(_UNBOUND_NO_BOARDS.format(project=project))
+    lines.append(_UNBOUND_ASK_TAIL)
+    return "\n".join(lines)

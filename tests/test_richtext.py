@@ -216,3 +216,32 @@ class TestHelpers:
         assert not looks_like_html("plain text")
         assert not looks_like_html("2 < 3 and 4 > 1")
         assert not looks_like_html("")
+
+
+class TestParserHygiene:
+    """The subclass shares an instance namespace with `HTMLParser`.
+
+    CPython 3.12.14 / 3.13 / 3.14 added a feed buffer to `HTMLParser.reset()`
+    as `self._pending = []`. `_MarkdownWriter` had a method of that name, and
+    an instance attribute shadows a method — so `self._pending()` raised
+    `TypeError: 'list' object is not callable` on any current interpreter,
+    while a venv pinned to an older patch release stayed green. CI caught it
+    and local runs did not.
+
+    This asserts the general property rather than the one name, so the next
+    private attribute the stdlib adds fails here instead of in production.
+    """
+
+    def test_no_method_is_shadowed_by_htmlparser(self):
+        from memory_mcp.utils.richtext import _MarkdownWriter
+
+        writer = _MarkdownWriter()
+        shadowed = [
+            name
+            for name, value in vars(_MarkdownWriter).items()
+            if callable(value) and not callable(getattr(writer, name))
+        ]
+        assert not shadowed, (
+            f"HTMLParser sets instance attributes that shadow these methods: "
+            f"{shadowed}. Rename them."
+        )

@@ -36,8 +36,13 @@ from memory_mcp.utils.extraction import estimate_tokens
 # genuinely cannot tell "always deploy on Friday" from "never deploy on Friday".
 # Every pair goes through the polarity check below before it is called a
 # duplicate.
-#: Distance under which two memories are worth showing side by side.
-OVERLAP_DISTANCE = 0.40
+#: Distance under which two memories are worth showing side by side. Raised from
+#: 0.40 after a verification pass measured two genuinely overlapping deploy-window
+#: rules at 0.4014 and got no signal at all: the pairs between 0.40 and 0.50 are
+#: exactly the case the feature exists for. The cost of a wide net here is one
+#: more candidate for the agent to read and dismiss; the cost of a narrow one is
+#: the overlap staying in force.
+OVERLAP_DISTANCE = 0.50
 #: Distance under which two memories are near-certainly the same statement.
 DUPLICATE_DISTANCE = 0.10
 
@@ -210,9 +215,19 @@ def _polarity_conflict(left: Memory, right: Memory) -> str | None:
     Still a candidate, never a verdict: it cannot tell a contradiction from a
     rule and its exception, so both texts go to the agent.
     """
-    flips = clause_coverage(
-        [left.content], f"{right.title}\n{right.content}"
-    )["polarity_changed"]
+    # Only the ALIGNED flips - entries carrying `became`. The other kind of
+    # polarity finding clause_coverage reports is "this clause's negation is
+    # nowhere in the replacement", which is right for a merge (where the
+    # replacement must carry everything) and wrong here: two independent
+    # memories, one of which simply says more, are not contradicting. Reporting
+    # those made an extra prohibition in one rule look like a contradiction with
+    # the other, which is the false positive that buried the real ones.
+    flips = [
+        flip for flip in clause_coverage(
+            [left.content], f"{right.title}\n{right.content}", body=right.content,
+        )["polarity_changed"]
+        if flip.get("became")
+    ]
     if not flips:
         return None
     pairs = "; ".join(f"{f['clause']!r} vs {f['became']!r}" for f in flips[:2])

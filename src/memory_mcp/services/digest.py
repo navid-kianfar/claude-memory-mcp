@@ -260,6 +260,11 @@ class DigestService:
         the caller is an agent that has to fix it without seeing this code.
         """
         where = f"operation {index + 1}"
+        if not isinstance(raw, dict):
+            raise DigestError(
+                f"{where} is a {type(raw).__name__}, not an object. Each operation is "
+                "a dict: {'op': ..., 'memory_ids': [...], 'reason': ...}"
+            )
         kind = self._op_kind(raw.get("op"), where)
         reason = (raw.get("reason") or "").strip()
         if not reason:
@@ -268,7 +273,13 @@ class DigestService:
                 "it is what the user reads when deciding whether to approve it."
             )
 
-        memory_ids = [str(i) for i in (raw.get("memory_ids") or []) if str(i).strip()]
+        raw_ids = raw.get("memory_ids") or []
+        if isinstance(raw_ids, str):
+            raise DigestError(
+                f"{where} ({kind.value}): memory_ids is a string. Pass a list, even "
+                f"for one memory: ['{raw_ids}']"
+            )
+        memory_ids = [str(i) for i in raw_ids if str(i).strip()]
         if not memory_ids:
             raise DigestError(f"{where} ({kind.value}) names no memory_ids")
         missing = [i for i in memory_ids if i not in corpus]
@@ -299,7 +310,9 @@ class DigestService:
         }
         if kind in TEXT_OPERATIONS:
             payload["coverage"] = clause_coverage(
-                [m.content for m in sources], self._replacement_text(kind, payload),
+                [m.content for m in sources],
+                self._replacement_text(kind, payload),
+                body=self._replacement_body(kind, payload),
             )
         return {
             "id": str(uuid.uuid4()), "op": kind.value, "memory_ids": memory_ids,
@@ -316,6 +329,15 @@ class DigestService:
                 f"{where}: unknown op {value!r}. Allowed: {allowed}. There is no "
                 "delete - a digest archives, so nothing it touches is unrecoverable."
             ) from None
+
+    @staticmethod
+    def _replacement_body(kind: DigestOperation, payload: dict) -> str:
+        """The new text without its title - see clause_coverage's `body`."""
+        if kind is DigestOperation.SPLIT:
+            return "\n".join(
+                part.get("content", "") for part in payload.get("parts", [])
+            )
+        return payload.get("content", "")
 
     @staticmethod
     def _replacement_text(kind: DigestOperation, payload: dict) -> str:
@@ -389,10 +411,20 @@ class DigestService:
 
     def _prepare_split(self, raw, payload, memory_ids, target_id, corpus, where):
         parts = raw.get("parts") or []
+        if isinstance(parts, (str, dict)) or not isinstance(parts, (list, tuple)):
+            raise DigestError(
+                f"{where} (split): `parts` must be a list of "
+                "{title, content} objects"
+            )
         if len(parts) < 2:
             raise DigestError(f"{where} (split) needs at least two `parts`")
         cleaned = []
         for position, part in enumerate(parts):
+            if not isinstance(part, dict):
+                raise DigestError(
+                    f"{where} (split): part {position + 1} is a "
+                    f"{type(part).__name__}, not an object with title and content"
+                )
             title = (part.get("title") or "").strip()
             content = (part.get("content") or "").strip()
             if not title or not content:
@@ -403,7 +435,7 @@ class DigestService:
             if part.get("category"):
                 entry["category"] = self._category(part["category"], where).value
             if part.get("tags") is not None:
-                entry["tags"] = [str(t) for t in part["tags"]]
+                entry["tags"] = self._tag_list(part["tags"], where)
             if part.get("priority") is not None:
                 entry["priority"] = self._priority(part["priority"], where)
             cleaned.append(entry)
@@ -438,13 +470,14 @@ class DigestService:
             payload["coverage"] = clause_coverage(
                 [current.content],
                 f"{payload.get('title', current.title)}\n{payload['content']}",
+                body=payload["content"],
             )
         return memory_ids[0]
 
     def _prepare_retag(self, raw, payload, memory_ids, target_id, corpus, where):
         if raw.get("tags") is None:
             raise DigestError(f"{where} (retag) needs `tags`")
-        payload["tags"] = [str(t) for t in raw["tags"]]
+        payload["tags"] = self._tag_list(raw["tags"], where)
         return memory_ids[0]
 
     def _prepare_reprioritize(self, raw, payload, memory_ids, target_id, corpus, where):
@@ -474,7 +507,7 @@ class DigestService:
 
     def _optional_fields(self, raw: dict, payload: dict, where: str) -> None:
         if raw.get("tags") is not None:
-            payload["tags"] = [str(t) for t in raw["tags"]]
+            payload["tags"] = self._tag_list(raw["tags"], where)
         if raw.get("priority") is not None:
             payload["priority"] = self._priority(raw["priority"], where)
         if raw.get("category"):
@@ -487,6 +520,24 @@ class DigestService:
         except ValueError:
             allowed = ", ".join(c.value for c in MemoryCategory)
             raise DigestError(f"{where}: unknown category {value!r}. Allowed: {allowed}") from None
+
+    @staticmethod
+    def _tag_list(value, where: str) -> list[str]:
+        """Tags as a list of strings, refusing the bare string.
+
+        `[str(t) for t in "legacy"]` is `['l','e','g','a','c','y']` - accepted
+        silently, and a retag carries no coverage report to catch it later. The
+        typed MCP schemas reject this for free; `operations` is a list of free-form
+        dicts and has to do it here.
+        """
+        if isinstance(value, str):
+            raise DigestError(
+                f"{where}: tags is a string. Pass a list, even for one tag: "
+                f"['{value}']"
+            )
+        if not isinstance(value, (list, tuple, set)):
+            raise DigestError(f"{where}: tags must be a list of strings")
+        return [str(t) for t in value]
 
     @staticmethod
     def _priority(value, where: str) -> int | None:
@@ -730,16 +781,17 @@ class DigestService:
                     continue
                 approved.add(op.id)
 
-        keeps = {
-            op.id for op in digest.ops
-            if op.op == DigestOperation.KEEP.value and op.id in approved
-        }
         if approved:
             self._digests.decide(project, sorted(approved), DigestDecision.APPROVED.value)
         if reject:
             self._digests.decide(project, reject, DigestDecision.REJECTED.value)
-        # A `keep` is approved and decided, but there is nothing to write.
-        return approved - keeps, blocked
+        # A `keep` goes through apply like any other op even though it writes no
+        # field: it records the decision in provenance, so the next digest can see
+        # that this signal was investigated and rejected rather than missed. It
+        # was excluded here at first, which meant a digest of nothing but keeps
+        # took the "nothing was approved" branch and stayed `proposed` forever,
+        # warning about itself on every later analysis.
+        return approved, blocked
 
     def _apply_op(self, project: str, digest_id: str, op: DigestOp) -> dict:
         """Write one operation, after saving what it overwrites."""

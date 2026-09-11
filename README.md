@@ -238,18 +238,35 @@ saves the row it overwrote first, so the undo restores the old text exactly
 rather than re-deriving it.
 
 **No clause disappears quietly.** "Unify these and write them better" is where a
-business rule actually gets lost — not by deletion, but by a tightened paragraph
-that stops saying one of the things it used to. So every `rewrite`, `merge` and
-`split` is checked clause by clause against its sources, and any clause the
-replacement does not account for comes back as `unmatched`, verbatim, for you to
-rule on. `approve_all` refuses those; they need approving by id.
+business rule actually gets lost — and mostly not by deletion. So every
+`rewrite`, `merge` and `split` is checked clause by clause against its sources,
+for the four different ways a rule goes missing:
 
-The same check watches polarity separately, because similarity cannot see it:
-*always deploy on Friday* and *never deploy on Friday* sit **0.05 apart** in
-embedding space, closer than two honest paraphrases of the same rule. A merge
-that inverts a clause is reported as `polarity_changed` and blocked, and a pair of
-memories that contradict each other is never offered as a duplicate — the agent
-is told to show you both and ask which one is current.
+| | what it catches |
+|---|---|
+| `unmatched` | a clause the replacement does not account for at all |
+| `altered` | a clause still there, but no longer making the same *kind* of statement — a threshold, a deadline, a quantifier, `must` downgraded to `should` |
+| `polarity_changed` | a clause that came back inverted, in either direction |
+| `added` | an obligation in the replacement that no source memory contains — a rule the digest wrote rather than you |
+
+Each comes back with the offending text verbatim. `approve_all` refuses all four;
+they need approving by op id.
+
+The `altered` check is the one that earns its keep, and it exists because a
+threshold cannot be caught by a similarity score. *"must come back in under 200ms
+at the 99th percentile, measured at the load balancer"* is sixteen significant
+words, so changing 200ms to 500ms still scores 75% word overlap. The number is one
+token however long the sentence is, so the words a rule turns on — figures,
+modals, `only`, `every`, deadlines — are checked one by one instead of averaged.
+They are compared as *classes*, not as exact words, so a merge may rewrite
+*always run the tests* as *run the tests before every commit* without being
+flagged, while `must` becoming `should` is.
+
+Polarity is watched separately because similarity is blind to it: *always deploy
+on Friday* and *never deploy on Friday* sit **0.05 apart** in embedding space,
+closer than two honest paraphrases of the same rule. A pair of memories that
+contradict each other is therefore never offered as a duplicate — the agent is
+told to show you both and ask which one is current.
 
 Nothing is applied without a per-operation decision, the whole apply is one
 transaction, and each write records provenance naming the digest that made it.

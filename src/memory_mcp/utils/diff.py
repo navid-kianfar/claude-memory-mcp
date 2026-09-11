@@ -50,13 +50,70 @@ _STEM_SUFFIXES = ("ingly", "edly", "ing", "ies", "ied", "es", "ed", "ly", "s")
 _NEGATION_WORDS = frozenset(
     """no not never nt cannot cant dont doesnt wont without avoid avoided
     forbidden prohibited refuse refused stop stopped exclude excluded skip
-    skipped unless neither nor none nobody nothing""".split()
+    skipped unless neither nor none nobody nothing exempt exempts exempted
+    waive waived bypass bypassed disabled""".split()
 )
 
+# Words that turn a rule into a preference or carve an exception out of it.
+# Their ARRIVAL is the loss: "never run a migration against production" and
+# "never run a migration against production, unless the on-call lead approves"
+# share every other word, so recall and the critical-token check both pass it.
+_WEAKENERS = frozenset(
+    """unless except optional may might could sometimes generally usually
+    typically normally possible preferably ideally recommended encouraged
+    discretion exception""".split()
+)
+
+# Words that ARE the rule rather than describing it. A clause's meaning turns on
+# these, so each is checked individually instead of being averaged into a recall
+# score - which is what made the first version of this guard useless.
+#
+# Measured failure it exists to catch: "must come back in under 200ms at the 99th
+# percentile, measured at the load balancer" is 16 significant words, so changing
+# 200ms to 500ms scores 12/16 = 0.75 recall and passed as clean. No threshold can
+# catch that, because the number is one token however long the sentence is.
+#
+# Checked BY CLASS, not by exact word, and that is the difference between a guard
+# that gets used and one that gets ignored. A faithful merge rewrites "always run
+# the tests before you commit" as "run the full test suite before every commit":
+# the word `always` is gone but its force is not, because `every` carries it. An
+# exact-token check flags that, the agent learns the guard is noise, and the real
+# losses go through with it. A number is the one thing still matched exactly -
+# 200ms and 500ms are not the same rule under any phrasing.
+_CRITICAL_CLASSES: dict[str, frozenset[str]] = {
+    # Strength of the obligation. Losing the whole class is must -> should.
+    "obligation": frozenset(
+        "must shall mandatory required require requires requiring need needs"
+        " always".split()
+    ),
+    # Permission and hedging. Losing it turns "may" into an instruction.
+    "permission": frozenset(
+        "may might could optional discretion allowed should recommended"
+        " preferably ideally encouraged".split()
+    ),
+    # Universality: does it apply to everything or to one thing.
+    "universal": frozenset(
+        "always every all each any whenever everyone everything".split()
+    ),
+    # Exclusivity: "deploy only from main" is a different rule from "deploy from
+    # main".
+    "exclusivity": frozenset("only exclusively solely alone".split()),
+    # Ordering and deadlines.
+    "temporal": frozenset(
+        "before after within until during prior since immediately first"
+        " last".split()
+    ),
+}
+
 #: Recall against a single replacement clause above which the two are treated as
-#: the same statement for the polarity check. Lower than COVERAGE_THRESHOLD on
-#: purpose: a flipped negation is worth catching even on a loose alignment.
-ALIGNMENT_THRESHOLD = 0.4
+#: the same statement, for the negation check. As strict as COVERAGE_THRESHOLD
+#: deliberately: a looser bar aligned unrelated clauses and reported honest
+#: merges as inversions, and a guard that cries wolf gets waved through.
+ALIGNMENT_THRESHOLD = 0.7
+
+#: Word support in the sources below which a replacement clause counts as NEW
+#: text rather than a rewording of something that was there.
+ADDED_THRESHOLD = 0.6
 
 #: A clause shorter than this carries no rule on its own ("See below.", "Why:").
 MIN_CLAUSE_WORDS = 3
@@ -105,6 +162,49 @@ def significant_words(text: str) -> set[str]:
 def is_negative(text: str) -> bool:
     """Whether a clause forbids rather than requires."""
     return bool(_NEGATION_WORDS & set(fingerprint(text).split()))
+
+
+def critical_tokens(text: str) -> set[str]:
+    """The words and numbers a clause's meaning turns on.
+
+    Never stemmed and never filtered as stopwords: `200ms` and `500ms` must stay
+    different, and `must` versus `should` is the whole difference between a rule
+    and a suggestion.
+    """
+    words = set(fingerprint(text).split())
+    critical = {word for word in words if any(ch.isdigit() for ch in word)}
+    for vocabulary in _CRITICAL_CLASSES.values():
+        critical |= words & vocabulary
+    return critical | (words & _NEGATION_WORDS)
+
+
+def critical_profile(text: str) -> dict:
+    """What a piece of text asserts, as classes plus exact figures.
+
+    Comparing two of these says whether a rewrite changed the KIND of statement
+    being made - its force, its scope, its exclusivity, its deadline, its
+    polarity - independently of the words chosen to make it.
+    """
+    words = set(fingerprint(text).split())
+    classes = {
+        name for name, vocabulary in _CRITICAL_CLASSES.items() if words & vocabulary
+    }
+    if words & _NEGATION_WORDS:
+        classes.add("negation")
+    return {
+        "classes": classes,
+        "numbers": {word for word in words if any(ch.isdigit() for ch in word)},
+        "words": words,
+    }
+
+
+def _class_words(profile: dict, names: set[str]) -> list[str]:
+    """The actual words in `profile` that put it in each of `names`."""
+    found: list[str] = []
+    for name in sorted(names):
+        vocabulary = _NEGATION_WORDS if name == "negation" else _CRITICAL_CLASSES[name]
+        found.extend(sorted(profile["words"] & vocabulary))
+    return found
 
 
 def split_clauses(text: str) -> list[str]:
@@ -156,28 +256,40 @@ def _split_fenced(text: str) -> list[str]:
     return parts
 
 
-def clause_coverage(sources: list[str], replacement: str) -> dict:
-    """Which clauses of `sources` survive into `replacement`, and which invert.
+def clause_coverage(
+    sources: list[str], replacement: str, body: str | None = None,
+) -> dict:
+    """What survives from `sources` into `replacement`, and what quietly changed.
 
-    Returns `covered`, `unmatched` (the clauses no part of the replacement
-    accounts for, verbatim), `polarity_changed` (clauses the replacement still
-    talks about but with the negation flipped) and `ratio`. Short clauses are
-    reported as `trivial` rather than as losses: "See below." carries no rule.
+    Four questions, because a rule can be lost in four different ways and only
+    the first one is visible in a diff as a removal:
 
-    A clause counts as covered when enough of its significant words appear
-    anywhere in the replacement. That is deliberately a recall test on words
-    rather than a similarity score on sentences: a merge is free to reorder,
-    retitle and compress, and the only question being asked is whether the
-    substance is still in there somewhere.
+    `unmatched`        a clause the replacement does not account for at all.
+                       Word recall answers this well.
+    `altered`          a clause still there, but with a word its meaning turned
+                       on now missing: a threshold, a deadline, a quantifier,
+                       `must` downgraded to `should`. Each of those is ONE token,
+                       so no recall threshold can ever see it - they are checked
+                       individually. This is the case that made the first version
+                       of this guard report `clean` on eleven rule-losing edits.
+    `polarity_changed` a clause that came back inverted, in either direction.
+    `added`            normative text in the replacement that no source supports -
+                       an obligation nobody wrote. Recall alone is blind to this,
+                       since it only ever measures the sources.
 
-    The polarity check is separate because it is the one thing recall cannot
-    see. "Always deploy on Friday" and "Never deploy on Friday" share every
-    content word, so a merge that inverts a rule scores 100% coverage. Each
-    source clause is therefore aligned with the replacement clause it most
-    resembles, and a flip between the two is reported as the loss it is.
+    `clean` is true only when all four are empty. Short clauses are reported as
+    `trivial` rather than as losses: "See below." carries no rule.
+
+    `replacement` is the whole new text, title included, because a statement the
+    author moved up into the title has not been lost. `body` is the new text
+    WITHOUT the title, and it is what the `added` and `weakened` scans read - a
+    new title is new text by definition, and scanning it flagged every retitled
+    merge as inventing a rule. Defaults to `replacement` when there is no title
+    to separate.
     """
     target_words = significant_words(replacement)
     target_norm = fingerprint(replacement)
+    target_profile = critical_profile(replacement)
     target_clauses = [
         (clause, significant_words(clause), is_negative(clause))
         for clause in split_clauses(replacement)
@@ -185,9 +297,12 @@ def clause_coverage(sources: list[str], replacement: str) -> dict:
     covered: list[str] = []
     unmatched: list[str] = []
     trivial: list[str] = []
+    altered: list[dict] = []
     flipped: list[dict] = []
+    source_words: set[str] = set()
 
     for source in sources:
+        source_words |= significant_words(source)
         for clause in split_clauses(source):
             words = significant_words(clause)
             if len(words) < MIN_CLAUSE_WORDS:
@@ -196,34 +311,149 @@ def clause_coverage(sources: list[str], replacement: str) -> dict:
 
             exact = fingerprint(clause) in target_norm
             recall = len(words & target_words) / len(words)
-            if exact or recall >= COVERAGE_THRESHOLD:
-                covered.append(clause)
-            else:
-                unmatched.append(clause)
+            is_covered = exact or recall >= COVERAGE_THRESHOLD
+            (covered if is_covered else unmatched).append(clause)
+
+            profile = critical_profile(clause)
+            lost_classes = _lost_classes(profile, target_profile)
+            lost_numbers = profile["numbers"] - target_profile["numbers"]
+            if is_covered and (lost_classes - {"negation"} or lost_numbers):
+                lost_words = _class_words(profile, lost_classes - {"negation"})
+                altered.append({
+                    "clause": clause,
+                    "missing": sorted(set(lost_words) | lost_numbers),
+                    "changed": sorted(lost_classes - {"negation"}),
+                    "why": (
+                        "the replacement still covers this clause, but it no longer "
+                        "makes the same KIND of statement - a threshold, a deadline, "
+                        "the scope, or the strength of the obligation has gone"
+                    ),
+                })
+            if "negation" in lost_classes:
+                flipped.append({
+                    "clause": clause,
+                    "missing": _class_words(profile, {"negation"}),
+                    "why": "the words that made this a prohibition are gone",
+                })
 
             aligned = _best_alignment(words, target_clauses)
             if aligned is not None and aligned[2] != is_negative(clause):
                 flipped.append({"clause": clause, "became": aligned[0]})
 
+    new_text = replacement if body is None else body
+    added = _added_clauses(
+        [(c, significant_words(c), is_negative(c)) for c in split_clauses(new_text)],
+        source_words,
+    )
+    weakened = _weakeners_added(sources, new_text)
     total = len(covered) + len(unmatched)
     return {
         "covered": covered,
         "unmatched": unmatched,
+        "altered": altered,
         "polarity_changed": flipped,
+        "added": added,
+        "weakened": weakened,
         "trivial": trivial,
         "ratio": round(len(covered) / total, 3) if total else 1.0,
-        "clean": not unmatched and not flipped,
+        "clean": not (unmatched or altered or flipped or added or weakened),
     }
 
 
+def _lost_classes(profile: dict, target: dict) -> set[str]:
+    """Which kinds of statement the replacement no longer makes.
+
+    One refinement, and it is what keeps this usable: a missing `obligation`
+    class counts only when the replacement hedges instead. "Every migration MUST
+    be reviewed" becoming "SHOULD be reviewed" is a downgrade and is reported.
+    The same clause rewritten as a plain imperative - "Review every migration
+    before it runs" - carries exactly as much force in a rule block and has no
+    modal at all, so flagging it would fire on most honest rewrites.
+    """
+    lost = profile["classes"] - target["classes"]
+    if "obligation" in lost:
+        hedged = "permission" in target["classes"] and "permission" not in profile["classes"]
+        if not hedged:
+            lost.discard("obligation")
+    return lost
+
+
+def _weakeners_added(sources: list[str], replacement: str) -> list[dict]:
+    """Exceptions and hedges the replacement introduced, and numbers it invented.
+
+    The other checks all ask what the sources had. This one asks what the
+    replacement gained, because a rule can be dismantled by addition: append
+    "unless the on-call lead approves" and every word of the original is still
+    there. Scoped to exception and permission words plus new numbers - a merge is
+    free to reword an obligation, so `must` arriving is not reported, but a
+    threshold nobody wrote is.
+    """
+    source_text = " ".join(sources)
+    source_all = set(fingerprint(source_text).split())
+    target_all = set(fingerprint(replacement).split())
+
+    new_hedges = sorted((_WEAKENERS & target_all) - source_all)
+    new_numbers = sorted(
+        word for word in target_all - source_all
+        if any(ch.isdigit() for ch in word)
+    )
+    findings: list[dict] = []
+    if new_hedges:
+        findings.append({
+            "words": new_hedges,
+            "why": (
+                "the replacement introduces an exception or a hedge that no source "
+                "contains - this weakens the rule without removing a single word "
+                "from it, which is why nothing else here can see it"
+            ),
+        })
+    if new_numbers:
+        findings.append({
+            "words": new_numbers,
+            "why": "these figures appear in the replacement and in no source memory",
+        })
+    return findings
+
+
 def _best_alignment(words: set[str], target_clauses: list[tuple]):
-    """The replacement clause a source clause most resembles, if any does."""
+    """The replacement clause a source clause most resembles, if any does.
+
+    Used only for the negation check, and held to ALIGNMENT_THRESHOLD: a looser
+    bar paired unrelated clauses and reported faithful merges as inversions.
+    """
     best, best_recall = None, 0.0
     for candidate in target_clauses:
         recall = len(words & candidate[1]) / len(words) if words else 0.0
         if recall > best_recall:
             best, best_recall = candidate, recall
     return best if best_recall >= ALIGNMENT_THRESHOLD else None
+
+
+def _added_clauses(target_clauses: list[tuple], source_words: set[str]) -> list[dict]:
+    """Normative clauses in the replacement that no source supports.
+
+    Coverage measures recall of the sources, so anything the replacement ADDS is
+    free by construction - an invented obligation appended to a rule scored a
+    perfect score. Only clauses that carry an obligation or a number are reported:
+    a merge is allowed to add a heading or a connective sentence, and flagging
+    those would bury the one that matters.
+    """
+    added: list[dict] = []
+    for clause, words, _negative in target_clauses:
+        if len(words) < MIN_CLAUSE_WORDS:
+            continue
+        support = len(words & source_words) / len(words)
+        if support >= ADDED_THRESHOLD or not critical_tokens(clause):
+            continue
+        added.append({
+            "clause": clause,
+            "support": round(support, 3),
+            "why": (
+                "this states an obligation that no source memory says - it would "
+                "be a NEW rule, written by the digest rather than by the user"
+            ),
+        })
+    return added
 
 
 def coverage_problems(coverage: dict | None) -> list[str]:
@@ -240,10 +470,31 @@ def coverage_problems(coverage: dict | None) -> list[str]:
             f"{len(coverage['unmatched'])} clause(s) of the original are not in "
             "the replacement"
         )
+    if coverage.get("altered"):
+        missing = sorted({
+            word for entry in coverage["altered"] for word in entry.get("missing", [])
+        })
+        problems.append(
+            f"{len(coverage['altered'])} clause(s) lost a word their meaning turned "
+            f"on ({', '.join(missing)})"
+        )
     if coverage.get("polarity_changed"):
         problems.append(
             f"{len(coverage['polarity_changed'])} clause(s) come back with the "
             "negation flipped - the rule would be inverted, not unified"
+        )
+    if coverage.get("weakened"):
+        words = sorted({
+            word for entry in coverage["weakened"] for word in entry.get("words", [])
+        })
+        problems.append(
+            "the replacement introduces wording no source has "
+            f"({', '.join(words)}) - an exception or figure the user never wrote"
+        )
+    if coverage.get("added"):
+        problems.append(
+            f"{len(coverage['added'])} clause(s) state an obligation no source "
+            "memory contains - the digest would be writing a new rule"
         )
     return problems
 

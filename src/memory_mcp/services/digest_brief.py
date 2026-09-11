@@ -59,12 +59,17 @@ _STEPS = (
 
     "4. NEVER LOSE A BUSINESS RULE. A merge or rewrite must carry every "
     "normative clause of every source into the replacement - the constraint, "
-    "the exception, the scope, the 'why', the numbers. `memory_digest_propose` "
-    "checks this clause by clause and returns any clause it cannot find in your "
-    "replacement as `unmatched`. Treat an unmatched clause as a bug in your "
-    "proposal: fold it back in and re-propose. Only when a clause is genuinely "
-    "obsolete may it be dropped, and then you must say so to the user in words, "
-    "quoting the clause, and let them decide.",
+    "the exception, the scope, the 'why', and above all the FIGURES: a "
+    "threshold, a deadline, a percentile, a count. `memory_digest_propose` "
+    "checks this clause by clause and reports four kinds of loss: `unmatched` (a "
+    "clause you dropped), `altered` (a clause that no longer makes the same kind "
+    "of statement - a number changed, a deadline softened, `must` become "
+    "`should`, `every` become one case, `only` dropped), `polarity_changed` (a "
+    "clause that came back inverted) and `added` (an obligation in your "
+    "replacement that no source says - do not write rules the user did not). "
+    "Treat every one of them as a bug in your proposal: fix it and re-propose. "
+    "Only when a clause is genuinely obsolete may it be dropped, and then you "
+    "must say so to the user in words, quoting the clause, and let them decide.",
 
     "5. When two memories contradict each other, do NOT pick a winner on your "
     "own - only the user knows which one is current. Propose nothing for that "
@@ -109,8 +114,11 @@ def digest_brief(
 #: Returned with a proposal that has unmatched clauses, so the warning travels
 #: with the diff rather than living only in this module.
 UNMATCHED_WARNING = (
-    "{count} operation(s) drop a clause that no part of the replacement "
-    "accounts for. Each one is listed with the dropped text verbatim under "
-    "`coverage.unmatched`. Either fold the clause back in and re-propose, or "
-    "quote it to the user and let them decide - approve_all will refuse these."
+    "{count} operation(s) would lose or change something the sources say. Each "
+    "one carries the offending text verbatim under `coverage` - `unmatched` for a "
+    "clause you dropped, `altered` for one whose threshold, deadline, scope or "
+    "obligation strength changed, `polarity_changed` for one that came back "
+    "inverted, `added` for an obligation no source contains. Fix the proposal and "
+    "re-propose, or quote the text to the user and let them decide - approve_all "
+    "will refuse all four."
 )

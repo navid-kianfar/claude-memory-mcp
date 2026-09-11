@@ -10,7 +10,7 @@ import pytest
 from memory_mcp.container import Container
 from memory_mcp.models import MemoryCategory, StoreMemoryRequest
 from memory_mcp.services.digest import DigestError
-from memory_mcp.utils.diff import clause_coverage, split_clauses
+from memory_mcp.utils.diff import clause_coverage, coverage_problems, split_clauses
 
 
 @pytest.fixture
@@ -106,6 +106,191 @@ class TestAnalyse:
         assert (after.title, after.content, after.status) == (memory.title, memory.content, "active")
 
 
+# Rule-losing edits a verification pass found passing as `clean` on the first
+# implementation, when the guard was recall-only. Each one keeps most of the
+# sentence and changes the part that IS the rule, which is why a threshold on
+# word recall can never see them: the number, the modal, the quantifier is one
+# token however long the clause is.
+SLO = (
+    "Every response from the search endpoint must come back in under 200ms at "
+    "the 99th percentile, measured at the load balancer rather than in the "
+    "application."
+)
+REVIEW = "Every schema migration must be reviewed by a second engineer before it runs."
+NEVER_PROD = "Never run a migration directly against production."
+EXEMPT = "The billing service is exempt from the shared rate limiter."
+WINDOW = "Deploy only from main, within the window that closes at 16:00."
+INCIDENT = "Page the on-call lead within 24 hours of any data-loss incident."
+
+LOSSES = [
+    ("a threshold is rewritten", [SLO], SLO.replace("200ms", "500ms")),
+    ("a threshold is deleted", [SLO],
+     "Every response from the search endpoint must come back quickly, measured "
+     "at the load balancer rather than in the application."),
+    ("a percentile is rewritten", [SLO], SLO.replace("99th", "50th")),
+    ("must becomes should", [REVIEW], REVIEW.replace("must", "should")),
+    ("an obligation nobody wrote is added", [REVIEW],
+     REVIEW + " A hotfix migration may be applied straight to production "
+     "without a pull request when the on-call lead agrees."),
+    ("a prohibition becomes a preference", [NEVER_PROD],
+     "Avoid running a migration directly against production where possible."),
+    ("a prohibition is inverted", [NEVER_PROD],
+     "Always run a migration directly against production."),
+    ("an exemption becomes an obligation", [EXEMPT],
+     EXEMPT.replace("exempt from", "subject to")),
+    ("a universal becomes a single case",
+     ["Every service must export a health endpoint."],
+     "The search service must export a health endpoint."),
+    ("a deadline is softened", [INCIDENT],
+     "Page the on-call lead promptly after any data-loss incident."),
+    ("an exclusivity is dropped", [WINDOW],
+     "Deploy from main, within the window that closes at 16:00."),
+    ("an exception is appended", [NEVER_PROD],
+     "Never run a migration directly against production, unless the on-call "
+     "lead approves."),
+    ("a whole clause is dropped",
+     [NEVER_PROD + " Migrations run through the pipeline."],
+     "Migrations run through the pipeline."),
+]
+
+# Rewrites that lose nothing. These matter as much as the losses: a guard that
+# fires on honest work is a guard the agent learns to wave through, and then the
+# real losses go with it.
+FAITHFUL = [
+    ("reordered", [REVIEW],
+     "A second engineer must review every schema migration before it runs."),
+    ("merged", [NEVER_PROD, "Migrations run through the deploy pipeline."],
+     "Never run a migration directly against production; migrations run through "
+     "the deploy pipeline."),
+    ("retitled and reordered", [SLO, "The load balancer is the measurement point."],
+     "Search latency\nEvery response from the search endpoint must come back in "
+     "under 200ms at the 99th percentile. The load balancer is the measurement "
+     "point, rather than the application."),
+    ("compressed, always carried by every",
+     ["Always run the tests before you commit.",
+      "Run the full test suite before every commit."],
+     "Committing\nRun the full test suite before every commit."),
+]
+
+
+class TestTheGuardCatchesRealLosses:
+    @pytest.mark.parametrize("name,sources,replacement", LOSSES,
+                             ids=[c[0] for c in LOSSES])
+    def test_a_losing_rewrite_is_never_clean(self, name, sources, replacement):
+        report = clause_coverage(sources, replacement)
+        assert not report["clean"], f"{name} passed as clean"
+        assert coverage_problems(report), f"{name} produced no problem to show"
+
+    @pytest.mark.parametrize("name,sources,replacement", FAITHFUL,
+                             ids=[c[0] for c in FAITHFUL])
+    def test_a_faithful_rewrite_stays_clean(self, name, sources, replacement):
+        report = clause_coverage(sources, replacement)
+        assert report["clean"], f"{name} was wrongly flagged: {coverage_problems(report)}"
+
+    def test_a_rewritten_threshold_names_the_number_in_the_report(self):
+        report = clause_coverage([SLO], SLO.replace("200ms", "500ms"))
+        assert "200ms" in report["altered"][0]["missing"]
+
+    def test_approve_all_refuses_a_rewrite_that_softens_a_threshold(
+        self, container, project
+    ):
+        rule = _store(container, project, "mandatory_rules", "Search latency", SLO,
+                      priority=2)
+        answer = container.digest_service.propose(project, [{
+            "op": "rewrite", "memory_ids": [rule.id],
+            "reason": "tighten the wording",
+            "title": "Search latency", "content": SLO.replace("200ms", "500ms"),
+        }])
+        assert answer["blocked"] == [answer["operations"][0]["op_id"]]
+        result = container.digest_service.apply(
+            project, answer["digest_id"], approve_all=True,
+        )
+        assert result["applied"] == 0
+        assert container.memory_repo.get_by_id(project, rule.id).content == SLO
+
+
+class TestMalformedOperations:
+    """The `operations` argument is free-form dicts, so it has no pydantic schema
+    to lean on the way memory_store does. Every shape has to be refused here."""
+
+    def test_a_bare_string_of_tags_is_refused(self, container, project):
+        memory = _store(container, project, tags=["build"])
+        with pytest.raises(DigestError, match="tags is a string"):
+            container.digest_service.propose(project, [{
+                "op": "retag", "memory_ids": [memory.id], "tags": "legacy",
+                "reason": "one tag",
+            }])
+        assert container.memory_repo.get_by_id(project, memory.id).tags == ["build"]
+
+    def test_a_bare_string_of_memory_ids_is_refused(self, container, project):
+        memory = _store(container, project)
+        with pytest.raises(DigestError, match="memory_ids is a string"):
+            container.digest_service.propose(project, [{
+                "op": "keep", "memory_ids": memory.id, "reason": "fine",
+            }])
+
+    def test_an_operation_that_is_not_an_object_is_refused(self, container, project):
+        _store(container, project)
+        with pytest.raises(DigestError, match="not an object"):
+            container.digest_service.propose(project, ["archive everything"])
+
+    def test_split_parts_must_be_objects(self, container, project):
+        memory = _store(container, project, content="One thing. Another thing.")
+        with pytest.raises(DigestError, match="not an object"):
+            container.digest_service.propose(project, [{
+                "op": "split", "memory_ids": [memory.id], "reason": "two rules",
+                "parts": ["One thing.", "Another thing."],
+            }])
+
+    def test_the_tool_layer_turns_a_refusal_into_an_error_dict(self, container, project):
+        """The MCP layer must answer, not raise - an agent cannot act on a stack
+        trace."""
+        from memory_mcp import server
+
+        answer = server.memory_digest_propose(
+            operations=[{"op": "nonsense", "memory_ids": ["x"], "reason": "y"}],
+            project=project,
+        )
+        assert "error" in answer and "no delete" in answer["error"]
+
+
+class TestKeepOnlyDigest:
+    def test_a_digest_of_nothing_but_keeps_closes(self, container, project):
+        """It used to stay `proposed` forever, so every later analysis warned
+        about a proposal the user had already dealt with."""
+        first = _store(container, project, "architecture", "Ports", "Listens on 8080.")
+        second = _store(container, project, "reference", "Board", "The old board.")
+        answer = container.digest_service.propose(project, [
+            {"op": "keep", "memory_ids": [first.id], "reason": "still accurate"},
+            {"op": "keep", "memory_ids": [second.id], "reason": "checked, still used"},
+        ])
+        result = container.digest_service.apply(
+            project, answer["digest_id"], approve_all=True,
+        )
+        assert result["state"] == "applied"
+        assert result["still_pending"] == []
+        assert container.digest_service.list(project)["awaiting_decision"] == []
+
+    def test_a_keep_is_recorded_in_provenance(self, container, project):
+        """So the next digest can see this signal was investigated and rejected,
+        rather than missed."""
+        memory = _store(container, project, "architecture", "Ports", "Listens on 8080.")
+        answer = container.digest_service.propose(project, [
+            {"op": "keep", "memory_ids": [memory.id], "reason": "still accurate"},
+        ])
+        container.digest_service.apply(project, answer["digest_id"], approve_all=True)
+        operations = [
+            entry.operation
+            for entry in container.provenance_repo.for_memory(project, memory.id)
+        ]
+        assert "digest_keep" in operations
+        # And nothing about the memory changed.
+        after = container.memory_repo.get_by_id(project, memory.id)
+        assert (after.title, after.content, after.status) == (
+            "Ports", "Listens on 8080.", "active",
+        )
+
+
 class TestContradictions:
     """The case embeddings are blind to: two rules 0.05 apart that say the
     opposite thing. Measured, not assumed - see digest_signals."""
@@ -156,6 +341,33 @@ class TestContradictions:
         assert container.memory_repo.get_by_id(project, a.id).content == (
             "Never deploy on Friday afternoon."
         )
+
+
+class TestOverlapThreshold:
+    def test_a_pair_just_past_the_old_threshold_is_reported(self, container, project):
+        """A verification pass measured two genuinely overlapping deploy-window
+        rules at 0.4014 against a 0.40 cut and got no signal at all. The distance
+        is passed in directly here: the point under test is the threshold, and
+        pinning it to particular sentences would make the test hostage to the
+        embedding model."""
+        from memory_mcp.services.digest_signals import collect_signals
+
+        left = _store(container, project, "mandatory_rules", "Deploy window",
+                      "Production deploys stop at 16:00.", priority=2)
+        right = _store(container, project, "mandatory_rules", "Late deploys",
+                       "Shipping after 16:00 needs the on-call lead's agreement.",
+                       priority=2)
+        signals = collect_signals([left, right], [(left.id, right.id, 0.4014)])
+        assert signals["overlap"], "0.4014 must still be close enough to report"
+        assert signals["overlap"][0]["distance"] == 0.4014
+
+    def test_an_unrelated_pair_is_not_reported(self, container, project):
+        from memory_mcp.services.digest_signals import collect_signals
+
+        left = _store(container, project, "architecture", "Ports", "Listens on 8080.")
+        right = _store(container, project, "reference", "Board", "The old dashboard.")
+        signals = collect_signals([left, right], [(left.id, right.id, 0.66)])
+        assert not any(signals.values())
 
 
 class TestClauseCoverage:

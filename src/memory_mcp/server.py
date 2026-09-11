@@ -1195,6 +1195,170 @@ def memory_discard_pending(
     return _safe(_run)
 
 
+# ---------- Memory digest ----------
+#
+# The one operation here that rewrites knowledge the user already approved. The
+# safety is in the service (nothing applied without a per-op decision, no hard
+# delete, clause coverage on every merge); these wrappers add the project
+# resolution every other tool uses, so a digest can be run from any session.
+
+
+def _digest_local(slug: str) -> None:
+    """Refuse a digest on a remote-backed project instead of digesting the wrong
+    corpus. The org server has no digest endpoint yet, and falling through to
+    local storage would review an empty or stale copy of the project's memory."""
+    if _remote(slug) is not None:
+        raise ValueError(
+            f"project '{slug}' is backed by an org server, which has no digest "
+            "endpoint yet. Run the digest from a local project, or ask an admin to "
+            "review the org rules in the management UI."
+        )
+
+
+@mcp.tool()
+def memory_digest(project: str | None = None, categories: list[str] | None = None) -> dict:
+    """Review this project's memory for overlap, staleness and misfiling.
+
+    READ-ONLY: it changes nothing. It returns the whole corpus, the signals the
+    store can compute exactly (near-duplicate embeddings, contradiction
+    candidates, paths that no longer exist, expired TTLs, rules filed as
+    memories, memories filed as rules, notes nobody has ever recalled), and an
+    `instructions` brief telling you how to reason about them.
+
+    Follow that brief. In outline: read the corpus in full, VERIFY every signal
+    that makes a claim about the code before trusting it, then propose changes
+    with memory_digest_propose, show the user the diff it returns, and apply only
+    what they approve. Never drop a business rule to make a merge tidier.
+
+    `categories` narrows the review (e.g. ['mandatory_rules','forbidden_rules']);
+    omit it to review everything in force."""
+    def _run():
+        slug = _resolve(project)
+        _digest_local(slug)
+        return container.digest_service.analyse(slug, categories)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_digest_propose(
+    operations: list[dict],
+    digest_id: str | None = None,
+    notes: str | None = None,
+    project: str | None = None,
+) -> dict:
+    """Submit digest operations for the user to approve. Writes nothing.
+
+    Each operation is a dict:
+      op          keep | rewrite | merge | split | recategorize | retag |
+                  reprioritize | archive. There is no delete - archive keeps the
+                  row, and memory_digest_revert brings it back.
+      memory_ids  the memories it is about; merge takes two or more.
+      reason      REQUIRED - what the user reads when deciding. Say what changes
+                  and why it is safe.
+      title,
+      content     the new text for rewrite and merge (merge needs both).
+      target_id   merge only: which source survives and keeps its id. Defaults to
+                  the first.
+      parts       split only: two or more {title, content, category?, tags?,
+                  priority?}. The first overwrites the original; the rest are
+                  created.
+      category    recategorize (and optionally rewrite/merge): promoting a
+                  decision to mandatory_rules is how it starts being enforced.
+      tags,
+      priority    retag / reprioritize, or alongside a rewrite.
+
+    Every rewrite, merge and split is checked CLAUSE BY CLAUSE against its
+    sources. Any clause of a source that your replacement does not account for
+    comes back under `coverage.unmatched`, verbatim, and that operation cannot be
+    swept in by approve_all. Fold the clause back in and propose again, or quote
+    it to the user and let them decide.
+
+    Returns the per-operation diff. Show it to the user and WAIT for their
+    decision - do not call memory_digest_apply on your own judgment."""
+    def _run():
+        slug = _resolve(project)
+        _digest_local(slug)
+        return container.digest_service.propose(
+            slug, operations, digest_id=digest_id, notes=notes,
+        )
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_digest_apply(
+    digest_id: str,
+    approve: list[str] | None = None,
+    reject: list[str] | None = None,
+    approve_all: bool = False,
+    project: str | None = None,
+) -> dict:
+    """Apply the digest operations the user approved, and only those.
+
+    `approve` and `reject` take op ids from the proposal. `approve_all` is for a
+    user who accepted everything; it still refuses any operation that drops a
+    clause, which has to be approved by id.
+
+    Applies as one transaction, saves the overwritten row of every memory first,
+    and records provenance for each write. Tell the user afterwards that
+    memory_digest_revert(digest_id) undoes all of it exactly."""
+    def _run():
+        slug = _resolve(project)
+        _digest_local(slug)
+        return container.digest_service.apply(
+            slug, digest_id, approve=approve, reject=reject, approve_all=approve_all,
+        )
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_digest_revert(digest_id: str, project: str | None = None) -> dict:
+    """Undo an applied digest: every memory it touched goes back exactly as it was.
+
+    Restores title, content, tags, priority, category, status and metadata from
+    the image saved before each write. Memories the digest created are archived
+    rather than deleted."""
+    def _run():
+        slug = _resolve(project)
+        _digest_local(slug)
+        return container.digest_service.revert(slug, digest_id)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_digest_reject(
+    digest_id: str, reason: str | None = None, project: str | None = None,
+) -> dict:
+    """Drop a proposal the user turned down. Nothing is written to any memory."""
+    def _run():
+        slug = _resolve(project)
+        _digest_local(slug)
+        return container.digest_service.reject(slug, digest_id, reason)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_digest_list(project: str | None = None, limit: int = 20) -> dict:
+    """Past digests for this project, and any proposal still awaiting a decision."""
+    def _run():
+        slug = _resolve(project)
+        _digest_local(slug)
+        return container.digest_service.list(slug, limit=limit)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_digest_get(digest_id: str, project: str | None = None) -> dict:
+    """One digest with its operations and diffs - the proposal, re-read.
+
+    Use it to show the user a proposal again after a compaction, or to see what
+    an applied digest actually did."""
+    def _run():
+        slug = _resolve(project)
+        _digest_local(slug)
+        return container.digest_service.get(slug, digest_id)
+    return _safe(_run)
+
+
 # ---------- Tasks ----------
 #
 # The task list is how the user records a requirement WITHOUT interrupting a

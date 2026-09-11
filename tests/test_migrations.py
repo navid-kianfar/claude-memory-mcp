@@ -401,3 +401,45 @@ def test_v13_tables_match_between_fresh_and_migrated(tmp_path):
     finally:
         fresh.close()
         migrated.close()
+
+
+def _make_v13_db(path) -> None:
+    """A database at v13: the full schema, then the digest tables dropped and the
+    version rolled back, which is exactly what a pre-digest install looks like."""
+    conn = duckdb.connect(str(path))
+    create_schema(conn)
+    conn.execute("DROP TABLE IF EXISTS digest_ops")
+    conn.execute("DROP TABLE IF EXISTS digests")
+    conn.execute("DELETE FROM schema_version WHERE version >= 14")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (13)")
+    conn.close()
+
+
+def test_v13_db_gains_the_digest_tables(tmp_path):
+    db = tmp_path / "v13.duckdb"
+    _make_v13_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        assert get_schema_version(conn) == 13
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT table_name FROM information_schema.tables"
+            ).fetchall()
+        }
+        assert {"digests", "digest_ops"} <= tables
+        # And the memories that were already there are untouched.
+        assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_digest_migration_is_idempotent(tmp_path):
+    db = tmp_path / "v13-twice.duckdb"
+    _make_v13_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
+    finally:
+        conn.close()

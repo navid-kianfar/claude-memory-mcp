@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -179,6 +179,80 @@ _SYNC_DDL = (
 )
 
 
+# Digest tables (v14). A memory digest is a review pass over the corpus: the
+# agent proposes rewrites, merges, recategorizations and archivals, the user
+# approves them one by one, and only then is anything written.
+#
+# The proposal is stored rather than held in the agent's context because the
+# diff the user approved has to be the exact diff that gets applied - a lost
+# turn, a compacted context or a second session must not be able to change what
+# "approve" meant. `before_json` is the pre-apply image of every memory an op
+# touches, which is what makes revert exact rather than a second attempt at
+# reconstructing the old text (and a second chance to lose a clause).
+#
+# Deliberately NOT a MemoryCategory, for the same reason as the task tables:
+# SYNC_CATEGORIES is derived from the category enum, so a digest category would
+# immediately start writing every review artifact into the committed
+# .claude-memory/ snapshot. A digest is local scratch work about memories, not
+# a memory.
+_DIGEST_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS digests (
+        id          VARCHAR PRIMARY KEY,
+        project     VARCHAR NOT NULL,
+        -- open: analysed, nothing proposed yet. proposed: ops are waiting for a
+        -- decision. applied / reverted / rejected are terminal.
+        state       VARCHAR NOT NULL DEFAULT 'open',
+        -- The signals the analysis found, kept so a digest can be audited later
+        -- against what the corpus actually looked like when it was reviewed.
+        analysis    JSON,
+        notes       VARCHAR,
+        created_at  TIMESTAMP DEFAULT current_timestamp,
+        proposed_at TIMESTAMP,
+        applied_at  TIMESTAMP,
+        reverted_at TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS digest_ops (
+        id          VARCHAR PRIMARY KEY,
+        digest_id   VARCHAR NOT NULL,
+        position    INTEGER NOT NULL DEFAULT 0,
+        -- keep | rewrite | merge | split | recategorize | retag | reprioritize
+        -- | archive. There is no delete: see DigestService - a digest never
+        -- hard-deletes, so a wrongly dropped rule is always recoverable.
+        op          VARCHAR NOT NULL,
+        -- Every memory this op reads or writes. A merge lists all its sources.
+        memory_ids  VARCHAR[],
+        -- The survivor of a merge, or the memory a split/rewrite produces.
+        target_id   VARCHAR,
+        payload     JSON,
+        -- Pre-apply rows of memory_ids, keyed by id. Written at apply time, not
+        -- at propose time: the corpus may change in between, and the undo has to
+        -- restore what was actually overwritten.
+        before_json JSON,
+        -- pending | approved | rejected. Nothing is applied while pending.
+        decision    VARCHAR NOT NULL DEFAULT 'pending',
+        decided_at  TIMESTAMP,
+        applied_at  TIMESTAMP,
+        error       VARCHAR
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_digests_state ON digests (state)",
+    "CREATE INDEX IF NOT EXISTS idx_digest_ops_digest ON digest_ops (digest_id)",
+)
+
+
+def create_digest_tables(conn: duckdb.DuckDBPyConnection) -> None:
+    """Create the digest store. Shared by create_schema and migrate_v13_to_v14 so
+    a fresh DB and a migrated one can never drift apart."""
+    for ddl in _DIGEST_DDL:
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass
+
+
 def create_task_tables(conn: duckdb.DuckDBPyConnection) -> None:
     """Create the task store. Shared by create_schema and the migrations so a
     fresh DB and a migrated one can never drift apart."""
@@ -265,6 +339,7 @@ def create_schema(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_provenance_op ON provenance (operation)")
 
     create_task_tables(conn)
+    create_digest_tables(conn)
 
     # Record schema version
     conn.execute(
@@ -596,6 +671,33 @@ def migrate_v8_to_v9(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (9)")
 
 
+def migrate_v13_to_v14(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v13 -> v14: the memory digest's proposal store.
+
+    Two new tables, no change to any existing one, so an unmigrated reader is
+    unaffected: a database that has never run a digest simply has them empty.
+    Created through the same helper as a fresh DB, so the two shapes cannot
+    drift.
+
+    The version is stamped only once both tables are really there. Stamping on a
+    swallowed CREATE would leave a v13 database marked v14, and every digest read
+    after that would fail on a missing table with nothing left to repair it.
+    """
+    create_digest_tables(conn)
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    missing = {"digests", "digest_ops"} - tables
+    if missing:
+        raise RuntimeError(
+            f"schema v14: could not create {sorted(missing)} - not stamping"
+        )
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (14)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -657,6 +759,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 13:
         migrate_v12_to_v13(conn)
         version = 13
+    if version < 14:
+        migrate_v13_to_v14(conn)
+        version = 14
     return version
 
 

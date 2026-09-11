@@ -9,11 +9,11 @@ import threading
 import time
 
 from memory_mcp.repositories import (
-    MemoryRepository, ProjectRepository, SessionRepository, ProvenanceRepository,
+    DigestRepository, MemoryRepository, ProjectRepository, SessionRepository, ProvenanceRepository,
     AttachmentRepository, OutboxRepository, TaskRepository, TemplateRepository,
 )
 from memory_mcp.services import (
-    MemoryService, SearchService, RulesService, RulesCache,
+    DigestService, MemoryService, SearchService, RulesService, RulesCache,
     SessionService, ProjectService, PortableService,
     ExportImportService, ModelService, UpdateService, ClaudeMdService,
     TaskService, TemplateService, SyncService, TaskBridge, TaskPlanner,
@@ -36,6 +36,7 @@ class Container:
         self.project_repo = ProjectRepository()
         self.session_repo = SessionRepository()
         self.provenance_repo = ProvenanceRepository()
+        self.digest_repo = DigestRepository()
         self.template_repo = TemplateRepository()
         self.task_repo = TaskRepository()
         self.outbox_repo = OutboxRepository()
@@ -59,6 +60,14 @@ class Container:
             self.project_repo, self.rules_service,
         )
         self.search_service = SearchService(self.memory_repo)
+        # The digest reviews memories the user already approved once, so it is
+        # wired to the same services that wrote them: the rules cache has to be
+        # invalidated by a rule it rewrites, and a split creates memories through
+        # MemoryService so they get embeddings and provenance like any other.
+        self.digest_service = DigestService(
+            self.memory_repo, self.digest_repo, self.provenance_repo,
+            self.project_repo, self.rules_service, self.memory_service,
+        )
         self.task_service = TaskService(
             self.task_repo, self.provenance_repo, self.project_repo,
             self.session_repo,

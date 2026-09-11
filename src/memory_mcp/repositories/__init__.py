@@ -1,5 +1,6 @@
 """Repository layer - DB access, SQL encapsulation."""
 
+from memory_mcp.repositories.digest_repository import DigestRepository
 from memory_mcp.repositories.memory_repository import MemoryRepository
 from memory_mcp.repositories.project_repository import ProjectRepository
 from memory_mcp.repositories.session_repository import SessionRepository
@@ -12,6 +13,7 @@ from memory_mcp.repositories.template_repository import (
 )
 
 __all__ = [
+    "DigestRepository",
     "MemoryRepository",
     "ProjectRepository",
     "SessionRepository",

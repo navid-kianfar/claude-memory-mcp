@@ -1,5 +1,6 @@
 """Service layer - business logic composing repositories and utilities."""
 
+from memory_mcp.services.digest import DigestService
 from memory_mcp.services.memory_service import MemoryService
 from memory_mcp.services.search_service import SearchService
 from memory_mcp.services.rules_service import RulesService, RulesCache
@@ -17,6 +18,7 @@ from memory_mcp.services.template_service import TemplateService
 from memory_mcp.services.sync_service import SyncService
 
 __all__ = [
+    "DigestService",
     "MemoryService",
     "SearchService",
     "RulesService",

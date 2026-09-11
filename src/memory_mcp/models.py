@@ -254,6 +254,97 @@ class TaskTimeEntry(BaseModel):
     session_id: str | None = None
 
 
+class DigestState(str, Enum):
+    """Where a digest is in its review.
+
+    `open` is analysed but not yet proposed; `proposed` is waiting on the user.
+    The three terminal states record what the user decided.
+    """
+
+    OPEN = "open"
+    PROPOSED = "proposed"
+    APPLIED = "applied"
+    REVERTED = "reverted"
+    REJECTED = "rejected"
+
+
+class DigestOperation(str, Enum):
+    """What a digest op does to the memories it names.
+
+    There is deliberately no `delete`. A digest's strongest operation is
+    ARCHIVE, which keeps the row and its provenance, so a rule dropped by
+    mistake is always recoverable. See DigestService.
+    """
+
+    KEEP = "keep"
+    REWRITE = "rewrite"
+    MERGE = "merge"
+    SPLIT = "split"
+    RECATEGORIZE = "recategorize"
+    RETAG = "retag"
+    REPRIORITIZE = "reprioritize"
+    ARCHIVE = "archive"
+
+
+#: Ops that rewrite text and must therefore pass the clause-coverage check.
+TEXT_OPERATIONS = {
+    DigestOperation.REWRITE, DigestOperation.MERGE, DigestOperation.SPLIT,
+}
+
+
+class DigestDecision(str, Enum):
+    """The user's verdict on one op. Nothing is applied while PENDING."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class DigestOp(BaseModel):
+    """One proposed change to the corpus, and what the user decided about it."""
+
+    id: str
+    digest_id: str
+    position: int = 0
+    # Open strings rather than enums on read: a value written by a newer build
+    # must still load here, matching Memory.source and Task.source.
+    op: str
+    # Every memory the op reads or writes. A merge lists all of its sources.
+    memory_ids: list[str] = Field(default_factory=list)
+    # The survivor of a merge, or the memory a rewrite/split produced.
+    target_id: str | None = None
+    payload: dict = Field(default_factory=dict)
+    # Pre-apply rows of memory_ids keyed by id, written at apply time. The exact
+    # undo: a revert restores these rather than re-deriving the old text.
+    before: dict | None = None
+    decision: str = DigestDecision.PENDING.value
+    decided_at: datetime | None = None
+    applied_at: datetime | None = None
+    error: str | None = None
+
+
+class Digest(BaseModel):
+    """A review pass over one project's memories.
+
+    Stored rather than held in the agent's context: the diff the user approved
+    has to be the exact diff that gets applied, and a compacted context or a
+    second session must not be able to change what "approve" meant.
+    """
+
+    id: str
+    project: str
+    state: str = DigestState.OPEN.value
+    analysis: dict | None = None
+    notes: str | None = None
+    created_at: datetime | None = None
+    proposed_at: datetime | None = None
+    applied_at: datetime | None = None
+    reverted_at: datetime | None = None
+    ops: list[DigestOp] = Field(default_factory=list)
+    # Set by list() where ops are summarized rather than loaded.
+    op_count: int | None = None
+
+
 # --- Request Models ---
 
 

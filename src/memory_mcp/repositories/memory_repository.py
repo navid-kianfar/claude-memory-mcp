@@ -310,6 +310,59 @@ class MemoryRepository:
             ).fetchone()
         return int(row[0]) if row else 0
 
+    def corpus(self, project: str, categories: list[str] | None = None) -> list[Memory]:
+        """Every memory a digest may review: active, adapted, this project's own.
+
+        Un-adapted imports are excluded deliberately - they are already waiting
+        on their own review (`memory_pending_list`), and a digest that proposed
+        merging one into a live rule would put another project's wording into
+        force through the back door. Archived rows are excluded because a digest
+        reviews what is in force, not the audit trail.
+        """
+        where = ["status = 'active'", NOT_PENDING]
+        params: list = []
+        if categories:
+            where.append(f"category IN ({','.join('?' * len(categories))})")
+            params.extend(categories)
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"SELECT {MEMORY_COLUMNS} FROM memories WHERE {' AND '.join(where)} "
+                "ORDER BY category, priority DESC, created_at",
+                params,
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
+    def similar_pairs(
+        self, project: str, max_distance: float = 0.25, limit: int = 300,
+    ) -> list[tuple[str, str, float]]:
+        """Pairs of active memories whose embeddings sit within `max_distance`.
+
+        A self-join is O(n^2) in the number of memories, which is the right
+        trade here: a project's corpus is tens to low hundreds of rows, the
+        distance is computed in DuckDB, and an HNSW probe per row would need one
+        query each to find the same pairs. `limit` caps the answer so a corpus
+        that is largely one topic cannot return a quadratic result set.
+
+        Rows with no embedding are skipped rather than treated as distant: a
+        NULL there means the model never ran, not that the text is unrelated.
+        """
+        with connect(project) as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id, b.id,
+                       array_cosine_distance(a.embedding, b.embedding) AS distance
+                FROM memories a JOIN memories b ON a.id < b.id
+                WHERE a.status = 'active' AND b.status = 'active'
+                  AND NOT COALESCE(a.pending, FALSE) AND NOT COALESCE(b.pending, FALSE)
+                  AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+                  AND array_cosine_distance(a.embedding, b.embedding) <= ?
+                ORDER BY distance
+                LIMIT ?
+                """,
+                [max_distance, limit],
+            ).fetchall()
+        return [(r[0], r[1], float(r[2])) for r in rows]
+
     def vector_search(
         self, project: str, query_embedding: list[float], status: str, limit: int
     ) -> list[tuple[Memory, float]]:

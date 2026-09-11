@@ -199,6 +199,62 @@ the UI's Import dialog) brings them in as **pending**:
 
 Pass `pending=False` to import text you already know is project-neutral.
 
+## Digest: review the memory itself
+
+A corpus written to for months drifts. Two rules end up saying the same thing in
+different words and **both are in force**, so whichever the agent reads last
+effectively wins. A rule names a file that was deleted. A standing instruction
+sits in a `decision` memory where nothing enforces it. A note nobody has recalled
+in a year costs tokens in every session that touches its topic.
+
+`memory_digest` is the pass that fixes that, on any project this server holds:
+
+```text
+memory_digest()                       # analyse — read-only, changes nothing
+memory_digest_propose(operations)     # validate + diff, still changes nothing
+memory_digest_apply(digest_id, approve=[...])   # only what you approved
+memory_digest_revert(digest_id)       # exact undo
+```
+
+The three stages exist because of who is good at what. The **store** measures
+what it can measure exactly: embedding distance between every pair, paths that no
+longer exist on disk, expired TTLs, rules written as records and records written
+as rules, notes never once recalled. The **agent** does the judgment — which
+overlapping rules are really one rule, whether a missing path moved or died — and
+it is told to verify anything the signals claim about the code before trusting
+it. **You** decide what actually gets written.
+
+Operations: `keep`, `rewrite`, `merge`, `split`, `recategorize`, `retag`,
+`reprioritize`, `archive`. `merge` is the one that earns the feature — several
+memories unified into one, the sources archived and stamped with where they went.
+`recategorize` is how a rule filed as a decision starts being enforced, and how a
+one-off record filed as a rule stops costing rule-block tokens.
+
+### The two guarantees
+
+**A digest never hard-deletes.** Its strongest operation is `archive`: the row
+stays, its provenance stays, `memory_digest_revert` brings it back. Every write
+saves the row it overwrote first, so the undo restores the old text exactly
+rather than re-deriving it.
+
+**No clause disappears quietly.** "Unify these and write them better" is where a
+business rule actually gets lost — not by deletion, but by a tightened paragraph
+that stops saying one of the things it used to. So every `rewrite`, `merge` and
+`split` is checked clause by clause against its sources, and any clause the
+replacement does not account for comes back as `unmatched`, verbatim, for you to
+rule on. `approve_all` refuses those; they need approving by id.
+
+The same check watches polarity separately, because similarity cannot see it:
+*always deploy on Friday* and *never deploy on Friday* sit **0.05 apart** in
+embedding space, closer than two honest paraphrases of the same rule. A merge
+that inverts a clause is reported as `polarity_changed` and blocked, and a pair of
+memories that contradict each other is never offered as a duplicate — the agent
+is told to show you both and ask which one is current.
+
+Nothing is applied without a per-operation decision, the whole apply is one
+transaction, and each write records provenance naming the digest that made it.
+`memory_digest_list` shows past digests and any proposal still waiting on you.
+
 ## Import an existing CLAUDE.md
 
 ```text
@@ -555,7 +611,7 @@ A React single-page app served by the daemon at `/`:
 
 ## MCP tools
 
-All 66 tools:
+All 74 tools:
 
 | Area | Tools |
 |------|-------|
@@ -565,6 +621,7 @@ All 66 tools:
 | Governance (server mode) | `memory_approve_rule`, `memory_revoke_rule` |
 | Templates | `memory_list_templates`, `memory_create_template`, `memory_add_template_rule`, `memory_apply_template`, `memory_import_rules` |
 | Imported rules | `memory_pending_list`, `memory_adapt_pending`, `memory_discard_pending` |
+| Digest | `memory_digest`, `memory_digest_propose`, `memory_digest_apply`, `memory_digest_revert`, `memory_digest_reject`, `memory_digest_list`, `memory_digest_get` |
 | Tasks | `memory_task_add`, `memory_task_list`, `memory_task_get`, `memory_task_update`, `memory_task_comment`, `memory_task_start`, `memory_task_stop`, `memory_task_done`, `memory_task_archive`, `memory_task_convert`, `memory_task_delete` |
 | Task claims (multi-session) | `memory_task_claim_next`, `memory_task_release` |
 | Planning | `memory_task_plan` |

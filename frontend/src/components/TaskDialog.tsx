@@ -26,14 +26,16 @@ import {
   User,
   X,
 } from "lucide-react";
-import type { Task, TaskActivityEntry, TaskDetail } from "../types";
+import type { ProjectLink, Task, TaskActivityEntry, TaskDetail } from "../types";
 import { api } from "../lib/api";
 import { cn } from "../lib/utils";
 import { useToast } from "./ui/Toast";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Input } from "./ui/Input";
 import { Markdown } from "./ui/Markdown";
+import { Select } from "./ui/Select";
 import { Textarea } from "./ui/Textarea";
+import { Tooltip } from "./ui/Tooltip";
 import {
   PRIORITY_LABELS,
   STATE_COLORS,
@@ -93,6 +95,11 @@ export function TaskDialog({
   // returns `parent_id` but no parent summary, so its title costs one more
   // request — only ever made for a sub-task.
   const [parent, setParent] = useState<Task | null>(null);
+  // Which boards this project mirrors to. null while it is being fetched, []
+  // when the project has none - the board picker is hidden in that case, since
+  // there is nothing to pick. Fetched beside the task, not after it: a picker
+  // that waits for the task to load is a waterfall for no reason.
+  const [links, setLinks] = useState<ProjectLink[] | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -149,6 +156,23 @@ export function TaskDialog({
     };
   }, [projectSlug, parentId]);
 
+  // A project with no link is the normal case, so a failure here is silent and
+  // simply leaves the board picker out.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getProjectLinks(projectSlug)
+      .then((res) => {
+        if (!cancelled) setLinks(res.links);
+      })
+      .catch(() => {
+        if (!cancelled) setLinks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectSlug]);
+
   // Escape closes, and the body must not scroll behind the panel.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -194,6 +218,56 @@ export function TaskDialog({
       await refresh();
     } catch (err) {
       fail(err, what);
+    }
+  };
+
+  /**
+   * Send this task to a named board.
+   *
+   * The answer's `routing` is the whole point: it says which board took the
+   * task and why, so a mis-route is visible here instead of being found on the
+   * board days later. A daemon without the path-routing half answers WITHOUT
+   * it, and that silence is reported as a warning rather than dressed up as a
+   * move that happened - the PUT it ignores would otherwise look successful.
+   */
+  const setTarget = async (target: string) => {
+    try {
+      const res = await api.updateTask(projectSlug, taskId, { target });
+      const routing = res.routing;
+      if (!routing) {
+        toast({
+          title: "Saved, but no routing was reported",
+          description:
+            "This daemon did not say which board the task went to, so it may still be on the one it was on. Routing answers arrive with the server half of path routing.",
+          variant: "warning",
+        });
+      } else if (routing.board && routing.matched) {
+        toast({
+          title: routing.matched_prefix
+            ? `Routed to ${routing.board} by prefix ${routing.matched_prefix}`
+            : `Routed to ${routing.board}`,
+          description: routing.reason,
+          variant: "success",
+        });
+      } else {
+        toast({
+          title: routing.board
+            ? `No prefix matched — default board ${routing.board}`
+            : "No prefix matched — default board",
+          description: routing.reason,
+          variant: "default",
+        });
+      }
+      await refresh();
+    } catch (err) {
+      // 409 is the server refusing to re-route a task that is already mirrored.
+      // Its message says where the task is, so it is shown as-is.
+      fail(
+        err,
+        api.isApiError(err) && err.status === 409
+          ? "This task is already on a board"
+          : "Failed to set the board"
+      );
     }
   };
 
@@ -351,7 +425,9 @@ export function TaskDialog({
                 key={`sidebar:${task.id}`}
                 projectSlug={projectSlug}
                 detail={detail}
+                links={links}
                 onPatch={patch}
+                onSetTarget={setTarget}
                 onRefresh={refresh}
                 onFail={fail}
               />
@@ -900,7 +976,11 @@ function TaskDialogMain({
 interface SidebarProps {
   projectSlug: string;
   detail: TaskDetail;
+  /** The project's boards; null while loading, [] when it has none. */
+  links: ProjectLink[] | null;
   onPatch: (input: Parameters<typeof api.updateTask>[2], what: string) => Promise<void>;
+  /** Routes the task to a board by label. Reports the server's answer itself. */
+  onSetTarget: (target: string) => Promise<void>;
   onRefresh: () => Promise<void>;
   onFail: (err: unknown, what: string) => void;
 }
@@ -908,7 +988,9 @@ interface SidebarProps {
 function TaskDialogSidebar({
   projectSlug,
   detail,
+  links,
   onPatch,
+  onSetTarget,
   onRefresh,
   onFail,
 }: SidebarProps) {
@@ -946,6 +1028,36 @@ function TaskDialogSidebar({
   }, [detail.time_entries, now]);
 
   const total = splitDuration(totalMinutes);
+
+  // `target` is resolved server-side by label first, work package id second, so
+  // a link with no label is still selectable by its id.
+  const targetOf = (link: ProjectLink) =>
+    link.label || link.remote_work_package_id;
+  const boardOptions = useMemo(
+    () =>
+      (links ?? []).map((link) => ({
+        value: targetOf(link),
+        label: `${link.label || link.remote_work_package_id.slice(0, 8)}${
+          link.is_default ? " ★" : ""
+        }`,
+      })),
+    [links]
+  );
+  /** Set means the task is already mirrored to that board, so it cannot move. */
+  const mirrored = task.link_id !== null;
+  const currentLink = (links ?? []).find((l) => l.id === task.link_id) ?? null;
+  const currentTarget = currentLink ? targetOf(currentLink) : "";
+  const defaultBoard = (links ?? []).find((l) => l.is_default) ?? null;
+  /**
+   * What the closed picker says when nothing is selected. A mirrored task whose
+   * link is not in this list is on a board this project no longer carries -
+   * naming the default one there would claim a placement that is not true.
+   */
+  const defaultBoardHint = mirrored
+    ? "on a board this project no longer lists"
+    : defaultBoard
+      ? `${defaultBoard.label || defaultBoard.remote_work_package_id.slice(0, 8)} (default)`
+      : "choose a board…";
 
   const toggleClock = async () => {
     setBusy(true);
@@ -1064,6 +1176,40 @@ function TaskDialogSidebar({
           <EmptyHint>Any agent can claim it</EmptyHint>
         )}
       </SidebarSection>
+
+      {/* Board — only when the project actually mirrors somewhere */}
+      {links && links.length > 0 && (
+        <SidebarSection
+          label="Board"
+          action={
+            mirrored ? (
+              // The sidebar is 280px and clips what overflows it, so the bubble
+              // is right-aligned and wraps instead of running off the panel.
+              <Tooltip
+                content="Already on a board; move it there by hand"
+                className="left-auto right-0 w-48 translate-x-0 whitespace-normal"
+              >
+                <span className="flex size-[22px] items-center justify-center text-muted-foreground">
+                  <Lock className="size-3" />
+                </span>
+              </Tooltip>
+            ) : undefined
+          }
+        >
+          <Select
+            options={boardOptions}
+            value={currentTarget}
+            onValueChange={(value) => void onSetTarget(value)}
+            placeholder={defaultBoardHint}
+            disabled={mirrored || busy}
+          />
+          <p className="mt-1.5 text-[0.68rem] leading-snug text-muted-foreground">
+            {mirrored
+              ? "This task is mirrored on the board above. Re-routing it here is refused — move the card on the board instead."
+              : "Pick the board this task belongs to, or leave it and let its path decide."}
+          </p>
+        </SidebarSection>
+      )}
 
       {/* Labels */}
       <SidebarSection

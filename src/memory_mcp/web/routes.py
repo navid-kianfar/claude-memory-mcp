@@ -7,13 +7,12 @@ the UI and the Claude clients never contend for locks.
 """
 
 import time
-import contextlib
 from pathlib import Path
 
 import httpx
 from anyio import to_thread
 from starlette.responses import (
-    FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response,
+    FileResponse, HTMLResponse, JSONResponse, Response,
 )
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
@@ -33,6 +32,14 @@ from memory_mcp.exceptions import (
     ProjectNotFoundError, TaskNotFoundError,
 )
 from memory_mcp.repositories import TemplateNotFoundError
+from memory_mcp.web import hooks
+# The hook handlers live in web/hooks.py now. Re-exported here because they were
+# public names of this module for four releases: tests and any caller reaching for
+# `routes._hook_gate` must keep resolving.
+from memory_mcp.web.hooks import (  # noqa: F401
+    _hook_authorized, _hook_auto_register, _hook_claim, _hook_dispatch, _hook_gate,
+    _hook_rules, _hook_update, _hook_update_done,
+)
 from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.models import (
     CreateTaskRequest, GLOBAL_PROJECT_SLUG, MemoryCategory, MemoryFilter,
@@ -106,16 +113,6 @@ def _authenticate(request) -> tuple[RequestUser | None, str | None]:
 
 def _request_user_obj(request) -> RequestUser | None:
     return _authenticate(request)[0]
-
-
-def _hook_authorized(request) -> bool:
-    """Hook endpoints (_hook_rules, _hook_auto_register) are raw handlers, not
-    _api-wrapped. In server mode they must carry a valid bearer token so rules
-    are never served to an unauthenticated caller; in local mode always allowed.
-    """
-    if not settings.server_mode:
-        return True
-    return _request_user_obj(request) is not None
 
 
 async def _proxy_to_remote(request, project) -> Response:
@@ -253,186 +250,12 @@ def _api(fn, *, public: bool = False, admin: bool = False, remote_aware: bool = 
 # ---------- Handlers ----------
 
 
-async def _hook_auto_register(request):
-    """Auto-register the working directory as a project (used by the hook).
-
-    When Claude Code starts a session in a git repository that is not yet a
-    memory project, register it so it shows up in the UI - even before it has
-    any rules. Returns a short note, or empty when nothing was done.
-    """
-    if not _hook_authorized(request):
-        return PlainTextResponse("")
-    cwd = request.query_params.get("cwd", "")
-
-    def _resolve() -> str:
-        from pathlib import Path
-
-        from memory_mcp.context import detect_project_from_cwd
-        from memory_mcp.utils.text import slugify
-
-        if not cwd:
-            return ""
-        folder = Path(cwd)
-        if not folder.is_dir():
-            return ""
-        if detect_project_from_cwd(cwd):
-            return ""  # already a registered project
-        if not (folder / ".git").is_dir():
-            return ""  # only auto-register actual repositories
-        slug = slugify(folder.name)
-        if not slug or container.project_repo.get(slug) is not None:
-            return ""  # no name, or the slug is already taken by another project
-        container.project_service.init_project(slug, folder.name, project_path=cwd)
-        return (
-            f"[Memory MCP] Registered this folder as project '{slug}' - "
-            f"it now appears in the management UI."
-        )
-
-    try:
-        text = await to_thread.run_sync(_resolve)
-    except Exception:  # noqa: BLE001
-        text = ""
-    return PlainTextResponse(text)
-
-
-async def _hook_claim(request):
-    """Bind a folder to the project its committed snapshot names.
-
-    The SessionStart hook calls this before anything else. Keying on
-    manifest.json's project_id means a project that was moved or renamed is
-    re-bound to its new location instead of being registered a second time,
-    and a teammate's fresh clone adopts the same identity.
-    """
-    if not _hook_authorized(request):
-        return JSONResponse({"slug": None, "action": "unauthorized"})
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        body = {}
-
-    def _resolve() -> dict:
-        cwd = (body.get("cwd") or "").strip()
-        if not cwd:
-            return {"slug": None, "action": "unclaimed"}
-        return container.project_service.claim_folder(
-            cwd,
-            project_uid=body.get("project_id"),
-            slug_hint=body.get("slug"),
-            display_name=body.get("display_name"),
-        )
-
-    try:
-        result = await to_thread.run_sync(_resolve)
-    except Exception as exc:  # noqa: BLE001 - a hook must never see a 500
-        result = {"slug": None, "action": "error", "error": str(exc)}
-    return JSONResponse(result)
-
-
 def _index(_request):
     """Serve the built React SPA, or a placeholder when it has not been built."""
     index = _DIST / "index.html"
     if index.is_file():
         return FileResponse(str(index))
     return HTMLResponse(_PLACEHOLDER)
-
-
-async def _hook_rules(request):
-    """Plain-text rules block for Claude Code hooks (cwd -> project -> rules).
-
-    Returns an empty body when the directory is not a memory project, so the
-    hook stays silent in unrelated repos.
-    """
-    if not _hook_authorized(request):
-        return PlainTextResponse("")
-    cwd = request.query_params.get("cwd", "")
-    mode = request.query_params.get("mode", "rules")
-
-    def _resolve() -> str:
-        from memory_mcp.context import detect_project_from_cwd
-        from memory_mcp.enforcement import (
-            format_intro, format_session_end, rules_text_for_project,
-        )
-
-        slug = detect_project_from_cwd(cwd)
-        if not slug:
-            return ""
-        if mode == "intro":
-            return format_intro(slug)
-        if mode == "end":
-            return format_session_end(slug)
-        return rules_text_for_project(slug)
-
-    try:
-        text = await to_thread.run_sync(_resolve)
-    except Exception:  # noqa: BLE001
-        text = ""
-    return PlainTextResponse(text)
-
-
-async def _hook_gate(request):
-    """Should a mutating tool call be allowed to proceed? (PreToolUse hook.)
-
-    Answers `{"allow": bool, "reason": str}`. The hook denies ONLY on an
-    explicit `allow: false`; every other outcome - a non-project directory, an
-    unbound project, an unreachable daemon, an exception in here - is an allow.
-
-    That asymmetry is the whole design. This gate exists because a rule saying
-    "start a task first" was followed about 70% of the time, and text cannot
-    require anything. But a gate that blocks a person from editing a file
-    because a board is down would be far worse than the problem it fixes, so
-    every failure mode opens it.
-
-    Gates on the PROJECT having a task in progress rather than THIS session
-    having one: a Claude Code hook is handed Claude Code's session id, which is
-    not the memory session id that claims a task, and there is no mapping
-    between them. Project-level is the honest check the available data supports
-    - and a task somebody else left in progress opening the gate is a much
-    smaller problem than a gate that cannot be satisfied.
-    """
-    if not _hook_authorized(request):
-        return JSONResponse({"allow": True, "reason": "unauthorized - failing open"})
-    cwd = request.query_params.get("cwd", "")
-
-    def _decide() -> dict:
-        from memory_mcp.context import detect_project_from_cwd
-        from memory_mcp.db.registry import get_project_links
-
-        slug = detect_project_from_cwd(cwd)
-        if not slug:
-            return {"allow": True, "reason": "not a memory project"}
-        if not get_project_links(slug):
-            return {"allow": True, "reason": "project is not bound to a board"}
-        open_tasks = container.task_service.list_tasks(
-            slug, TaskFilter(state=TaskState.IN_PROGRESS), limit=1,
-        ).tasks
-        if open_tasks:
-            return {
-                "allow": True,
-                "reason": f"working: {open_tasks[0].title}",
-                "task_id": open_tasks[0].id,
-            }
-        return {
-            "allow": False,
-            "slug": slug,
-            "reason": (
-                f"No task is in progress for '{slug}', and this project's board "
-                "is its work queue.\n\n"
-                "Put the work on the board BEFORE doing it, so it is tracked and "
-                "time is recorded:\n"
-                "  - several deliverables -> memory_task_plan(request=..., tasks=[...])\n"
-                "  - one deliverable      -> memory_task_add(...) then "
-                "memory_task_start(task_id)\n"
-                "  - already on the board -> memory_task_start(task_id)\n\n"
-                "Then make this edit again. Set MEMORY_MCP_NO_GATE=1 to switch "
-                "this off."
-            ),
-        }
-
-    try:
-        answer = await to_thread.run_sync(_decide)
-    except Exception as e:  # noqa: BLE001 - a gate that errors must not block work
-        answer = {"allow": True, "reason": f"gate error, failing open: {e}"}
-    return JSONResponse(answer)
 
 
 async def _login(request):
@@ -861,10 +684,20 @@ def _sync_export(params, body, query):
     `categories` keeps its old shape and meaning; `provenance` and `tombstones`
     are additions the DuckDB snapshot carries. An older CLI reading only
     `categories` still works against this route.
+
+    `links` is the manifest's path->board bindings (manifest version 3): this
+    machine's links plus bindings the committed manifest proposed and nobody
+    here has acted on (TaskBridge.manifest_links), projected by
+    sync_cli._manifest_links - never an id, never a credential. A registry
+    read: no network, no PAT needed.
     """
+    from memory_mcp.sync_cli import _manifest_links
+
     slug = params["slug"]
     container.project_service.get(slug)
-    return container.sync_service.build_full_snapshot(slug)
+    payload = container.sync_service.build_full_snapshot(slug)
+    payload["links"] = _manifest_links(container.task_bridge.manifest_links(slug))
+    return payload
 
 
 def _sync_import(params, body, query):
@@ -946,13 +779,21 @@ def _asoode_link(params, body, query):
     # `attach` links a board that already exists; without it this CREATES one.
     # The UI always attaches - creating from a browser click is too easy to do
     # by accident, and a stray board cannot be removed from here.
+    #
+    # `is_default` ABSENT (or null) means "only if the project has no default
+    # yet" - it used to mean true, so attaching a second board for one subtree
+    # silently made it the default for every unrouted task. `match_paths` binds
+    # the board to repo subtrees; a bad entry is a 400 naming it.
+    is_default = body.get("is_default")
+    is_default = None if is_default is None else bool(is_default)
     if body.get("attach") or body.get("work_package_id") or body.get("external_ref"):
         return container.task_bridge.attach(
             params["slug"],
             work_package_id=body.get("work_package_id"),
             external_ref=body.get("external_ref"),
             label=body.get("label"),
-            is_default=bool(body.get("is_default", True)),
+            is_default=is_default,
+            match_paths=body.get("match_paths"),
             backfill=bool(body.get("backfill", False)),
         )
     return container.task_bridge.bootstrap(
@@ -960,6 +801,7 @@ def _asoode_link(params, body, query):
         project_title=body.get("project_title"),
         board_title=body.get("board_title"),
         reuse_project_id=body.get("asoode_project_id"),
+        match_paths=body.get("match_paths"),
     )
 
 
@@ -980,9 +822,80 @@ def _asoode_import(params, body, query):
 
 
 def _asoode_links(params, body, query):
+    """The project's links (each with `match_paths`) and the manifest's proposals.
+
+    `proposals[]` = {label, remote_work_package_id, base_url, is_default,
+    match_paths, status: matches|differs|unlinked, link_id (null when unlinked),
+    current_match_paths (null when unlinked)}. Nothing here applies one.
+    """
     return {
         "slug": params["slug"],
         "links": container.task_bridge.links(params["slug"]),
+        "proposals": container.task_bridge.link_proposals(params["slug"]),
+    }
+
+
+def _link_not_found(e: Exception):
+    return {"error": str(e), "type": type(e).__name__}, 404
+
+
+def _asoode_link_update(params, body, query):
+    """PATCH a link: body {match_paths?, label?, is_default?} -> {link}.
+
+    Only keys PRESENT in the body change. `match_paths: null` or `[]` clears
+    the binding; `label: null` or `""` clears the label. An invalid entry, or
+    demoting the current default, is 400 with the reason; a link id that is not
+    this project's is 404 with a JSON `error`.
+    """
+    from memory_mcp.db.registry import _UNSET
+    from memory_mcp.services.task_bridge import LinkNotFoundError
+
+    if "is_default" in body and body["is_default"] is not None and not isinstance(
+        body["is_default"], bool
+    ):
+        raise ValueError("is_default must be true or false")
+    try:
+        link = container.task_bridge.update_link(
+            params["slug"], int(params["link_id"]),
+            match_paths=body["match_paths"] if "match_paths" in body else _UNSET,
+            label=body["label"] if "label" in body else _UNSET,
+            is_default=body.get("is_default"),
+        )
+    except LinkNotFoundError as e:
+        return _link_not_found(e)
+    return {"link": link}
+
+
+def _asoode_link_delete(params, body, query):
+    """DELETE a link -> {deleted: true}. The board is left alone; tasks that
+    named it fall back to the default. Unlinking the default while other boards
+    remain is 400 - promote another first."""
+    from memory_mcp.services.task_bridge import LinkNotFoundError
+
+    try:
+        return container.task_bridge.delete_link(params["slug"], int(params["link_id"]))
+    except LinkNotFoundError as e:
+        return _link_not_found(e)
+
+
+def _asoode_link_proposals(params, body, query):
+    """Store the bindings a committed manifest carries, as PROPOSALS.
+
+    Body {links: [manifest objects]} -> {proposals: [...]}. Called by
+    `memory-mcp sync import`. It never links anything - project_links is not
+    written - because linking is always explicit. Each entry is projected by
+    sync_cli._manifest_links, so ids, credentials and unknown keys from the file
+    are dropped at the edge; the proposals replace whatever was stored before.
+    """
+    from memory_mcp.sync_cli import _manifest_links
+
+    slug = params["slug"]
+    container.project_service.get(slug)
+    links = body.get("links")
+    if not isinstance(links, list):
+        raise ValueError("links must be a list of manifest link objects")
+    return {
+        "proposals": container.task_bridge.set_link_proposals(slug, _manifest_links(links)),
     }
 
 
@@ -1160,9 +1073,31 @@ def _task_create(params, body, query):
         source=TaskSource(source),
         role=(body.get("role") or "").strip() or None,
         target=body.get("target"),
+        path=body.get("path"),
     )
-    task = container.task_service.create(req)
-    return {"status": "ok", "task": task.model_dump(mode="json")}
+    task, routing = container.task_service.create_routed(req)
+    answer = {"status": "ok", "task": task.model_dump(mode="json")}
+    if routing is not None:
+        answer["routing"] = routing
+    return answer
+
+
+# `routing`, on the task write routes, when there was a decision to make (a
+# `path` or `target` in the body, or - on create - a project with two or more
+# boards):
+#
+#   { path, normalised, matched, matched_prefix, reason, link_id, board,
+#     candidates? }
+#
+# `matched` is true when a board was CHOSEN from the caller's evidence - a
+# match_paths prefix (`matched_prefix` says which) or an explicit `target`.
+# `matched: false` is a fallback: nothing matched, and `board` / `link_id` name
+# where the task will actually go - the project default on create, the board it
+# is already on for an update - with `reason` saying so. `candidates` =
+# [{link_id, board, match_paths, is_default}] accompanies a create fallback.
+# An unlinked project: matched false, link_id and board null - never an error.
+# A refused route (unknown board, path outside the repo, a tie, path and target
+# disagreeing) is 400; moving a task that already has a card is 409.
 
 
 def _task_reorder(params, body, query):
@@ -1195,9 +1130,18 @@ def _task_update(params, body, query):
         estimated_minutes=body.get("estimated_minutes"),
         # "" clears the role; absent leaves it alone - same contract as the tool.
         role=body["role"] if "role" in body else None,
+        path=body.get("path"),
+        target=body.get("target"),
     )
-    task, changed = container.task_service.update(req)
+    from memory_mcp.services.task_service import MirroredRerouteError
+
+    try:
+        task, changed, routing = container.task_service.update_routed(req)
+    except MirroredRerouteError as e:
+        return {"error": str(e), "type": type(e).__name__}, 409
     answer = {"status": "ok", "task": task.model_dump(mode="json"), "changed": changed}
+    if routing is not None:
+        answer["routing"] = routing
     # Finishing a task through PUT is the same close as POST /done, so it says
     # the same thing about the clock. Without this the web UI could move a card
     # to Done at zero minutes and show nothing - the silence this change exists
@@ -1490,43 +1434,11 @@ def _update_cancel(params, body, query):
     return {"status": "ok", "approved": False}
 
 
-def _hook_update(request):
-    """Plain-text answer for the Stop hook: apply, or not.
-
-    Deliberately not JSON - the hook is bash, and `[ "$ANSWER" = "apply" ]` needs
-    no parser. Public like the other hook routes.
-    """
-    from memory_mcp.services import update_poller
-
-    try:
-        approved = bool(get_setting(UPDATE_APPROVED_KEY))
-        answer = "apply" if (approved and update_poller.update_available()) else "no"
-        # The hook cannot infer the repo from its own path - it is installed to
-        # ~/.claude-memory-mcp/hooks/. Setup recorded it; hand it over.
-        repo = get_setting("install:repo_dir") or ""
-    except Exception:  # noqa: BLE001 - the hook must never see a 500
-        answer, repo = "no", ""
-    return PlainTextResponse(f"{answer} {repo}".strip())
-
-
-def _hook_update_done(request):
-    """The hook says it finished; clear the approval so it does not loop."""
-    with contextlib.suppress(Exception):
-        set_setting(UPDATE_APPROVED_KEY, "")
-    return PlainTextResponse("ok")
-
-
 def build_routes() -> list:
     """Return the UI + JSON API routes for mounting on the daemon."""
     routes: list = [
         Route("/", _index, methods=["GET"]),
         Route("/api/health", _api(_health, public=True), methods=["GET"]),
-        Route("/api/hook/rules", _hook_rules, methods=["GET"]),
-        Route("/api/hook/auto-register", _hook_auto_register, methods=["GET"]),
-        Route("/api/hook/gate", _hook_gate, methods=["GET"]),
-        Route("/api/hook/claim", _hook_claim, methods=["POST"]),
-        Route("/api/hook/update", _hook_update, methods=["GET"]),
-        Route("/api/hook/update-done", _hook_update_done, methods=["POST"]),
         Route("/api/update", _api(_update_status, public=True), methods=["GET"]),
         # admin: approving queues a restart of the daemon that every session
         # on this machine (and every member, in server mode) depends on.
@@ -1595,6 +1507,9 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/tasks/{tid}/release", _api(_task_release), methods=["POST"]),
         Route("/api/projects/{slug}/tasks/{tid}/archive", _api(_task_archive), methods=["POST"]),
         Route("/api/projects/{slug}/asoode/links", _api(_asoode_links), methods=["GET"]),
+        Route("/api/projects/{slug}/asoode/links/{link_id:int}", _api(_asoode_link_update), methods=["PATCH"]),
+        Route("/api/projects/{slug}/asoode/links/{link_id:int}", _api(_asoode_link_delete), methods=["DELETE"]),
+        Route("/api/projects/{slug}/asoode/link-proposals", _api(_asoode_link_proposals), methods=["POST"]),
         Route("/api/projects/{slug}/asoode/link", _api(_asoode_link), methods=["POST"]),
         Route("/api/projects/{slug}/asoode/push", _api(_asoode_push), methods=["POST"]),
         Route("/api/projects/{slug}/asoode/import", _api(_asoode_import), methods=["POST"]),
@@ -1613,6 +1528,8 @@ def build_routes() -> list:
         Route("/api/templates/{tid}/items/{iid}", _api(_update_template_item), methods=["PUT"]),
         Route("/api/templates/{tid}/items/{iid}", _api(_delete_template_item), methods=["DELETE"]),
     ]
+    # Every /api/hook/* endpoint, owned by web/hooks.py.
+    routes.extend(hooks.HOOK_ROUTES)
     assets = _DIST / "assets"
     if assets.is_dir():
         routes.append(Mount("/assets", app=StaticFiles(directory=str(assets))))

@@ -2,6 +2,9 @@ import type {
   AsoodeStatus,
   BoardRef,
   ProjectLink,
+  ProjectLinkUpdate,
+  ProjectLinksResponse,
+  Routing,
   ApplyTemplateResult,
   AuthSession,
   BulkAddRuleInput,
@@ -460,7 +463,10 @@ export const api = {
     );
   },
 
-  createTask(slug: string, input: TaskInput): Promise<{ status: string; task: Task }> {
+  createTask(
+    slug: string,
+    input: TaskInput
+  ): Promise<{ status: string; task: Task; routing?: Routing }> {
     return request(`/api/projects/${encodeURIComponent(slug)}/tasks`, {
       method: "POST",
       body: JSON.stringify(input),
@@ -473,11 +479,21 @@ export const api = {
     );
   },
 
+  /**
+   * `routing` comes back only from a daemon that understands `path`/`target`;
+   * a silent absence means the task was saved WITHOUT being routed, which the
+   * caller has to say out loud rather than report a move that never happened.
+   */
   updateTask(
     slug: string,
     tid: string,
     input: TaskUpdate
-  ): Promise<{ status: string; task: Task; changed: string[] }> {
+  ): Promise<{
+    status: string;
+    task: Task;
+    changed: string[];
+    routing?: Routing;
+  }> {
     return request(
       `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(tid)}`,
       { method: "PUT", body: JSON.stringify(input) }
@@ -674,8 +690,32 @@ export const api = {
     return request("/api/asoode/pat", { method: "DELETE" });
   },
 
-  getProjectLinks(slug: string): Promise<{ slug: string; links: ProjectLink[] }> {
+  getProjectLinks(slug: string): Promise<ProjectLinksResponse> {
     return request(`/api/projects/${encodeURIComponent(slug)}/asoode/links`);
+  },
+
+  /**
+   * Change one link in place: its paths, its label, or which board is the
+   * default. A bad `match_paths` entry comes back as a 400 carrying the
+   * server's own message - show that, never a second opinion invented here.
+   */
+  updateProjectLink(
+    slug: string,
+    linkId: number,
+    fields: ProjectLinkUpdate
+  ): Promise<{ link: ProjectLink }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/asoode/links/${linkId}`,
+      { method: "PATCH", body: JSON.stringify(fields) }
+    );
+  },
+
+  /** Unlinks a board. Tasks already mirrored to it stay where they are. */
+  deleteProjectLink(slug: string, linkId: number): Promise<{ deleted: boolean }> {
+    return request(
+      `/api/projects/${encodeURIComponent(slug)}/asoode/links/${linkId}`,
+      { method: "DELETE" }
+    );
   },
 
   listBoards(): Promise<{ boards: BoardRef[] }> {
@@ -684,7 +724,15 @@ export const api = {
 
   attachBoard(
     slug: string,
-    input: { work_package_id?: string; external_ref?: string; label?: string; is_default?: boolean; backfill?: boolean }
+    input: {
+      work_package_id?: string;
+      external_ref?: string;
+      label?: string;
+      is_default?: boolean;
+      backfill?: boolean;
+      /** Repo-relative prefixes this board owns, from the attach form. */
+      match_paths?: string[];
+    }
   ): Promise<Record<string, unknown>> {
     return request(`/api/projects/${encodeURIComponent(slug)}/asoode/link`, {
       method: "POST",

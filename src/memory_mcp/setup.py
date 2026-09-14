@@ -55,18 +55,35 @@ HOOK_EVENTS = {
     "UserPromptSubmit": ["inject-rules.sh"],
     "SessionStart": ["session-start.sh"],
     "Stop": ["session-end.sh", "auto-update-install.sh"],
-    # The only hook here that can REFUSE anything. The other three print into
-    # the model's context and hope; this one's exit status decides whether the
-    # tool runs, which is what makes "put the work on the board first" an
-    # invariant instead of a rule that held about 70% of the time.
-    "PreToolUse": ["require-task.sh"],
+    # The only hooks here that can REFUSE anything. The others print into the
+    # model's context and hope; a PreToolUse exit status decides whether the tool
+    # runs, which is what makes "put the work on the board first" an invariant
+    # instead of a rule that held about 70% of the time. Two scripts, because
+    # they watch different tools: one the edits, one the dispatches.
+    "PreToolUse": ["require-task.sh", "record-dispatch.sh"],
+    # Counts agents OUT, as record-dispatch.sh counts them in: the difference is
+    # how many are running, which the dispatch hook needs to ask before a third
+    # concurrent agent. Its own script because a matcher is per script, and
+    # `Agent|Task` on SubagentStop would be matched against the agent's TYPE.
+    "SubagentStop": ["record-subagent-stop.sh"],
 }
 
-#: Events that only fire for matching tools. PreToolUse without this would run
-#: on every Read and Grep - a needless round trip before each one, and a gate on
-#: exploration, which must always stay free.
+#: Which tools each script fires for. Keyed by SCRIPT, not by event: the two
+#: PreToolUse scripts must not see each other's tools - require-task.sh on an
+#: Agent call would gate delegation, and record-dispatch.sh on an Edit would log
+#: every file as a dispatch. `_add_hook` already makes one group per command, so
+#: the installed settings.json simply gets two PreToolUse groups.
+#:
+#: A PreToolUse hook with no matcher at all would run on every Read and Grep: a
+#: needless round trip before each one, and a gate on exploration, which must
+#: always stay free.
+#:
+#: `Agent|Task`: the harness names the delegation tool `Agent` and parts of the
+#: documentation call it `Task`. Matching both costs nothing and means the ledger
+#: does not depend on which name this CLI build uses.
 HOOK_MATCHERS = {
-    "PreToolUse": "Edit|Write|NotebookEdit",
+    "require-task.sh": "Edit|Write|NotebookEdit",
+    "record-dispatch.sh": "Agent|Task",
 }
 
 #: Where the source repo lives. The installed hooks run from
@@ -313,7 +330,7 @@ def setup_hooks(remote_url: str | None = None, token: str | None = None) -> None
                 f"{env_prefix}{shlex.quote(str(dst))}" if env_prefix else str(dst)
             )
             if _add_hook(
-                settings_obj, event, command, HOOK_MATCHERS.get(event),
+                settings_obj, event, command, HOOK_MATCHERS.get(script),
             ):
                 added += 1
 
@@ -365,12 +382,39 @@ def _installed_agents_manifest() -> Path:
 # is a base only and is not installed.
 
 EXTENSION_MARKER = "{{EXTENSION}}"
+#: Replaced at install with the INSTALLED agent's own `name`. A base prompt is
+#: shared by every agent that extends it, so it cannot spell out which agent it
+#: is; the leaf's name only exists once composition is finished. It matters
+#: because `memory_session_start(agent=...)` is what keeps a subagent from
+#: closing the lead's session, and an agent guessing its own type string - or
+#: leaving it out - does exactly that, silently.
+AGENT_NAME_MARKER = "{{AGENT_NAME}}"
 _FRONT_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
 _FRONT_ORDER = (
     "name", "description", "model", "effort", "color", "isolation",
     "tools", "disallowedTools", "skills",
 )
 _COMPOSE_ONLY_KEYS = ("extends", "abstract")
+
+#: The one frontmatter key a child ADDS to rather than replaces. Every other key
+#: is "nearest layer wins", which is right for a model or an effort level and
+#: wrong for a denial: `_base.md` denies `Agent` to every agent, and
+#: `reviewer.md` denies `Edit, Write, NotebookEdit` on top - replacing would
+#: silently hand the reviewer the Agent tool back. That is not hypothetical: on
+#: 2026-09-13 one reviewer spawned six "angle" reviewers and one of those spawned
+#: four more, because subagents could dispatch.
+_UNION_KEY = "disallowedTools"
+
+
+def _union_tool_list(*values: str | None) -> str:
+    """`Edit, Write` + `Agent` -> `Edit, Write, Agent`: order kept, no duplicates."""
+    seen: list[str] = []
+    for value in values:
+        for item in (value or "").split(","):
+            item = item.strip()
+            if item and item not in seen:
+                seen.append(item)
+    return ", ".join(seen)
 
 
 class AgentCompositionError(RuntimeError):
@@ -479,6 +523,9 @@ def compose_agent(path: Path, sources: dict[str, Path], _chain: tuple = ()) -> s
     base_front, base_body = base_parsed
     merged = {**base_front, **{k: v for k, v in front.items() if k not in _COMPOSE_ONLY_KEYS}}
     merged = {k: v for k, v in merged.items() if k not in _COMPOSE_ONLY_KEYS}
+    denied = _union_tool_list(base_front.get(_UNION_KEY), front.get(_UNION_KEY))
+    if denied:
+        merged[_UNION_KEY] = denied
     layer = body.strip("\n")
     if EXTENSION_MARKER in base_body:
         composed = base_body.replace(EXTENSION_MARKER, layer, 1)
@@ -491,13 +538,15 @@ def installable_agent_text(path: Path, sources: dict[str, Path]) -> str:
     """What is written to ~/.claude/agents/: composed, and with no marker left
     for Claude Code to read as prompt text."""
     text = compose_agent(path, sources)
-    if EXTENSION_MARKER not in text:
+    if EXTENSION_MARKER not in text and AGENT_NAME_MARKER not in text:
         return text
     parsed = parse_agent(text)
     if parsed is None:
-        return text.replace(EXTENSION_MARKER, "")
+        return text.replace(EXTENSION_MARKER, "").replace(AGENT_NAME_MARKER, path.stem)
     front, body = parsed
-    return _render_agent(front, body.replace(EXTENSION_MARKER, ""))
+    name = front.get("name") or path.stem
+    body = body.replace(EXTENSION_MARKER, "").replace(AGENT_NAME_MARKER, name)
+    return _render_agent(front, body)
 
 
 def setup_agents() -> None:

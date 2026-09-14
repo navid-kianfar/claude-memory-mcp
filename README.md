@@ -401,7 +401,18 @@ nobody would plan around.
 `memory_task_attach(task_id, path)` copies a file into the task store and mirrors
 it to the remote task — a screenshot proving a fix, a failing log, a generated
 report. Content-addressed, so the same file on two tasks is one blob; sent once,
-because no platform gives an attachment an idempotency key.
+because no platform gives an attachment an idempotency key. Attaching bytes a
+task already holds returns the existing attachment instead of uploading it
+twice, and `memory_task_detach(attachment_id)` removes one — locally and from
+the remote card.
+
+**Files pasted into the Claude compose box.** The client keeps a pasted image
+only as base64 inside the session transcript — there is no file path. The hooks
+hand the transcript to the daemon, which copies each image you pasted into the
+store and **parks** it; images the model produced itself (screenshots, rendered
+PDF pages) are never taken. Nothing is attached without asking: the session is
+told which task is in progress and asks you, and on a yes calls
+`memory_task_attach(task_id, pending_id=...)`.
 
 ## Mirror the list to a real board (asoode)
 
@@ -599,8 +610,9 @@ each other is stated once:
   verifies a change on the running product before it is committed.
 
 A dispatch costs roughly 60k tokens at the floor, so the lead does one-file work
-itself and delegates genuine specialisms or genuinely parallel work
-(`frontend` and `backend` are worktree-isolated and can run at once).
+itself and delegates genuine specialisms or genuinely parallel work (`frontend`
+and `backend` can run at once; they share the one checkout unless the user turns
+on worktree isolation in the Claude interface, so each gets a disjoint file set).
 
 See [`agents/README.md`](agents/README.md) for the composition rules and
 [`docs/bridge/06-agent-team.md`](docs/bridge/06-agent-team.md) for the design and
@@ -647,7 +659,7 @@ All 74 tools:
 | Import/Export | `memory_export`, `memory_import`, `memory_import_claude_md` |
 | Model | `memory_model_info`, `memory_set_model`, `memory_reembed` |
 | asoode bridge | `memory_asoode_status`, `memory_asoode_boards`, `memory_asoode_attach`, `memory_asoode_link`, `memory_asoode_import`, `memory_asoode_reconcile`, `memory_asoode_push`, `memory_asoode_links` |
-| Attachments | `memory_task_attach`, `memory_task_attachments` |
+| Attachments | `memory_task_attach`, `memory_task_attachments`, `memory_task_detach` |
 | Misc | `memory_provenance`, `memory_version`, `memory_check_update` |
 
 ## Command line

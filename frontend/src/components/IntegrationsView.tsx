@@ -1,10 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, Link2, RefreshCw, Send } from "lucide-react";
+import { AlertTriangle, Check, RefreshCw, Send } from "lucide-react";
 import { api } from "../lib/api";
-import type { AsoodeStatus, BoardRef, Project, ProjectLink } from "../types";
+import type {
+  AsoodeStatus,
+  BoardRef,
+  LinkProposal,
+  Project,
+  ProjectLink,
+  ProjectLinkUpdate,
+} from "../types";
+import { describeLinkError } from "../lib/links";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
 import { Badge } from "./ui/Badge";
+import { AttachBoardRow } from "./AttachBoardRow";
+import type { AttachBoardInput } from "./AttachBoardRow";
+import { LinkProposalsCard, proposalKey } from "./LinkProposalsCard";
+import { ProjectLinkRow } from "./ProjectLinkRow";
 
 /**
  * asoode integration: where the server is, the machine-wide credential, and
@@ -26,7 +38,9 @@ export function IntegrationsView({ projects }: { projects: Project[] }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [token, setToken] = useState("");
   const [urls, setUrls] = useState({ api_url: "", app_url: "", socket_url: "" });
-  const [attachTo, setAttachTo] = useState<Record<string, string>>({});
+  // Bindings a committed manifest suggests, per project. Absent from an older
+  // daemon's answer, in which case there is simply no Proposals card.
+  const [proposals, setProposals] = useState<Record<string, LinkProposal[]>>({});
 
   const load = useCallback(async () => {
     setError(null);
@@ -55,6 +69,7 @@ export function IntegrationsView({ projects }: { projects: Project[] }) {
     try {
       const r = await api.getProjectLinks(slug);
       setLinks((prev) => ({ ...prev, [slug]: r.links }));
+      setProposals((prev) => ({ ...prev, [slug]: r.proposals ?? [] }));
     } catch {
       /* a project with no links is not an error */
     }
@@ -79,6 +94,102 @@ export function IntegrationsView({ projects }: { projects: Project[] }) {
     }
   };
 
+  /**
+   * One link changed. The answer carries the server's NORMALISED link, which is
+   * handed back so the row can replace its draft with what was actually stored;
+   * the list is reloaded as well because making one board the default unmakes
+   * another, and that is the server's decision to report, not ours to guess.
+   *
+   * Rejects with a presentable Error - the row shows it next to the field that
+   * caused it, which a banner at the top of a ten-link list cannot do.
+   */
+  const patchLink = async (
+    slug: string,
+    linkId: number,
+    fields: ProjectLinkUpdate
+  ): Promise<ProjectLink> => {
+    setBusy(`link:${linkId}`);
+    try {
+      const res = await api.updateProjectLink(slug, linkId, fields);
+      await loadLinks(slug);
+      return res.link;
+    } catch (err) {
+      throw new Error(describeLinkError(err, "Could not change this link"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const deleteLink = async (slug: string, linkId: number): Promise<void> => {
+    setBusy(`link:${linkId}`);
+    setNotice(null);
+    try {
+      await api.deleteProjectLink(slug, linkId);
+      await loadLinks(slug);
+      setNotice("Board unlinked. Tasks already mirrored to it were left alone.");
+    } catch (err) {
+      throw new Error(describeLinkError(err, "Could not unlink this board"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Attach a board. Throws on failure INSTEAD of raising the banner at the top
+   * of the page: the row keeps the board and the paths that were typed, and
+   * says what went wrong where the eye already is. A cleared form after a
+   * failed attach is how a ten-project list loses a careful bit of typing.
+   */
+  const attachBoard = async (slug: string, input: AttachBoardInput) => {
+    const name = projects.find((p) => p.slug === slug)?.display_name ?? slug;
+    setBusy(`attach:${slug}`);
+    setNotice(null);
+    try {
+      await api.attachBoard(slug, input);
+      await loadLinks(slug);
+      setNotice(`${name} linked. Existing tasks are not sent until you mirror.`);
+    } catch (err) {
+      throw new Error(describeLinkError(err, "Could not attach this board"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Apply ONE proposal. `unlinked` attaches the board with the proposed paths;
+   * `differs` only moves the paths of the link that is already there. There is
+   * no bulk apply on purpose - see LinkProposalsCard.
+   */
+  const applyProposal = async (slug: string, proposal: LinkProposal) => {
+    const key = `prop:${slug}:${proposalKey(proposal)}`;
+    setBusy(key);
+    setNotice(null);
+    try {
+      if (proposal.status === "unlinked") {
+        await api.attachBoard(slug, {
+          work_package_id: proposal.remote_work_package_id,
+          label: proposal.label ?? undefined,
+          is_default: proposal.is_default,
+          match_paths: proposal.match_paths,
+        });
+      } else if (proposal.link_id !== null) {
+        await api.updateProjectLink(slug, proposal.link_id, {
+          match_paths: proposal.match_paths.length ? proposal.match_paths : null,
+        });
+      } else {
+        throw new Error(
+          "This proposal says a link already exists but carries no link_id, so there is nothing to update."
+        );
+      }
+      await loadLinks(slug);
+      setNotice("Proposal applied.");
+    } catch (err) {
+      throw new Error(describeLinkError(err, "Could not apply this proposal"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const linked = useMemo(
     () => projects.filter((p) => (links[p.slug] || []).length > 0),
     [projects, links]
@@ -87,9 +198,10 @@ export function IntegrationsView({ projects }: { projects: Project[] }) {
     () => projects.filter((p) => (links[p.slug] || []).length === 0),
     [projects, links]
   );
-
-  const boardLabel = (b: BoardRef) =>
-    `${b.title}${b.project_title ? ` — ${b.project_title}` : ""}`;
+  const proposed = useMemo(
+    () => projects.filter((p) => (proposals[p.slug] || []).length > 0),
+    [projects, proposals]
+  );
 
   return (
     <div className="space-y-6 p-6">
@@ -212,13 +324,25 @@ export function IntegrationsView({ projects }: { projects: Project[] }) {
       <section className="rounded-lg border border-border bg-card p-4">
         <div className="mb-1 flex items-center justify-between">
           <h2 className="text-sm font-semibold">Linked projects</h2>
-          <Button variant="ghost" size="sm" onClick={() => void load()}>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label="Reload boards and links"
+            onClick={() => {
+              // The links are what this section is about, so refresh has to
+              // reload them too - it used to fetch only the status and the
+              // board list, which left the rows below it stale.
+              void load();
+              projects.forEach((p) => void loadLinks(p.slug));
+            }}
+          >
             <RefreshCw className="size-3.5" />
           </Button>
         </div>
         <p className="mb-3 text-xs text-muted-foreground">
-          A project links to MANY boards — one per app in a monorepo. The board
-          marked default is where a task with no explicit target goes.
+          A project links to MANY boards — one per app in a monorepo. Give a board the
+          repo subpaths it owns and a task about a file under one of them goes there;
+          the board marked ★ is where everything else goes.
         </p>
 
         {linked.length === 0 && (
@@ -240,14 +364,33 @@ export function IntegrationsView({ projects }: { projects: Project[] }) {
                   <Send className="mr-1 size-3" /> Mirror now
                 </Button>
               </div>
-              <div className="flex flex-wrap gap-1">
+              <div className="space-y-1.5">
                 {(links[p.slug] || []).map((l) => (
-                  <Badge key={l.id} variant={l.is_default ? "default" : "outline"}>
-                    {l.label || l.remote_work_package_id.slice(0, 8)}
-                    {l.is_default && " ★"}
-                  </Badge>
+                  <ProjectLinkRow
+                    key={l.id}
+                    link={l}
+                    busy={busy === `link:${l.id}`}
+                    onPatch={(fields) => patchLink(p.slug, l.id, fields)}
+                    onDelete={() => deleteLink(p.slug, l.id)}
+                  />
                 ))}
               </div>
+              {status?.pat_configured && (
+                <div className="mt-2.5 border-t border-border/60 pt-2.5">
+                  <h4 className="mb-1.5 text-xs font-semibold text-muted-foreground">
+                    Attach another board
+                  </h4>
+                  <AttachBoardRow
+                    boards={boards}
+                    alreadyLinked={(links[p.slug] || []).map(
+                      (l) => l.remote_work_package_id
+                    )}
+                    isFirstLink={false}
+                    busy={busy === `attach:${p.slug}`}
+                    onAttach={(input) => attachBoard(p.slug, input)}
+                  />
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -259,46 +402,49 @@ export function IntegrationsView({ projects }: { projects: Project[] }) {
             </h3>
             <div className="space-y-2">
               {unlinked.slice(0, 8).map((p) => (
-                <div key={p.slug} className="flex items-center gap-2">
-                  <span className="w-40 shrink-0 truncate text-sm">{p.display_name}</span>
-                  <select
-                    className="h-9 flex-1 rounded-md border border-input bg-background px-2 text-sm"
-                    value={attachTo[p.slug] || ""}
-                    onChange={(e) => setAttachTo({ ...attachTo, [p.slug]: e.target.value })}
-                  >
-                    <option value="">choose a board…</option>
-                    {boards.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {boardLabel(b)}
-                      </option>
-                    ))}
-                  </select>
-                  <Button
-                    size="sm"
-                    disabled={!attachTo[p.slug] || busy === `link:${p.slug}`}
-                    onClick={() =>
-                      run(
-                        `link:${p.slug}`,
-                        async () => {
-                          const board = boards.find((b) => b.id === attachTo[p.slug]);
-                          await api.attachBoard(p.slug, {
-                            work_package_id: attachTo[p.slug],
-                            label: board?.external_ref || board?.title,
-                          });
-                          await loadLinks(p.slug);
-                        },
-                        `${p.display_name} linked. Existing tasks are not sent until you mirror.`
-                      )
-                    }
-                  >
-                    <Link2 className="mr-1 size-3" /> Link
-                  </Button>
-                </div>
+                <AttachBoardRow
+                  key={p.slug}
+                  boards={boards}
+                  leading={
+                    <span className="w-40 shrink-0 truncate text-sm">{p.display_name}</span>
+                  }
+                  isFirstLink
+                  busy={busy === `attach:${p.slug}`}
+                  onAttach={(input) => attachBoard(p.slug, input)}
+                />
               ))}
             </div>
           </div>
         )}
       </section>
+
+      {/* ---- manifest proposals ---- */}
+      {proposed.length > 0 && (
+        <section className="rounded-lg border border-border bg-card p-4">
+          <h2 className="mb-1 text-sm font-semibold">Proposed by the manifest</h2>
+          <p className="mb-3 text-xs text-muted-foreground">
+            Bindings a committed manifest suggests for this machine. Nothing here is
+            applied for you — each row is a board that would start receiving real tasks,
+            so linking stays an explicit act, one row at a time.
+          </p>
+          <div className="space-y-3">
+            {proposed.map((p) => (
+              <LinkProposalsCard
+                key={p.slug}
+                projectName={p.display_name}
+                proposals={proposals[p.slug] || []}
+                busyKey={
+                  busy?.startsWith(`prop:${p.slug}:`)
+                    ? busy.slice(`prop:${p.slug}:`.length)
+                    : null
+                }
+                onApply={(proposal) => applyProposal(p.slug, proposal)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
     </div>
   );
 }

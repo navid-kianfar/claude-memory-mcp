@@ -34,6 +34,12 @@ import { Input } from "./ui/Input";
 export interface TaskListViewProps {
   tasks: Task[];
   meta: Record<string, TaskRowMeta>;
+  /**
+   * link id -> board name, for the chip on a row. Empty unless the project
+   * mirrors to more than one board, which is the only case where which board a
+   * task went to is a question.
+   */
+  boardNames?: Record<number, string>;
   onOpenTask: (task: Task) => void;
   onCreateTask: (title: string, state: TaskState) => Promise<void> | void;
   onReorder: (orderedIds: string[]) => Promise<void> | void;
@@ -52,6 +58,7 @@ export interface TaskListViewProps {
 export function TaskListView({
   tasks,
   meta,
+  boardNames,
   onOpenTask,
   onCreateTask,
   onReorder,
@@ -102,6 +109,7 @@ export function TaskListView({
           state={group.state}
           tasks={group.tasks}
           meta={meta}
+          boardNames={boardNames}
           expanded={!collapsedStates.has(group.state)}
           onToggle={() => onToggleState(group.state)}
           onOpenTask={onOpenTask}
@@ -117,6 +125,7 @@ interface StateGroupProps {
   state: TaskState;
   tasks: Task[];
   meta: Record<string, TaskRowMeta>;
+  boardNames?: Record<number, string>;
   expanded: boolean;
   onToggle: () => void;
   onOpenTask: (task: Task) => void;
@@ -128,6 +137,7 @@ function StateGroup({
   state,
   tasks,
   meta,
+  boardNames,
   expanded,
   onToggle,
   onOpenTask,
@@ -203,6 +213,9 @@ function StateGroup({
               key={task.id}
               task={task}
               meta={meta[task.id]}
+              boardName={
+                task.link_id !== null ? boardNames?.[task.link_id] : undefined
+              }
               onOpen={() => onOpenTask(task)}
               dragging={dragId === task.id}
               dropTarget={overId === task.id && dragId !== task.id}
@@ -277,6 +290,7 @@ function StateGroup({
 function TaskRow({
   task,
   meta,
+  boardName,
   onOpen,
   dragging,
   dropTarget,
@@ -287,6 +301,8 @@ function TaskRow({
 }: {
   task: Task;
   meta?: TaskRowMeta;
+  /** The board this task mirrors to; only set when the project has several. */
+  boardName?: string;
   onOpen: () => void;
   dragging: boolean;
   dropTarget: boolean;
@@ -398,6 +414,14 @@ function TaskRow({
               </span>
             ))}
           </div>
+        )}
+        {boardName && (
+          <span
+            title={`Mirrored to the ${boardName} board`}
+            className="max-w-[140px] shrink-0 truncate rounded border border-border px-1.5 py-0.5 text-[0.6rem] font-medium text-muted-foreground"
+          >
+            {boardName}
+          </span>
         )}
         {task.role && (
           <span

@@ -271,6 +271,7 @@ def memory_asoode_link(
     project_title: str | None = None,
     board_title: str | None = None,
     asoode_project_id: str | None = None,
+    match_paths: list[str] | None = None,
 ) -> dict:
     """Link this memory project to an asoode board, creating what is missing.
 
@@ -281,14 +282,20 @@ def memory_asoode_link(
 
     Safe to re-run: the work package carries the memory project's stable uid as
     its externalRef, so a second call returns the same board rather than a
-    duplicate. Creating anything on the user's asoode account is outward-facing
-    though - ask before the first link, and say afterwards what was created.
+    duplicate - which also means this cannot make a SECOND board for the same
+    project; create that one on asoode and use memory_asoode_attach. Creating
+    anything on the user's asoode account is outward-facing though - ask before
+    the first link, and say afterwards what was created.
+
+    `match_paths` binds the board to repo subtrees in the same call (see
+    memory_asoode_attach). The board becomes the default only if the project
+    has none yet.
     """
     def _run():
         slug = _resolve(project)
         return container.task_bridge.bootstrap(
             slug, project_title=project_title, board_title=board_title,
-            reuse_project_id=asoode_project_id,
+            reuse_project_id=asoode_project_id, match_paths=match_paths,
         )
     return _safe(_run)
 
@@ -298,9 +305,10 @@ def memory_asoode_attach(
     external_ref: str | None = None,
     work_package_id: str | None = None,
     label: str | None = None,
-    is_default: bool = True,
+    is_default: bool | None = None,
     provider: str | None = None,
     backfill: bool = False,
+    match_paths: list[str] | None = None,
     project: str | None = None,
 ) -> dict:
     """Link this project to an asoode board that ALREADY EXISTS. Creates nothing.
@@ -315,8 +323,18 @@ def memory_asoode_attach(
 
     One project attaches to MANY boards, and they may be on DIFFERENT platforms:
     `provider` names which (memory_asoode_status lists them), defaulting to
-    asoode. `is_default` picks the board a task with no explicit target routes
-    to; promoting a link demotes the others.
+    asoode. `is_default` picks the board a task with no path or target routes
+    to; promoting a link demotes the others. OMITTED, the board becomes the
+    default only when the project has no default yet - attaching a second board
+    never takes the default from the first unless is_default=True says so.
+
+    `match_paths` are the repo-relative subtrees this board owns, e.g.
+    ["apps/api", "libs/shared"]. A task created with a `path` under one of them
+    lands here; the longest prefix wins across boards. Only plain prefixes: a
+    trailing `/**` or `/*` is accepted and dropped, any other glob, an absolute
+    path or `..` is refused naming the entry. Omitted on a re-attach, the
+    board's existing paths are kept. This is also how an `unlinked` binding
+    proposed by the committed manifest is applied (memory_asoode_links).
 
     The reply says how many existing tasks are NOT on the board yet. They are not
     sent automatically - linking a project with a long history would otherwise
@@ -328,8 +346,42 @@ def memory_asoode_attach(
         return container.task_bridge.attach(
             slug, external_ref=external_ref, work_package_id=work_package_id,
             label=label, is_default=is_default, provider=provider,
-            backfill=backfill,
+            backfill=backfill, match_paths=match_paths,
         )
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_asoode_link_update(
+    link_id: int,
+    match_paths: list[str] | None = None,
+    label: str | None = None,
+    is_default: bool | None = None,
+    project: str | None = None,
+) -> dict:
+    """Change a linked board's path bindings, label or default flag. No network.
+
+    Only what you pass changes. `match_paths=[]` clears the board's bindings;
+    `label=""` clears its label. `is_default=True` makes it the default and
+    demotes the others; the current default cannot be demoted with False -
+    promote another board instead. Bad `match_paths` entries are refused the way
+    memory_asoode_attach refuses them, naming the entry.
+
+    `link_id` comes from memory_asoode_links. This is how a `differs` binding
+    proposed by the committed manifest is applied - pass its match_paths. It
+    changes where FUTURE tasks route; a task already on a board stays there.
+    """
+    def _run():
+        from memory_mcp.db.registry import _UNSET
+
+        slug = _resolve(project)
+        link = container.task_bridge.update_link(
+            slug, link_id,
+            match_paths=_UNSET if match_paths is None else match_paths,
+            label=_UNSET if label is None else label,
+            is_default=is_default,
+        )
+        return {"status": "ok", "link": link}
     return _safe(_run)
 
 
@@ -449,39 +501,97 @@ def memory_asoode_columns(project: str | None = None, apply: bool = False) -> di
 
 @mcp.tool()
 def memory_asoode_links(project: str | None = None) -> dict:
-    """Show which asoode boards this memory project is linked to."""
+    """Show which asoode boards this memory project is linked to, and the
+    path->board bindings the committed manifest proposes.
+
+    Each link carries its `match_paths`. `proposals` come from
+    `.claude-memory/manifest.json` and are NEVER applied on their own - linking
+    is always explicit. Status `matches` needs nothing; `differs` is applied
+    with memory_asoode_link_update(link_id, match_paths=...); `unlinked` with
+    memory_asoode_attach(work_package_id=..., match_paths=...), which checks
+    the board exists. Ask the user before applying one.
+    """
     def _run():
         slug = _resolve(project)
-        return {"slug": slug, "links": container.task_bridge.links(slug)}
+        return {
+            "slug": slug,
+            "links": container.task_bridge.links(slug),
+            "proposals": container.task_bridge.link_proposals(slug),
+        }
     return _safe(_run)
 
 
 @mcp.tool()
 def memory_task_attach(
     task_id: str,
-    path: str,
+    path: str | None = None,
     filename: str | None = None,
+    pending_id: str | None = None,
     project: str | None = None,
 ) -> dict:
-    """Attach a file on disk to a task, and mirror it to the linked board.
+    """Attach a file to a task, and mirror it to the linked board.
 
     USE THIS FOR EVIDENCE. A screenshot proving a fix works, a failing log, a
     generated report, a diff - anything the work produced that someone reading
     the task later would want to see. A file described in prose is not the same
     as the file.
 
-    `path` is a local path; the bytes are COPIED into the task store, so a
-    scratch file that gets cleaned up later is safe to attach. `filename` renames
-    it for display. Attachments mirror to the remote task automatically on the
-    next flush, once and only once, on every platform that supports them.
+    Pass EXACTLY ONE of:
+    - `path` - a file on disk to upload. Not the repo subtree that routes a task
+      to a board - that is memory_task_add's `path`. The bytes are COPIED into
+      the task store, so a scratch file that gets cleaned up later is safe.
+    - `pending_id` - a file the USER attached in the Claude compose box, which
+      the hook parked and named in a `[Memory MCP] The user attached ...` notice.
+      When that notice says to ask the user, ask first and bind only on a yes.
+
+    `filename` renames it for display. Attachments mirror to the remote task
+    automatically on the next flush, once and only once, on every platform that
+    supports them; attaching the same bytes to the same task again returns the
+    attachment it already has. A wrong one is removed with memory_task_detach.
 
     Limits: 25 MB, and an empty file is refused.
     """
     def _run():
+        if (path is None) == (pending_id is None):
+            raise ValueError(
+                "Pass exactly one of path (a file on disk) or pending_id "
+                "(a file the user attached in the compose box)."
+            )
         slug = _resolve(project)
-        attachment = container.task_service.attach(slug, task_id, path, filename)
+        if pending_id is not None:
+            attachment = container.attachment_inbox_service.bind(
+                slug, pending_id, task_id, filename=filename,
+            )
+        else:
+            attachment = container.task_service.attach(slug, task_id, path, filename)
         return _with_mirror(
             {"status": "ok", "attachment": attachment.model_dump(mode="json")}, slug,
+        )
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_task_detach(attachment_id: str, project: str | None = None) -> dict:
+    """Remove an attachment from its task, locally and on the linked board.
+
+    For a file bound to the wrong task. `attachment_id` is the `id` that
+    memory_task_attach returned or memory_task_attachments lists. The stored
+    bytes are kept while another task (or a parked compose-box file) still uses
+    them; the remote copy is removed on the next flush.
+    """
+    def _run():
+        slug = _resolve(project)
+        found = container.attachment_repo.get(slug, attachment_id)
+        if found is None:
+            raise MemoryMCPError(f"Attachment not found: {attachment_id}")
+        container.task_service.detach(slug, attachment_id)
+        attachment = found[0]
+        return _with_mirror(
+            {"status": "ok", "detached": {
+                "id": attachment.id, "task_id": attachment.task_id,
+                "filename": attachment.filename,
+            }},
+            slug,
         )
     return _safe(_run)
 
@@ -505,6 +615,7 @@ def memory_task_plan(
     request: str,
     tasks: list[dict],
     project: str | None = None,
+    path: str | None = None,
 ) -> dict:
     """Record a multi-part request as an ordered set of tasks, then work them.
 
@@ -535,6 +646,18 @@ def memory_task_plan(
                       off a deliverable, optional. ONE level: an item that
                       already has a parent_index cannot be one, and a plan that
                       asks for it is rejected whole, before anything is created.
+      path            the repo subtree THIS item's work touches, e.g.
+                      "frontend/src/components" - routes it to the board whose
+                      match_paths own it (see memory_task_add), optional
+      target          a board label / externalRef / work package id, optional;
+                      wins over path, and a path matching another board is refused
+
+    The plan-level `path` is the default for every item that gives neither
+    path nor target. On a project with several boards, give each item the path
+    its work lives under - one plan often spans two boards. `path` here is the
+    repo subtree the work touches (routing), not a file to attach - that is
+    memory_task_attach. Each created task in the answer carries `routing` when
+    there was a routing decision; one refused route rolls back the whole plan.
 
     Descriptions are MARKDOWN and the board renders them - headings, lists,
     bold, `code`. A description long enough to hide several deliverables is
@@ -545,7 +668,9 @@ def memory_task_plan(
     """
     def _run():
         slug = _resolve(project)
-        return _with_mirror(container.task_planner.plan(slug, request, tasks), slug)
+        return _with_mirror(
+            container.task_planner.plan(slug, request, tasks, path=path), slug,
+        )
     return _safe(_run)
 
 
@@ -1386,6 +1511,7 @@ def memory_task_add(
     target: str | None = None,
     role: str | None = None,
     project: str | None = None,
+    path: str | None = None,
 ) -> dict:
     """Record a task: either a requirement parked for later, or work starting now.
 
@@ -1411,13 +1537,22 @@ def memory_task_add(
     out-of-scope work you noticed and are deliberately not doing now. Say that
     you queued it rather than acting on it.
 
-    `target` names the asoode board this task belongs to, when the project is
-    linked to several - a monorepo has one work package per app. Give a link
-    label, a work package externalRef, or its id; memory_asoode_links lists
-    them. Omit it and the task routes to the project's DEFAULT board, which is
-    what keeps single-board projects working unchanged. A wrong name is
-    rejected rather than guessed - a task silently landing on the wrong board is
-    worse than a failed create.
+    `path` is the repo subtree the work touches (routing), not a file to attach -
+    that is memory_task_attach. On a project linked to several boards - a
+    monorepo with one work package per app - PASS IT: "apps/api/tests/test_x.py"
+    or "frontend/src" (repo-relative; an absolute path must be inside the
+    project folder). It is matched against each board's match_paths, longest
+    prefix wins, and the task lands on that board. The answer's `routing` says
+    which board and why; `matched: false` means nothing matched and the default
+    was used. A path outside the repo, or one two boards claim equally, is
+    refused.
+
+    `target` names the board outright: a link label, a work package externalRef,
+    or its id (memory_asoode_links lists them). It wins over `path`, but a path
+    that matched a DIFFERENT board is refused as a contradiction. With neither,
+    the task routes to the project's DEFAULT board, which keeps single-board
+    projects working unchanged. A wrong name is rejected rather than guessed - a
+    task silently landing on the wrong board is worse than a failed create.
 
     `parent_id` makes this a SUB-TASK of that task, and a sub-task carries
     every property a task does - description, priority, labels, assignee,
@@ -1448,8 +1583,9 @@ def memory_task_add(
             source=TaskSource(source),
             target=target,
             role=role,
+            path=path,
         )
-        task = container.task_service.create(req)
+        task, routing = container.task_service.create_routed(req)
         answer = {
             "status": "ok",
             "task": task.model_dump(mode="json"),
@@ -1458,6 +1594,8 @@ def memory_task_add(
                 "user asks for this one."
             ),
         }
+        if routing is not None:
+            answer["routing"] = routing
         hint = decomposition_hint(
             task.description, has_parent=task.parent_id is not None,
         )
@@ -1535,6 +1673,8 @@ def memory_task_update(
     estimated_minutes: int | None = None,
     role: str | None = None,
     project: str | None = None,
+    path: str | None = None,
+    target: str | None = None,
 ) -> dict:
     """Change a task. Only the fields you pass are touched.
 
@@ -1552,6 +1692,14 @@ def memory_task_update(
 
     `role` re-routes the task to an agent ('frontend', 'backend', ...); pass an
     empty string to clear it and let any agent claim it again.
+
+    `path` / `target` re-route the task to another BOARD, with the same meaning
+    as on memory_task_add (`path` here is the repo subtree the work touches, not
+    a file to attach - that is memory_task_attach). Only before the task is on
+    a board: once it has a card there, moving it is refused, naming that board,
+    because no board move exists and a second card would be created. A path
+    matching no board leaves the task where it is. The answer's `routing` says
+    what was decided.
     """
     def _run():
         slug = _resolve(project)
@@ -1569,13 +1717,17 @@ def memory_task_update(
             end_at=end_at,
             estimated_minutes=estimated_minutes,
             role=role,
+            path=path,
+            target=target,
         )
-        task, changed = container.task_service.update(req)
+        task, changed, routing = container.task_service.update_routed(req)
         answer = {
             "status": "ok",
             "task": task.model_dump(mode="json"),
             "changed": changed,
         }
+        if routing is not None:
+            answer["routing"] = routing
         # Finishing a task through update is the other way to finish one, so it
         # reports the clock exactly as memory_task_done does. A card going to
         # Done at zero minutes is the thing that must not pass unremarked.
@@ -1809,12 +1961,19 @@ def memory_task_release(
 
 
 @mcp.tool()
-def memory_session_start(project: str | None = None) -> dict:
-    """Start a session. Loads rules, last summary, sprint goals, recent decisions."""
+def memory_session_start(project: str | None = None, agent: str | None = None) -> dict:
+    """Start a session. Loads rules, last summary, sprint goals, recent decisions.
+
+    agent: the dispatched agent's type (its frontmatter name, e.g. 'python',
+    'reviewer'). The LEAD - the session talking to the person - passes nothing.
+    It is what lets the daemon tell a subagent's session from the lead's, which
+    several things need and none of them can work out for themselves: subagents
+    share the lead's MCP connection, so there is no other signal.
+    """
     def _run():
         slug = _resolve(project)
         set_active_project(slug)
-        ctx = container.session_service.start(slug)
+        ctx = container.session_service.start(slug, agent=agent)
         # So memory_task_start can claim for this session without the id being
         # threaded through every call.
         remember_memory_session(ctx.session_id)

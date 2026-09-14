@@ -41,7 +41,9 @@ class SessionService:
         # which case a session behaves exactly as it always has.
         self._task_bridge = task_bridge
 
-    def start(self, project: str) -> SessionContext:
+    def start(self, project: str, agent: str | None = None) -> SessionContext:
+        """Open a session. `agent` is the dispatched agent's type; the lead passes
+        nothing, which is what makes `is_lead_session` answerable at all."""
         session_id = str(uuid.uuid4())
 
         # Auto-close orphans. Bookkeeping only: a session with no ended_at may
@@ -50,15 +52,33 @@ class SessionService:
         # lease has run out - a live session refreshes its lease on every
         # mutation - so the tasks and clocks of a session that truly never came
         # back are released and stopped below, and nobody else's are touched.
-        orphans = self._session_repo.orphaned(project)
-        for orphan_id in orphans:
-            self._session_repo.end(project, orphan_id, AUTO_CLOSE_SUMMARY, 0, 0)
+        #
+        # EXCEPT when a dispatched agent is starting. Then we DO know the open
+        # session is alive: it is the lead that dispatched us, still mid-turn,
+        # waiting for our report. Closing it was the behaviour before `agent`
+        # existed and it made "which sessions are the lead's" answer nothing -
+        # the first subagent of a session ended the only lead there was.
+        if agent:
+            orphans: list[str] = []
+        else:
+            orphans = self._session_repo.orphaned(project)
+            for orphan_id in orphans:
+                self._session_repo.end(project, orphan_id, AUTO_CLOSE_SUMMARY, 0, 0)
         try:
             swept = self._task_service.sweep_expired(project)
         except Exception:  # noqa: BLE001 - a sweep must never stop a session starting
             swept = {"released": [], "clocks_stopped": []}
 
-        self._session_repo.insert(project, session_id)
+        # The MCP session id goes in beside the agent because subagents SHARE it
+        # with the lead: it is not an identity, but it is the only link back to
+        # the connection a session was started on, and a later reader would have
+        # no way to recover it.
+        from memory_mcp.context import current_session_id
+
+        self._session_repo.insert(
+            project, session_id,
+            metadata={"agent": agent, "mcp_session": current_session_id()},
+        )
         self._project_repo.touch(project)
 
         rules = self._rules_service.get_rules(project)
@@ -113,6 +133,23 @@ class SessionService:
             task_instructions=instructions,
             asoode=asoode,
         )
+
+    def open_lead_sessions(self, project: str) -> list[str]:
+        """Unended sessions that named no agent - the ones talking to a person."""
+        return self._session_repo.open_lead_sessions(project)
+
+    def is_lead_session(self, project: str, session_id: str) -> bool:
+        """Is this session a lead's, rather than a dispatched agent's?
+
+        False for a session that named an agent. True for one that did not, and
+        true for a session this project has never heard of - a caller asking
+        about an unknown id gets the answer that changes nothing, because the
+        alternative is treating a missing row as proof of a subagent.
+        """
+        if not session_id:
+            return False
+        meta = self._session_repo.metadata(project, session_id)
+        return not (meta or {}).get("agent")
 
     def _task_context(self, project: str, queued: list) -> tuple[dict | None, str | None]:
         """Pick the brief the queue gets, and why.

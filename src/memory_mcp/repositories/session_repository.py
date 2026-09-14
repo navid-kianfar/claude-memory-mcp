@@ -1,5 +1,7 @@
 """Session repository - CRUD for session records in per-project DB."""
 
+import json
+
 from memory_mcp.db.connection import connect
 from memory_mcp.models import SessionRecord
 
@@ -7,13 +9,55 @@ from memory_mcp.models import SessionRecord
 class SessionRepository:
     """Session CRUD."""
 
-    def insert(self, project: str, session_id: str) -> None:
+    def insert(
+        self, project: str, session_id: str, metadata: dict | None = None,
+    ) -> None:
+        """Open a session, optionally stamping who it belongs to.
+
+        `metadata` is the `sessions.metadata` JSON column, which existed unused
+        until `{"agent": ...}` gave it a job: a dispatched agent names its own
+        type, the lead passes nothing, and `open_lead_sessions` can then tell the
+        two apart. Writing NULL rather than `{}` for no metadata keeps every row
+        written before this indistinguishable from a lead's, which is what they
+        were.
+        """
         with connect(project) as conn:
             conn.execute(
-                "INSERT INTO sessions (id, started_at, last_seen_at) "
-                "VALUES (?, current_timestamp, current_timestamp)",
-                [session_id],
+                "INSERT INTO sessions (id, started_at, last_seen_at, metadata) "
+                "VALUES (?, current_timestamp, current_timestamp, ?)",
+                [session_id, json.dumps(metadata) if metadata else None],
             )
+
+    def open_lead_sessions(self, project: str) -> list[str]:
+        """Ids of unended sessions that did NOT name an agent - the leads'.
+
+        This is self-reported, and deliberately so: there is no way to ask a
+        session what dispatched it. A subagent that forgets to pass `agent` looks
+        like a second lead, which makes a caller ambiguous rather than wrong -
+        "two candidates, ask" instead of "bind it to the wrong one".
+        """
+        with connect(project) as conn:
+            rows = conn.execute(
+                "SELECT id FROM sessions WHERE ended_at IS NULL "
+                "AND (metadata IS NULL "
+                "     OR json_extract_string(metadata, '$.agent') IS NULL) "
+                "ORDER BY started_at"
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def metadata(self, project: str, session_id: str) -> dict | None:
+        """The session's stored metadata, or None when it has none."""
+        with connect(project) as conn:
+            row = conn.execute(
+                "SELECT metadata FROM sessions WHERE id = ?", [session_id]
+            ).fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            value = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        except (TypeError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
 
     def touch(self, project: str, session_id: str) -> None:
         """Stamp last_seen_at. The heartbeat behind the multi-session claim: it

@@ -62,7 +62,16 @@ def fake_daemon(container, monkeypatch):
             return {"action": "existing", "slug": _claimed_slug(payload)}
         if path.endswith("/sync-export"):
             slug = path.split("/")[3]
-            return container.sync_service.build_full_snapshot(slug)
+            payload = container.sync_service.build_full_snapshot(slug)
+            payload["links"] = sync_cli._manifest_links(
+                container.task_bridge.manifest_links(slug)
+            )
+            return payload
+        if path.endswith("/asoode/link-proposals"):
+            slug = path.split("/")[3]
+            return {"proposals": container.task_bridge.set_link_proposals(
+                slug, sync_cli._manifest_links(payload["links"]),
+            )}
         if path.endswith("/sync-import"):
             slug = path.split("/")[3]
             result = container.sync_service.apply_snapshot(
@@ -183,6 +192,178 @@ class TestExport:
         assert sorted(p.name for p in _snap(repo).iterdir()) == [
             GITATTRIBUTES_NAME, ".gitignore", MANIFEST_NAME, SNAPSHOT_DB_NAME,
         ]
+
+
+def _bind(slug, wp, label, paths=None, *, is_default=False):
+    from memory_mcp.db.registry import upsert_project_link
+
+    return upsert_project_link(
+        slug, base_url="https://api.asoode.com", remote_project_id="p1",
+        remote_work_package_id=wp, label=label, is_default=is_default,
+        default_list_id="l1", state_list_map={"todo": "l1"}, match_paths=paths,
+    )
+
+
+class TestManifestLinks:
+    """The user's instruction: store the path->board bindings in the JSON, so a
+    clone knows where tasks land and the mapping is reviewable in git - without
+    ever binding a board on its own."""
+
+    def test_export_writes_version_3_with_the_bindings_and_no_credential(
+        self, container, fake_daemon, tmp_path,
+    ):
+        from memory_mcp.db.registry import set_credential
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        slug = _project(container, "bound", repo)
+        _bind(slug, "wp-main", "Main", is_default=True)
+        _bind(slug, "wp-ui", "UI", ["frontend/**"])
+        set_credential("https://api.asoode.com", "asoode_pat_NEVER_IN_GIT")
+
+        sync_cli._export(str(repo))
+
+        text = (_snap(repo) / MANIFEST_NAME).read_text()
+        manifest = json.loads(text)
+        assert manifest["version"] == 3
+        assert manifest["links"] == [
+            {"provider": "asoode", "base_url": "https://api.asoode.com",
+             "remote_project_id": "p1", "remote_work_package_id": "wp-main",
+             "label": "Main", "is_default": True, "match_paths": []},
+            {"provider": "asoode", "base_url": "https://api.asoode.com",
+             "remote_project_id": "p1", "remote_work_package_id": "wp-ui",
+             "label": "UI", "is_default": False, "match_paths": ["frontend"]},
+        ]
+        assert "NEVER_IN_GIT" not in text
+
+    def test_the_daemon_route_carries_links_without_a_pat(self, tmp_path):
+        from memory_mcp.container import container as live
+        from memory_mcp.db.registry import set_credential
+        from memory_mcp.web import routes
+
+        live.project_service.init_project("route-links", "Route Links")
+        _bind("route-links", "wp-main", "Main", ["src"], is_default=True)
+        set_credential("https://api.asoode.com", "asoode_pat_NEVER_IN_GIT")
+
+        payload = routes._sync_export({"slug": "route-links"}, {}, {})
+
+        assert payload["links"][0]["match_paths"] == ["src"]
+        assert "NEVER_IN_GIT" not in json.dumps(payload)
+        assert "id" not in payload["links"][0]
+
+    def test_a_version_3_manifest_is_still_read_for_identity(
+        self, container, fake_daemon, tmp_path,
+    ):
+        from memory_mcp.context import detect_project_from_cwd
+
+        repo = tmp_path / "repo"
+        (repo / "apps" / "api").mkdir(parents=True)
+        slug = _project(container, "ident", repo)
+        _bind(slug, "wp-main", "Main", ["apps/api"], is_default=True)
+        sync_cli._export(str(repo))
+        # Registered under a path that no longer matches: only the manifest's
+        # project_id can answer "which project is this folder?".
+        container.project_repo.update_project_path(slug, str(tmp_path / "moved-away"))
+
+        assert json.loads((_snap(repo) / MANIFEST_NAME).read_text())["version"] == 3
+        assert detect_project_from_cwd(str(repo / "apps" / "api")) == slug
+
+    def test_importing_bindings_links_nothing_and_says_what_is_pending(
+        self, container, fake_daemon, tmp_path, capsys,
+    ):
+        from memory_mcp.db.registry import get_project_links
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        src = _project(container, "team", repo)
+        _store(container, src, "decision", "D1", "bindings travel")
+        _bind(src, "wp-main", "Main", is_default=True)
+        _bind(src, "wp-ui", "UI", ["frontend"])
+        sync_cli._export(str(repo))
+
+        clone = tmp_path / "clone"
+        clone.mkdir()
+        _clone_snapshot(repo, clone)
+        dst = _project(container, "teammate", clone)
+        capsys.readouterr()
+
+        sync_cli._import(str(clone))
+
+        assert get_project_links(dst) == [], "a manifest never binds a board"
+        statuses = [p["status"] for p in container.task_bridge.link_proposals(dst)]
+        assert statuses == ["unlinked", "unlinked"]
+        assert (
+            "[Memory MCP] 2 path->board bindings in .claude-memory/ are not applied. "
+            "Review with memory_asoode_links."
+        ) in capsys.readouterr().out
+
+    def test_a_teammate_with_no_boards_does_not_erase_the_committed_bindings(
+        self, container, fake_daemon, tmp_path,
+    ):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        src = _project(container, "origin", repo)
+        _bind(src, "wp-ui", "UI", ["frontend"], is_default=True)
+        sync_cli._export(str(repo))
+
+        clone = tmp_path / "clone"
+        clone.mkdir()
+        _clone_snapshot(repo, clone)
+        _project(container, "unbound", clone)
+        sync_cli._import(str(clone))   # SessionStart
+        sync_cli._export(str(clone))   # Stop
+
+        links = json.loads((_snap(clone) / MANIFEST_NAME).read_text())["links"]
+        assert [l["remote_work_package_id"] for l in links] == ["wp-ui"]
+        assert links[0]["match_paths"] == ["frontend"]
+
+    def test_an_older_daemon_sending_no_links_keeps_what_the_file_has(
+        self, container, fake_daemon, tmp_path, monkeypatch,
+    ):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        slug = _project(container, "older", repo)
+        _bind(slug, "wp-ui", "UI", ["frontend"], is_default=True)
+        sync_cli._export(str(repo))
+
+        def _old_daemon(path, method="GET", payload=None):
+            answer = fake_daemon(path, method, payload)
+            if path.endswith("/sync-export"):
+                answer.pop("links")
+            return answer
+
+        monkeypatch.setattr(sync_cli, "_daemon", _old_daemon)
+        sync_cli._export(str(repo))
+
+        links = json.loads((_snap(repo) / MANIFEST_NAME).read_text())["links"]
+        assert links[0]["match_paths"] == ["frontend"]
+
+    def test_a_daemon_without_the_proposals_route_costs_only_the_notice(
+        self, container, fake_daemon, tmp_path, monkeypatch, capsys,
+    ):
+        import urllib.error
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        slug = _project(container, "no-route", repo)
+        _store(container, slug, "decision", "D1", "still imported")
+        link = _bind(slug, "wp-ui", "UI", ["frontend"], is_default=True)
+        sync_cli._export(str(repo))
+        from memory_mcp.db.registry import delete_project_link
+
+        # Unlinked here, so a daemon WITH the route would print the notice.
+        delete_project_link(link["id"])
+
+        def _older(path, method="GET", payload=None):
+            if path.endswith("/link-proposals"):
+                raise urllib.error.HTTPError(path, 404, "Not Found", None, None)
+            return fake_daemon(path, method, payload)
+
+        monkeypatch.setattr(sync_cli, "_daemon", _older)
+        capsys.readouterr()
+        sync_cli._import(str(repo))
+
+        assert "path->board" not in capsys.readouterr().out
 
 
 class TestRoundTrip:

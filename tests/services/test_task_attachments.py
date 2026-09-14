@@ -84,6 +84,22 @@ class TestStoring:
         assert a.sha256 == b.sha256
         assert a.id != b.id, "two rows, one blob"
 
+    def test_the_same_file_twice_to_ONE_task_is_one_attachment(self, stack, project,
+                                                               a_file, tmp_path):
+        """Before v15 this made two rows, and the board got two identical files.
+        A renamed copy of the same bytes is still the same attachment."""
+        tasks, _, _ = stack
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        renamed = tmp_path / "again.png"
+        renamed.write_bytes(a_file.read_bytes())
+
+        first = tasks.attach(project, task.id, str(a_file))
+        second = tasks.attach(project, task.id, str(renamed), filename="other.png")
+
+        assert second.id == first.id
+        assert second.filename == "proof.png", "returned unchanged"
+        assert [a.id for a in tasks.attachments(project, task.id)] == [first.id]
+
     def test_removing_one_does_not_delete_a_shared_blob(self, stack, project, a_file):
         tasks, _, _ = stack
         first = tasks.create(CreateTaskRequest(project=project, title="A"))
@@ -158,6 +174,19 @@ class TestMirroring:
         bridge.flush(project)
         container.outbox_repo.enqueue(project, task.id, "attachment", {})
         bridge.flush(project)
+        assert len(provider.attachments_sent) == 1
+
+    def test_the_same_file_attached_twice_to_one_task_is_uploaded_once(
+        self, stack, project, a_file,
+    ):
+        tasks, bridge, provider = stack
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        tasks.attach(project, task.id, str(a_file))
+        tasks.attach(project, task.id, str(a_file))
+        bridge.flush(project)
+        tasks.attach(project, task.id, str(a_file))
+        bridge.flush(project)
+
         assert len(provider.attachments_sent) == 1
 
     def test_a_second_attachment_still_goes(self, stack, project, a_file, tmp_path):

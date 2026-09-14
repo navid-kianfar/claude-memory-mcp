@@ -10,10 +10,11 @@ import time
 
 from memory_mcp.repositories import (
     DigestRepository, MemoryRepository, ProjectRepository, SessionRepository, ProvenanceRepository,
-    AttachmentRepository, OutboxRepository, TaskRepository, TemplateRepository,
+    AttachmentInboxRepository, AttachmentRepository, OutboxRepository, TaskRepository,
+    TemplateRepository,
 )
 from memory_mcp.services import (
-    DigestService, MemoryService, SearchService, RulesService, RulesCache,
+    AttachmentInboxService, DigestService, MemoryService, SearchService, RulesService, RulesCache,
     SessionService, ProjectService, PortableService,
     ExportImportService, ModelService, UpdateService, ClaudeMdService,
     TaskService, TemplateService, SyncService, TaskBridge, TaskPlanner,
@@ -41,6 +42,7 @@ class Container:
         self.task_repo = TaskRepository()
         self.outbox_repo = OutboxRepository()
         self.attachment_repo = AttachmentRepository()
+        self.attachment_inbox_repo = AttachmentInboxRepository()
 
         # Caches
         self.rules_cache = RulesCache()
@@ -76,6 +78,10 @@ class Container:
             link_resolver=lambda project, target: self.task_bridge.resolve_link(
                 project, target
             ),
+            # Same late binding: a path (and/or target) to a routing decision.
+            path_resolver=lambda project, **kw: self.task_bridge.routing_for(
+                project, **kw
+            ),
             outbox_repo=self.outbox_repo,
             mirror=self._mirror_soon,
             attachment_repo=self.attachment_repo,
@@ -104,6 +110,11 @@ class Container:
         self.session_service = SessionService(
             self.session_repo, self.memory_repo, self.project_repo,
             self.rules_service, self.task_service, self.task_bridge,
+        )
+        # Compose-box files: parked from the transcript, bound through
+        # task_service.attach so one code path guards every attachment.
+        self.attachment_inbox_service = AttachmentInboxService(
+            self.attachment_inbox_repo, self.session_repo, self.task_service,
         )
 
 

@@ -26,7 +26,13 @@ def main(argv=None) -> None:
         slug = args.slug or detect_project_from_cwd(args.cwd)
         if not slug:
             return
-        text = format_intro(slug) if args.intro else rules_text_for_project(slug)
+        # The cwd names this repo's own specialists in the team text. There is no
+        # Claude session id on this path, so the per-turn line never escalates.
+        text = (
+            format_intro(slug, cwd=args.cwd)
+            if args.intro
+            else rules_text_for_project(slug, cwd=args.cwd)
+        )
         if text:
             print(text)
     except Exception:  # noqa: BLE001 - never break the prompt flow

@@ -41,13 +41,22 @@ class TaskPlanner:
 
     def plan(
         self, project: str, request: str, items: list[dict], *, mirror: bool = True,
+        path: str | None = None,
     ) -> dict:
         """Create the tasks for one request, in the order given.
 
         `items` carry title, description, and optionally priority, labels, role
-        (which agent the task is for) and parent_index - an index EARLIER in the
+        (which agent the task is for), parent_index - an index EARLIER in the
         same list, so a plan can express "this deliverable has these steps"
-        without a second round trip.
+        without a second round trip - and `path` / `target`, which route the
+        task to the board that owns that subtree (see TaskBridge.routing_for).
+        The plan-level `path` is the default for an item that names neither;
+        an item's own `target` is never overridden by it.
+
+        Forwarding these is the fix for the reported bug: the planner used to
+        drop `target`, so every planned task landed on the default board.
+        Each created task in the answer carries its `routing` when there was
+        one.
 
         Order is dependency order: `position` follows the list, so the queue can
         be worked top-down. Every task records the verbatim request as its first
@@ -94,7 +103,7 @@ class TaskPlanner:
                     "task of its own."
                 )
 
-        created, ids = [], []
+        created, ids, routings = [], [], []
         index = -1
         try:
             # ONE transaction for the whole plan. A half-applied plan is worse
@@ -107,7 +116,9 @@ class TaskPlanner:
             with transaction(project):
                 for index, item in enumerate(items):
                     parent_index = item.get("parent_index")
-                    task = self._tasks.create(CreateTaskRequest(
+                    target = (item.get("target") or "").strip() or None
+                    item_path = (item.get("path") or "").strip() or None
+                    task, routing = self._tasks.create_routed(CreateTaskRequest(
                         project=project,
                         title=item["title"].strip(),
                         description=item["description"].strip(),
@@ -116,8 +127,13 @@ class TaskPlanner:
                         parent_id=ids[parent_index] if parent_index is not None else None,
                         source=TaskSource.CLAUDE,
                         role=(item.get("role") or "").strip() or None,
+                        target=target,
+                        # The plan's path only fills in for an item that names
+                        # no board at all - a target is a stronger statement.
+                        path=item_path or (None if target else path),
                     ))
                     ids.append(task.id)
+                    routings.append(routing)
                     # The request verbatim, on every task it produced: a title gets
                     # edited, a description gets rewritten, and the thing that must
                     # not drift is what was actually asked for.
@@ -140,10 +156,16 @@ class TaskPlanner:
                 f"{where}: {type(e).__name__}: {e}"
             ) from e
 
+        tasks_out = []
+        for task, routing in zip(created, routings):
+            entry = task.model_dump(mode="json")
+            if routing is not None:
+                entry["routing"] = routing
+            tasks_out.append(entry)
         result = {
             "project": project,
             "request": text,
-            "tasks": [t.model_dump(mode="json") for t in created],
+            "tasks": tasks_out,
             "count": len(created),
             "mirrored": False,
         }

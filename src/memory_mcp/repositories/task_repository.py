@@ -9,7 +9,7 @@ from datetime import datetime
 
 from memory_mcp.db.connection import connect
 from memory_mcp.models import (
-    Task, TaskAttachment, TaskComment, TaskFilter, TaskTimeEntry,
+    PendingAttachment, Task, TaskAttachment, TaskComment, TaskFilter, TaskTimeEntry,
 )
 
 # Column order is load-bearing: every read uses this list and _row_to_task maps
@@ -831,6 +831,27 @@ class AttachmentRepository:
             row[8],
         )
 
+    def find_by_hash(self, project: str, task_id: str, sha256: str) -> TaskAttachment | None:
+        """The attachment already holding these bytes on this task, if any.
+
+        The guard that makes attaching idempotent: without it the same file
+        attached twice to one task became two rows, and the flusher uploaded
+        both - two identical files on the card.
+        """
+        with connect(project) as conn:
+            row = conn.execute(
+                "SELECT id, task_id, filename, content_type, size_bytes, sha256, "
+                "created_at, mirrored_at FROM task_attachments "
+                "WHERE task_id = ? AND sha256 = ? ORDER BY created_at ASC LIMIT 1",
+                [task_id, sha256],
+            ).fetchone()
+        if not row:
+            return None
+        return TaskAttachment(
+            id=row[0], task_id=row[1], filename=row[2], content_type=row[3],
+            size_bytes=row[4] or 0, sha256=row[5], created_at=row[6], mirrored_at=row[7],
+        )
+
     def unmirrored(self, project: str, task_id: str) -> list[dict]:
         """Attachments not yet sent, oldest first."""
         try:
@@ -867,7 +888,140 @@ class AttachmentRepository:
                 "SELECT count(*) FROM task_attachments WHERE sha256 = ?",
                 [attachment.sha256],
             ).fetchone()[0]
+        # A parked compose-box file points at the same blob until it is bound.
+        # Deleting the blob out from under it would make the later bind fail on
+        # "the bytes are gone" for a file the user did hand over.
+        if not still_used:
+            try:
+                with connect(project) as conn:
+                    still_used = conn.execute(
+                        "SELECT count(*) FROM attachment_inbox "
+                        "WHERE sha256 = ? AND bound_task_id IS NULL",
+                        [attachment.sha256],
+                    ).fetchone()[0]
+            except Exception:  # noqa: BLE001 - a DB older than v15 has no inbox
+                still_used = 0
         return None if still_used else path
+
+
+_INBOX_COLUMNS = (
+    "id, claude_session_id, sha256, filename, content_type, size_bytes, source, "
+    "created_at, bound_task_id, bound_at, notice, notified_at, path"
+)
+
+
+def _row_to_pending(row) -> tuple[PendingAttachment, str]:
+    return (
+        PendingAttachment(
+            id=row[0], claude_session_id=row[1], sha256=row[2], filename=row[3],
+            content_type=row[4], size_bytes=row[5] or 0, source=row[6],
+            created_at=row[7], bound_task_id=row[8], bound_at=row[9],
+            notice=row[10], notified_at=row[11],
+        ),
+        row[12],
+    )
+
+
+class AttachmentInboxRepository:
+    """Compose-box files parked until a session binds them to a task.
+
+    One row per (Claude session, bytes): the same paste scanned twice - at
+    UserPromptSubmit and again at Stop, or after a transcript was re-read from the
+    top - is found here and skipped, so it is parked and announced once.
+    """
+
+    def find(
+        self, project: str, claude_session_id: str, sha256: str,
+    ) -> PendingAttachment | None:
+        with connect(project) as conn:
+            row = conn.execute(
+                f"SELECT {_INBOX_COLUMNS} FROM attachment_inbox "
+                f"WHERE claude_session_id = ? AND sha256 = ? LIMIT 1",
+                [claude_session_id, sha256],
+            ).fetchone()
+        return _row_to_pending(row)[0] if row else None
+
+    def get(self, project: str, pending_id: str) -> tuple[PendingAttachment, str] | None:
+        """The parked row and its blob path."""
+        with connect(project) as conn:
+            row = conn.execute(
+                f"SELECT {_INBOX_COLUMNS} FROM attachment_inbox WHERE id = ?",
+                [pending_id],
+            ).fetchone()
+        return _row_to_pending(row) if row else None
+
+    def add(self, project: str, pending: PendingAttachment, path: str) -> PendingAttachment:
+        with connect(project) as conn:
+            conn.execute(
+                "INSERT INTO attachment_inbox (id, claude_session_id, sha256, filename, "
+                "content_type, size_bytes, path, source, notice) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [pending.id, pending.claude_session_id, pending.sha256, pending.filename,
+                 pending.content_type, pending.size_bytes, path, pending.source,
+                 pending.notice],
+            )
+        return pending
+
+    def set_notice(self, project: str, pending_id: str, notice: str) -> None:
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE attachment_inbox SET notice = ?, notified_at = NULL WHERE id = ?",
+                [notice, pending_id],
+            )
+
+    def mark_bound(self, project: str, pending_id: str, task_id: str) -> None:
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE attachment_inbox SET bound_task_id = ?, "
+                "bound_at = current_timestamp::TIMESTAMP WHERE id = ?",
+                [task_id, pending_id],
+            )
+
+    def undelivered(self, project: str, claude_session_id: str) -> list[tuple[str, str]]:
+        """`(pending_id, notice)` not yet put in this session's context, oldest first."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                "SELECT id, notice FROM attachment_inbox "
+                "WHERE claude_session_id = ? AND notice IS NOT NULL "
+                "AND notified_at IS NULL ORDER BY created_at ASC, id ASC",
+                [claude_session_id],
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    def mark_notified(self, project: str, pending_ids: list[str]) -> None:
+        if not pending_ids:
+            return
+        placeholders = ", ".join("?" for _ in pending_ids)
+        with connect(project) as conn:
+            conn.execute(
+                f"UPDATE attachment_inbox SET notified_at = current_timestamp::TIMESTAMP "
+                f"WHERE id IN ({placeholders})",
+                list(pending_ids),
+            )
+
+    def candidates(self, project: str) -> list[dict]:
+        """Tasks this project is demonstrably working on right now.
+
+        in_progress, not archived, claimed on a live lease, AND with a clock
+        running - with the session that holds that clock, so the caller can keep
+        only the leads'. Sub-tasks included on purpose: `list_tasks` hides them by
+        default, and the work being done is usually on one.
+        """
+        with connect(project) as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id, t.title, e.session_id
+                FROM tasks t
+                JOIN task_time_entries e ON e.task_id = t.id AND e.end_at IS NULL
+                WHERE t.state = 'in_progress'
+                  AND t.archived_at IS NULL
+                  AND t.claimed_by IS NOT NULL
+                  AND (t.lease_expires_at IS NULL
+                       OR t.lease_expires_at > current_timestamp::TIMESTAMP)
+                ORDER BY e.begin_at DESC, t.id ASC
+                """
+            ).fetchall()
+        return [{"id": r[0], "title": r[1], "clock_session": r[2]} for r in rows]
 
 
 class OutboxRepository:

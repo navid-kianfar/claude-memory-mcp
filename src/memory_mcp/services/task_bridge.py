@@ -45,17 +45,28 @@ overwrite title and state.
 """
 
 import contextlib
+import json
 import logging
+import os
+import posixpath
 import threading
 
 from memory_mcp.asoode import get_endpoints
+from memory_mcp.exceptions import MemoryMCPError
 from memory_mcp.providers import (
     Container, ProviderError, TaskProvider, TransientProviderError,
 )
 from memory_mcp.services.echo_log import EchoLog
 from memory_mcp.db.registry import (
+    _UNSET,
+    _normalise_match_path,
+    _validate_match_paths,
+    delete_project_link,
     get_default_project_link,
     get_project_links,
+    get_setting,
+    set_setting,
+    update_project_link,
     upsert_project_link,
 )
 from memory_mcp.models import (
@@ -169,6 +180,69 @@ def build_state_list_map(board: Container) -> tuple[dict[str, str], str | None]:
 #: deleted HERE - distinct from None ("never seen"), which creates.
 _DELETED_HERE = "__deleted_here__"
 
+#: Where Claude Code puts agent worktrees INSIDE a repository. A path an agent
+#: passes from one (`<root>/.claude/worktrees/<name>/frontend/x.tsx`) names the
+#: same subtree as `frontend/x.tsx` in the main checkout, so routing strips it.
+_WORKTREE_PREFIX = (".claude", "worktrees")
+
+#: app_settings key holding the path->board bindings a committed manifest
+#: proposed for a project. Machine-local, never applied on its own.
+_PROPOSALS_KEY = "link_proposals:{slug}"
+
+#: A committed manifest is shared text, so an import is bounded before it is
+#: stored: a runaway or hostile file cannot bloat the registry.
+_MAX_PROPOSALS = 200
+
+
+class LinkNotFoundError(MemoryMCPError):
+    """A link id that is not one of this project's links."""
+
+
+class RoutingError(ProviderError, MemoryMCPError):
+    """A task or link change refused because it cannot be routed safely.
+
+    A ProviderError, so every caller that already catches one (and the tests
+    that expect one) keeps working; also a MemoryMCPError, because the fault is
+    the request - a wrong board name, a path outside the repo, a tie - not the
+    platform, so the HTTP layer answers 400 and not 500.
+    """
+
+
+def _board_name(link: dict) -> str:
+    """What a person calls a board: its label, else its work package id."""
+    return link.get("label") or link.get("remote_work_package_id") or "?"
+
+
+def _candidate(link: dict) -> dict:
+    return {
+        "link_id": link["id"],
+        "board": _board_name(link),
+        "match_paths": list(link.get("match_paths") or []),
+        "is_default": bool(link.get("is_default")),
+    }
+
+
+def _paths_key(paths) -> tuple[str, ...]:
+    """match_paths compared as a routing table: order-free, normalised, and an
+    entry the router could never honour kept verbatim so it still differs."""
+    out = set()
+    for entry in paths or []:
+        try:
+            out.add(_normalise_match_path(entry))
+        except MemoryMCPError:
+            out.add(str(entry))
+    return tuple(sorted(out))
+
+
+def _same_board(link: dict, entry: dict) -> bool:
+    """Is a manifest entry about this live link? The work package id is the
+    identity; base_url only disambiguates when both sides carry one."""
+    if (link.get("remote_work_package_id") or "") != (entry.get("remote_work_package_id") or ""):
+        return False
+    ours = (link.get("base_url") or "").rstrip("/")
+    theirs = (entry.get("base_url") or "").rstrip("/")
+    return not ours or not theirs or ours == theirs
+
 
 class TaskBridge:
     def __init__(
@@ -236,13 +310,20 @@ class TaskBridge:
         self, slug: str, *, project_title: str | None = None,
         board_title: str | None = None, reuse_project_id: str | None = None,
         provider: str | None = None, backfill: bool = False,
+        match_paths: list | None = None, is_default: bool | None = None,
     ) -> dict:
         """Create (or find) the asoode project + board for a memory project.
 
         `reuse_project_id` puts the board inside an existing asoode project
         instead of making a new one - the usual choice when a team already has a
         project and wants this repo as one more board in it.
+
+        `match_paths` binds the board to repo subtrees in the same call (see
+        resolve_path). `is_default` follows attach's rule: omitted, the board is
+        the default only when the project has none yet.
         """
+        # Refused before anything is created remotely, not after.
+        _validate_match_paths(match_paths)
         project = self._projects.get(slug)
         title = project_title or project.display_name or slug
         board = board_title or project.display_name or slug
@@ -285,8 +366,11 @@ class TaskBridge:
             label=board,
             default_list_id=default_list,
             state_list_map=state_map,
+            match_paths=match_paths,
             provider=impl.name,
+            is_default=self._default_flag(slug, package_id, is_default),
         )
+        self._drop_proposal(slug, link)
         return {
             "link": link,
             "project": {"id": project_id, "title": space.title},
@@ -504,10 +588,36 @@ class TaskBridge:
         except Exception:  # noqa: BLE001
             return container
 
+    def _default_flag(self, slug: str, package_id: str, requested: bool | None) -> bool:
+        """Whether a board being (re)linked should be the project's default.
+
+        Explicit wins. OMITTED means: the default only if the project has no
+        default yet, or this board already is it. Treating "not said" as "yes"
+        was the reported bug - attaching a second board for `frontend/**` made
+        it the default, and every task with no path followed it there.
+
+        An explicit False on the CURRENT default is refused rather than applied,
+        for the same reason update_project_link refuses it.
+        """
+        links = get_project_links(slug)
+        current = next((l for l in links if l["is_default"]), None)
+        this_is_default = (
+            current is not None and current["remote_work_package_id"] == package_id
+        )
+        if requested is None:
+            return current is None or this_is_default
+        if requested is False and this_is_default:
+            raise RoutingError(
+                f"board {_board_name(current)!r} is the default for '{slug}'. "
+                "Promote another board to default instead - a project with "
+                "boards and no default cannot route a task that names none."
+            )
+        return requested
+
     def attach(
         self, slug: str, *, work_package_id: str | None = None,
         external_ref: str | None = None, label: str | None = None,
-        is_default: bool = True, match_paths: list | None = None,
+        is_default: bool | None = None, match_paths: list | None = None,
         provider: str | None = None, backfill: bool = False,
     ) -> dict:
         """Link a memory project to a board that ALREADY EXISTS. Creates nothing.
@@ -519,10 +629,16 @@ class TaskBridge:
 
         One memory project attaches to MANY boards; `is_default` picks the one a
         task with no explicit target routes to, and promoting a link demotes the
-        others (see upsert_project_link).
+        others (see upsert_project_link). Omitted, a board becomes the default
+        only when the project has none yet (see _default_flag).
+
+        `match_paths` binds the board to repo subtrees; `None` keeps what a
+        re-attached link already holds. A bad entry is refused before the board
+        is fetched.
         """
         if not work_package_id and not external_ref:
             raise ProviderError("give work_package_id or external_ref")
+        _validate_match_paths(match_paths)
 
         # Resolve against the platform this link will belong to, not the default:
         # attaching a Trello board must not look for it in asoode.
@@ -552,12 +668,14 @@ class TaskBridge:
             remote_project_id=project_id,
             remote_work_package_id=package_id,
             label=label or container.title or package_id,
-            is_default=is_default,
+            is_default=self._default_flag(slug, package_id, is_default),
             default_list_id=default_list,
             state_list_map=state_map,
             match_paths=match_paths,
             provider=impl.name,
         )
+        # Linking a board by hand settles whatever a manifest proposed for it.
+        self._drop_proposal(slug, link)
         return {
             "link": link,
             "work_package": {"id": package_id, "title": container.title,
@@ -590,7 +708,7 @@ class TaskBridge:
         wanted = target.strip().lower()
         links = get_project_links(slug)
         if not links:
-            raise ProviderError(
+            raise RoutingError(
                 f"'{slug}' is not linked to any asoode board, so it cannot target "
                 f"{target!r}. Attach one with memory_asoode_attach."
             )
@@ -601,9 +719,255 @@ class TaskBridge:
             if (link.get("remote_work_package_id") or "").lower() == wanted:
                 return link["id"]
         known = ", ".join(sorted(l.get("label") or "?" for l in links))
-        raise ProviderError(
+        raise RoutingError(
             f"no board named {target!r} is linked to '{slug}'. Linked boards: {known}."
         )
+
+    # ---------- path routing ----------
+    #
+    # A path names where the work lives; the board that owns that subtree is
+    # where the task belongs. It is resolved ONCE, at create (or an explicit
+    # re-route before the first mirror), into `link_id` - never at flush time.
+    # `route()` below runs at flush, and task_sync is keyed (task_id, link_id):
+    # a path re-evaluated per flush after someone edited match_paths would send
+    # the create to one board and the next update to another, which is a second
+    # card. So `route()` keeps its two rules and this only ever feeds link_id.
+    #
+    # The path must come from the CALLER. The MCP server runs inside the daemon,
+    # whose cwd says nothing about the session that called it.
+
+    def _normalise_task_path(self, slug: str, path: str) -> str:
+        """A caller's path as repo-relative POSIX segments joined by '/'.
+
+        Relative paths are taken as relative to the repository root; an
+        absolute one must sit under the project's registered folder. A path
+        that leaves the root is refused, naming the root: it is how a task
+        would cross into another repository's boards, and a default would hide
+        that. `\\` is folded to `/`, a leading `./` and trailing `/` are
+        insignificant, and a Claude Code worktree prefix
+        (`.claude/worktrees/<name>/`) is stripped so an agent's checkout routes
+        like the main one. "" is the root itself.
+        """
+        raw = os.path.expanduser(path.strip().replace("\\", "/"))
+        root = self._projects.get(slug).project_path
+        if raw.startswith("/"):
+            if not root:
+                raise RoutingError(
+                    f"{path!r} is absolute, but '{slug}' has no registered folder "
+                    "to make it relative to. Pass a repo-relative path, or "
+                    "register the folder with memory_link_folder."
+                )
+            rel = None
+            for base, candidate in (
+                (posixpath.normpath(root), posixpath.normpath(raw)),
+                (os.path.realpath(root), os.path.realpath(raw)),
+            ):
+                if candidate == base:
+                    rel = ""
+                    break
+                if candidate.startswith(base.rstrip("/") + "/"):
+                    rel = candidate[len(base.rstrip("/")) + 1:]
+                    break
+            if rel is None:
+                raise RoutingError(
+                    f"{path!r} is outside the project root {root}. A task routes "
+                    f"only to the boards of the repository it belongs to."
+                )
+        else:
+            rel = posixpath.normpath(raw) if raw else "."
+            if rel == ".." or rel.startswith("../"):
+                where = f" {root}" if root else ""
+                raise RoutingError(
+                    f"{path!r} leaves the project root{where}. A task routes only "
+                    "to the boards of the repository it belongs to."
+                )
+        parts = [p for p in rel.split("/") if p not in ("", ".")]
+        if tuple(parts[:2]) == _WORKTREE_PREFIX and len(parts) >= 3:
+            parts = parts[3:]
+        return "/".join(parts)
+
+    def resolve_path(self, slug: str, path: str | None) -> dict | None:
+        """A routing DECISION for a path, or None when no path was given.
+
+        The rules, in order:
+
+        - an unlinked project routes nowhere and NEVER raises - a task store
+          with no board keeps working;
+        - matching is on whole path SEGMENTS: `apps/api` owns
+          `apps/api/tests/x.py`, not `apps/api-old/x.py`. A file and a
+          directory are treated alike;
+        - matching is CASE-SENSITIVE, unlike resolve_link's label lookup: a
+          label is human-typed, a path is a filesystem identifier, and
+          `apps/API` is not `apps/api` on a case-sensitive checkout;
+        - the LONGEST prefix wins, so `apps/api/internal` beats `apps/api`;
+        - two different boards winning at the same depth is refused, naming
+          both - a coin-flip nobody can see is worse than an error;
+        - nothing matching falls back to the default board, and says so
+          (`matched: false`, `board` = the default, `candidates` = every
+          link). No default to fall back to is refused.
+
+        Returns `{path, normalised, matched, matched_prefix, reason, link_id,
+        board}` plus `candidates` on a fallback.
+        """
+        if path is None or not path.strip():
+            return None
+        links = get_project_links(slug)
+        if not links:
+            try:
+                normalised = self._normalise_task_path(slug, path)
+            except (ProviderError, MemoryMCPError):
+                normalised = None
+            return {
+                "path": path, "normalised": normalised, "matched": False,
+                "matched_prefix": None,
+                "reason": f"'{slug}' is not linked to any board - the task stays local",
+                "link_id": None, "board": None,
+            }
+
+        normalised = self._normalise_task_path(slug, path)
+        parts = tuple(p for p in normalised.split("/") if p)
+        best: dict[int, tuple[int, str]] = {}
+        for link in links:
+            for entry in link.get("match_paths") or []:
+                try:
+                    prefix = _normalise_match_path(entry)
+                except MemoryMCPError:
+                    continue  # stored before validation existed; cannot match
+                pattern = tuple(prefix.split("/"))
+                depth = len(pattern)
+                if parts[:depth] == pattern and depth > best.get(link["id"], (0, ""))[0]:
+                    best[link["id"]] = (depth, prefix)
+
+        by_id = {link["id"]: link for link in links}
+        if best:
+            top = max(depth for depth, _ in best.values())
+            winners = [lid for lid, (depth, _) in best.items() if depth == top]
+            if len(winners) > 1:
+                named = " and ".join(
+                    f"{_board_name(by_id[lid])!r} ({best[lid][1]})" for lid in winners
+                )
+                raise RoutingError(
+                    f"path {path!r} is claimed equally by {named}. Make one "
+                    "board's match_paths more specific, or name the board with "
+                    "target=."
+                )
+            link = by_id[winners[0]]
+            return {
+                "path": path, "normalised": normalised, "matched": True,
+                "matched_prefix": best[link["id"]][1],
+                "reason": "longest match_paths prefix",
+                "link_id": link["id"], "board": _board_name(link),
+            }
+
+        default = next((l for l in links if l["is_default"]), None)
+        if default is None:
+            raise RoutingError(
+                f"path {path!r} matches no board's match_paths, and '{slug}' has "
+                f"{len(links)} linked boards and no default to fall back to. Bind "
+                "the path to a board, or make one board the default."
+            )
+        return {
+            "path": path, "normalised": normalised, "matched": False,
+            "matched_prefix": None,
+            "reason": (
+                f"no match_paths prefix matched {normalised or '.'!r} - fell back "
+                f"to the default board {_board_name(default)!r}"
+            ),
+            "link_id": default["id"], "board": _board_name(default),
+            "candidates": [_candidate(l) for l in links],
+        }
+
+    def routing_for(
+        self, slug: str, *, path: str | None = None, target: str | None = None,
+        task=None,
+    ) -> tuple[dict | None, dict | None]:
+        """Decide where a task goes from a path and/or a board name.
+
+        Returns `(routing, current_link)`. `routing` is the block a task write
+        reports, or None when there was nothing to decide. `current_link` is the
+        link `task` routes to TODAY (None without a task), so the caller can
+        refuse to move a card that already exists.
+
+        Precedence: `target` (the caller naming the answer) over `path` (the
+        caller naming the evidence) over the default. When both are given and
+        the path MATCHED a different board, it is refused - the caller
+        contradicted itself and neither answer is safe to prefer. A path that
+        matched nothing does not contradict a target.
+
+        With neither given, a project with two or more boards still gets a
+        block on create, saying the default was used and listing the boards:
+        that silence is how every task ended up on one board.
+        """
+        current = None
+        if task is not None:
+            try:
+                current = self.route(slug, task)
+            except ProviderError:
+                current = None
+
+        has_path = path is not None and bool(path.strip())
+        has_target = target is not None and bool(target.strip())
+        if has_target:
+            target_id = self.resolve_link(slug, target)  # raises on a wrong name
+            decision = self.resolve_path(slug, path) if has_path else None
+            link = next(l for l in get_project_links(slug) if l["id"] == target_id)
+            if decision and decision["matched"] and decision["link_id"] != target_id:
+                raise RoutingError(
+                    f"path {path!r} belongs to board {decision['board']!r} (prefix "
+                    f"{decision['matched_prefix']!r}), but target names board "
+                    f"{_board_name(link)!r}. Pass one of them, or make them agree."
+                )
+            if decision is None:
+                reason = "target named the board"
+            elif decision["matched"]:
+                reason = "target named the board, and the path agrees"
+            else:
+                reason = "target named the board; the path matched no prefix"
+            return {
+                "path": path if has_path else None,
+                "normalised": decision["normalised"] if decision else None,
+                "matched": True,
+                "matched_prefix": decision["matched_prefix"] if decision else None,
+                "reason": reason,
+                "link_id": target_id, "board": _board_name(link),
+            }, current
+
+        if has_path:
+            decision = self.resolve_path(slug, path)
+            if task is not None and current is not None and not decision["matched"]:
+                # On a re-route a path matching nothing is no evidence, so the
+                # task stays where it is - report THAT board, not the default.
+                decision = {
+                    **decision,
+                    "link_id": current["id"], "board": _board_name(current),
+                    "reason": (
+                        f"no match_paths prefix matched {decision['normalised'] or '.'!r}"
+                        f" - the task stays on board {_board_name(current)!r}"
+                    ),
+                }
+            return decision, current
+
+        if task is not None:
+            return None, current
+        links = get_project_links(slug)
+        if len(links) < 2:
+            return None, current
+        default = next((l for l in links if l["is_default"]), None)
+        return {
+            "path": None, "normalised": None, "matched": False,
+            "matched_prefix": None,
+            "reason": (
+                f"no path given - used the default board "
+                f"{_board_name(default)!r}. Pass path= (the repo subtree the work "
+                "touches) so the task lands on the board that owns it."
+                if default else
+                f"no path given, and '{slug}' has {len(links)} boards and no "
+                "default - this task cannot be mirrored until it names one"
+            ),
+            "link_id": default["id"] if default else None,
+            "board": _board_name(default) if default else None,
+            "candidates": [_candidate(l) for l in links],
+        }, current
 
     def route(self, slug: str, task) -> dict | None:
         """The link a task belongs to, applying the rule above."""
@@ -1236,6 +1600,165 @@ class TaskBridge:
 
     def links(self, slug: str) -> list[dict]:
         return get_project_links(slug)
+
+    # ---------- editing links in place (no network) ----------
+
+    def _own_link(self, slug: str, link_id: int) -> dict:
+        """The link, if it is one of THIS project's. An id from a request is a
+        claim, and editing another project's link through this one's URL would
+        cross-link two projects."""
+        for link in get_project_links(slug, active_only=False):
+            if link["id"] == link_id:
+                return link
+        raise LinkNotFoundError(f"'{slug}' has no linked board with id {link_id}")
+
+    def update_link(
+        self, slug: str, link_id: int, *, match_paths: object = _UNSET,
+        label: object = _UNSET, is_default: bool | None = None,
+    ) -> dict:
+        """Change a link's paths, label or default flag. No network call.
+
+        attach can also set match_paths, but it re-fetches the board to do so;
+        this is the cheap path the UI and memory_asoode_link_update use. A bad
+        match_paths entry is refused naming it; clearing the default is refused
+        (promote another board instead). Changing the paths settles a manifest
+        proposal for the board - it was reviewed.
+        """
+        self._own_link(slug, link_id)
+        link = update_project_link(
+            link_id, match_paths=match_paths, label=label, is_default=is_default,
+        )
+        if link is None:  # deleted between the two reads
+            raise LinkNotFoundError(f"'{slug}' has no linked board with id {link_id}")
+        if match_paths is not _UNSET:
+            self._drop_proposal(slug, link)
+        return link
+
+    def delete_link(self, slug: str, link_id: int) -> dict:
+        """Forget a link. The board itself is left alone.
+
+        Tasks that named it fall back to the default at their next mirror (see
+        route). Deleting the DEFAULT while other boards remain is refused: every
+        task with no link of its own would stop routing.
+        """
+        link = self._own_link(slug, link_id)
+        if link["is_default"] and len(get_project_links(slug, active_only=False)) > 1:
+            raise RoutingError(
+                f"board {_board_name(link)!r} is the default for '{slug}'. Make "
+                "another board the default first, then unlink this one."
+            )
+        delete_project_link(link_id)
+        self._drop_proposal(slug, link)
+        return {"deleted": True}
+
+    # ---------- bindings proposed by a committed manifest ----------
+    #
+    # `.claude-memory/manifest.json` carries the project's path->board bindings
+    # so a clone knows where tasks land. Importing it NEVER links anything: the
+    # standing rule is that linking is explicit, so a private project cannot
+    # leak onto a server by a hook running. The manifest's bindings are stored
+    # here as proposals and diffed against the live links; a person applies one
+    # with memory_asoode_attach (unlinked - which checks the board exists) or
+    # memory_asoode_link_update (differs). There is no "apply all".
+    #
+    # `base_url` in a proposal is informational. Applying goes through the
+    # configured endpoints, never through a URL a committed file supplied.
+
+    def _stored_proposals(self, slug: str) -> list[dict]:
+        raw = get_setting(_PROPOSALS_KEY.format(slug=slug))
+        try:
+            entries = json.loads(raw) if raw else []
+        except ValueError:
+            return []
+        return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+
+    def set_link_proposals(self, slug: str, entries: list[dict]) -> list[dict]:
+        """Replace what the manifest proposes for this project; return the diff.
+
+        `entries` are manifest objects already projected by
+        sync_cli._manifest_links. Nothing in project_links is touched.
+        """
+        self._projects.get(slug)
+        set_setting(
+            _PROPOSALS_KEY.format(slug=slug), json.dumps(list(entries)[:_MAX_PROPOSALS]),
+        )
+        return self.link_proposals(slug)
+
+    def link_proposals(self, slug: str) -> list[dict]:
+        """Each stored proposal against the live links, re-diffed on every read.
+
+        `matches` - a live link to that board has the same match_paths (compared
+        as a set, normalised); `differs` - the link exists with other paths,
+        both sides returned; `unlinked` - no link to that board here. `link_id`
+        is set for the first two.
+        """
+        live = get_project_links(slug)
+        out = []
+        for entry in self._stored_proposals(slug):
+            link = next((l for l in live if _same_board(l, entry)), None)
+            proposed = list(entry.get("match_paths") or [])
+            if link is None:
+                status, link_id, current = "unlinked", None, None
+            else:
+                current = list(link.get("match_paths") or [])
+                status = "matches" if _paths_key(proposed) == _paths_key(current) else "differs"
+                link_id = link["id"]
+            out.append({
+                "label": entry.get("label"),
+                "remote_work_package_id": entry.get("remote_work_package_id"),
+                "base_url": entry.get("base_url"),
+                "is_default": bool(entry.get("is_default")),
+                "match_paths": proposed,
+                "status": status,
+                "link_id": link_id,
+                "current_match_paths": current,
+            })
+        return out
+
+    def _drop_proposal(self, slug: str, link: dict) -> None:
+        """A person acted on this board, so the manifest's proposal is settled.
+
+        Best-effort: a proposal left behind is a line of noise in the UI, never
+        a reason to fail the link change that just succeeded.
+        """
+        try:
+            stored = self._stored_proposals(slug)
+            kept = [e for e in stored if not _same_board(link, e)]
+            if len(kept) != len(stored):
+                set_setting(_PROPOSALS_KEY.format(slug=slug), json.dumps(kept))
+        except Exception:  # noqa: BLE001
+            logger.debug("could not settle the link proposal", exc_info=True)
+
+    def manifest_links(self, slug: str) -> list[dict]:
+        """The bindings `.claude-memory/manifest.json` should carry after export.
+
+        This machine's live links - plus what the committed manifest proposed and
+        nobody here has acted on yet. Without the second half, a teammate who
+        never linked a board (the default: linking is opt-in) would erase the
+        repository's bindings at the end of every session, and an unreviewed
+        `differs` would revert the committed paths the same way. An explicit act
+        on a board - attach, a paths change, an unlink - drops its proposal, and
+        from then on this machine's own link is what gets written.
+
+        Known limit, stated so it is not rediscovered: REMOVING a binding from the
+        manifest does not propagate to a machine that still has that board
+        linked - its next export writes it back. Unlink it there.
+        """
+        live = get_project_links(slug)
+        pending = self._stored_proposals(slug)
+        out: list[dict] = []
+        for link in live:
+            entry = dict(link)
+            proposal = next((p for p in pending if _same_board(link, p)), None)
+            if proposal is not None and (
+                _paths_key(proposal.get("match_paths")) != _paths_key(link.get("match_paths"))
+            ):
+                entry["match_paths"] = list(proposal.get("match_paths") or [])
+            out.append(entry)
+        for proposal in pending:
+            if not any(_same_board(link, proposal) for link in live):
+                out.append(dict(proposal))
+        return out
 
     def queue_status(self, slug: str, *, timeout: float = 6.0) -> dict | None:
         """What the bound board currently holds. None when the project is unbound.

@@ -204,11 +204,14 @@ class FailsOnTask:
         self._fail_on = fail_on
         self.creates = 0
 
-    def create(self, request):
+    def create_routed(self, request):
         self.creates += 1
         if self.creates == self._fail_on:
             raise RuntimeError("provider blew up")
-        return self._inner.create(request)
+        return self._inner.create_routed(request)
+
+    def create(self, request):
+        return self.create_routed(request)[0]
 
     def comment(self, *args, **kwargs):
         return self._inner.comment(*args, **kwargs)

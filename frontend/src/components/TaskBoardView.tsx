@@ -17,6 +17,11 @@ import { Badge } from "./ui/Badge";
 export interface TaskBoardViewProps {
   tasks: Task[];
   meta: Record<string, TaskRowMeta>;
+  /**
+   * link id -> board name. Empty unless the project mirrors to more than one
+   * board; see TaskListView, which shows the same chip on a row.
+   */
+  boardNames?: Record<number, string>;
   onOpenTask: (task: Task) => void;
   /** Drop onto a column = change state. The board's whole point. */
   onChangeState: (task: Task, state: TaskState) => void;
@@ -37,6 +42,7 @@ export interface TaskBoardViewProps {
 export function TaskBoardView({
   tasks,
   meta,
+  boardNames,
   onOpenTask,
   onChangeState,
 }: TaskBoardViewProps) {
@@ -129,6 +135,16 @@ export function TaskBoardView({
                     </p>
                   )}
 
+                  {task.link_id !== null && boardNames?.[task.link_id] && (
+                    <div className="mt-1.5">
+                      <span
+                        title={`Mirrored to the ${boardNames[task.link_id]} board`}
+                        className="rounded border border-border px-1 py-0.5 text-[9px] font-medium text-muted-foreground"
+                      >
+                        {boardNames[task.link_id]}
+                      </span>
+                    </div>
+                  )}
                   {task.role && (
                     <div className="mt-1.5">
                       <span

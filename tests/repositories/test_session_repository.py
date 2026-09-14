@@ -54,3 +54,57 @@ class TestLifecycle:
 
         last_excluding = repo.last_with_summary(project, exclude_summary="[auto-closed]")
         assert last_excluding.summary == "real work"
+
+
+class TestWhoTheSessionBelongsTo:
+    """`sessions.metadata` existed unused until `{"agent": ...}` gave it a job:
+    telling a dispatched agent's session from the lead's. Nothing else can - a
+    subagent shares the lead's MCP connection, so there is no other signal."""
+
+    def test_an_agents_session_round_trips_its_metadata(self, repo, project):
+        sid = str(uuid.uuid4())
+        repo.insert(project, sid, metadata={"agent": "test", "mcp_session": "m1"})
+
+        assert repo.metadata(project, sid) == {"agent": "test", "mcp_session": "m1"}
+
+    def test_a_session_with_no_metadata_has_none(self, repo, project):
+        sid = str(uuid.uuid4())
+        repo.insert(project, sid)
+
+        assert repo.metadata(project, sid) is None
+
+    def test_an_unknown_session_has_no_metadata(self, repo, project):
+        assert repo.metadata(project, str(uuid.uuid4())) is None
+
+    def test_open_lead_sessions_excludes_the_agents(self, repo, project):
+        lead = str(uuid.uuid4())
+        agent = str(uuid.uuid4())
+        repo.insert(project, lead, metadata={"agent": None, "mcp_session": "m1"})
+        repo.insert(project, agent, metadata={"agent": "python", "mcp_session": "m1"})
+
+        assert repo.open_lead_sessions(project) == [lead]
+
+    def test_a_session_written_before_metadata_existed_counts_as_a_lead(
+        self, repo, project,
+    ):
+        """Every row written before this change has a NULL metadata, and every one
+        of them was a lead. They must keep reading that way."""
+        sid = str(uuid.uuid4())
+        repo.insert(project, sid)
+
+        assert repo.open_lead_sessions(project) == [sid]
+
+    def test_an_ended_lead_session_is_no_longer_open(self, repo, project):
+        sid = str(uuid.uuid4())
+        repo.insert(project, sid)
+        repo.end(project, sid, "done")
+
+        assert repo.open_lead_sessions(project) == []
+
+    def test_several_leads_are_returned_oldest_first(self, repo, project):
+        first = str(uuid.uuid4())
+        second = str(uuid.uuid4())
+        repo.insert(project, first)
+        repo.insert(project, second)
+
+        assert repo.open_lead_sessions(project) == [first, second]

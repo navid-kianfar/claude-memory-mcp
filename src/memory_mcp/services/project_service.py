@@ -1,11 +1,32 @@
 """Project service - initialize and describe projects."""
 
+from pathlib import Path
+
 from memory_mcp.config import settings
 from memory_mcp.db.connection import get_connection
 from memory_mcp.exceptions import ProjectNotFoundError
 from memory_mcp.models import GLOBAL_PROJECT_SLUG, ProjectInfo
 from memory_mcp.repositories import ProjectRepository
 from memory_mcp.utils.text import slugify, validate_slug
+
+#: A linked worktree's cwd. `git worktree add` writes a `.git` FILE there instead
+#: of a directory, and Claude Code puts its agent worktrees under this path.
+WORKTREE_MARKER = "/.claude/worktrees/"
+
+
+def is_linked_worktree(folder: Path) -> bool:
+    """Is this folder a second checkout whose project lives somewhere else?
+
+    Either witness is enough: the `.git` pointer file `git worktree add` leaves
+    behind, or a path inside `.claude/worktrees/`. An unreadable folder is not a
+    worktree - the caller then behaves exactly as it did before this existed.
+    """
+    try:
+        if WORKTREE_MARKER in folder.as_posix():
+            return True
+        return (folder / ".git").is_file()
+    except OSError:
+        return False
 
 
 class ProjectService:
@@ -100,11 +121,18 @@ class ProjectService:
           rebound   - same project, new location; project_path updated
           adopted   - a project existed under this slug with no uid; it took it
           created   - the uid is new to this machine (a fresh clone)
+          worktree  - a linked worktree of a known project; resolved, never bound
           unclaimed - no uid to go on; fall back to path/name detection
         """
-        from pathlib import Path
-
         folder = Path(cwd).resolve()
+        # A linked worktree is a second checkout whose project lives elsewhere, so
+        # it resolves to that project and NEVER becomes its path. Binding one was a
+        # real bug, not a hypothetical: the live registry had a project's
+        # project_path pointing into `.claude/worktrees/<task>`, which made every
+        # absolute path in the real checkout look like it was outside the project
+        # root - breaking path routing, sync export and stack detection at once,
+        # and leaving a dangling path as soon as the worktree was removed.
+        worktree = is_linked_worktree(folder)
 
         if not project_uid:
             from memory_mcp.context import detect_project_from_cwd
@@ -112,6 +140,19 @@ class ProjectService:
             return {"slug": detect_project_from_cwd(str(folder)), "action": "unclaimed"}
 
         existing = self._repo.get_by_uid(project_uid)
+        if worktree:
+            # Resolve it, bind nothing. An unknown uid seen from a worktree is not
+            # a new project either - registering it would create a duplicate whose
+            # path vanishes with the worktree.
+            if existing is not None:
+                return {"slug": existing.slug, "action": "worktree"}
+            from memory_mcp.context import detect_project_from_cwd
+
+            return {
+                "slug": detect_project_from_cwd(str(folder)),
+                "action": "unclaimed",
+            }
+
         if existing is not None:
             bound = (
                 Path(existing.project_path).resolve()

@@ -4,6 +4,7 @@ import pytest
 
 from memory_mcp.providers import Container, Group, ProviderError
 from memory_mcp.container import container
+from memory_mcp.exceptions import MemoryMCPError
 from memory_mcp.db.registry import (
     delete_project_link,
     get_default_project_link,
@@ -374,13 +375,74 @@ class TestAttachExisting:
         assert sum(1 for l in links if l["is_default"]) == 1, "exactly one default"
         assert get_default_project_link(linked_project)["label"] == "Backend API"
 
-    def test_a_later_default_takes_over(self, linked_project):
+    def test_a_later_default_takes_over_when_asked(self, linked_project):
+        bridge = TaskBridge(
+            container.project_service, container.task_service, _provider()
+        )
+        bridge.attach(linked_project, external_ref="app-backend")
+        bridge.attach(linked_project, external_ref="app-worker", is_default=True)
+        assert get_default_project_link(linked_project)["remote_work_package_id"] == "wp-worker"
+
+    def test_a_second_board_does_not_steal_the_default_by_omission(self, linked_project):
+        """The UI's finding: "not said" used to mean "make it the default", so
+        attaching a board for frontend/** moved every unrouted task onto it."""
+        bridge = TaskBridge(
+            container.project_service, container.task_service, _provider()
+        )
+        first = bridge.attach(linked_project, external_ref="app-backend")
+        second = bridge.attach(linked_project, external_ref="app-worker")
+
+        assert first["link"]["is_default"] is True, "the first board is the default"
+        assert second["link"]["is_default"] is False
+        assert get_default_project_link(linked_project)["remote_work_package_id"] == "wp-backend"
+
+    def test_re_attaching_the_default_keeps_it_the_default(self, linked_project):
         bridge = TaskBridge(
             container.project_service, container.task_service, _provider()
         )
         bridge.attach(linked_project, external_ref="app-backend")
         bridge.attach(linked_project, external_ref="app-worker")
-        assert get_default_project_link(linked_project)["remote_work_package_id"] == "wp-worker"
+        again = bridge.attach(linked_project, external_ref="app-backend", label="Renamed")
+        assert again["link"]["is_default"] is True
+
+    def test_demoting_the_default_by_attach_is_refused(self, linked_project):
+        bridge = TaskBridge(
+            container.project_service, container.task_service, _provider()
+        )
+        bridge.attach(linked_project, external_ref="app-backend")
+        with pytest.raises(ProviderError, match="Promote another board"):
+            bridge.attach(linked_project, external_ref="app-backend", is_default=False)
+        assert get_default_project_link(linked_project)["remote_work_package_id"] == "wp-backend"
+
+    def test_attach_binds_paths_and_a_refresh_keeps_them(self, linked_project):
+        """refresh_state_map used to write NULL over match_paths on every column
+        change - the binding would vanish the first time a board was restyled."""
+        bridge = TaskBridge(
+            container.project_service, container.task_service, _provider()
+        )
+        result = bridge.attach(
+            linked_project, external_ref="app-worker", match_paths=["apps/worker/**"],
+        )
+        assert result["link"]["match_paths"] == ["apps/worker"]
+
+        bridge.attach(linked_project, external_ref="app-worker", label="Renamed")
+        link = get_default_project_link(linked_project)
+        bridge.refresh_state_map(linked_project, {**link, "state_list_map": {}})
+
+        assert get_default_project_link(linked_project)["match_paths"] == ["apps/worker"]
+
+    def test_a_bad_pattern_is_refused_before_the_board_is_fetched(self, linked_project):
+        fake = _provider()
+        fetched = []
+        original = fake.fetch_container
+        fake.fetch_container = lambda cid: fetched.append(cid) or original(cid)
+        bridge = TaskBridge(container.project_service, container.task_service, fake)
+
+        with pytest.raises(MemoryMCPError, match="apps/\\*/api"):
+            bridge.attach(linked_project, work_package_id="wp-worker",
+                          match_paths=["apps/*/api"])
+        assert fetched == []
+        assert get_project_links(linked_project) == []
 
     def test_re_attaching_updates_rather_than_duplicating(self, linked_project):
         bridge = TaskBridge(

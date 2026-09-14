@@ -17,17 +17,61 @@ INPUT=$(cat)
 # The user's own off switch, so this never has to be argued with.
 [ -n "$MEMORY_MCP_NO_GATE" ] && exit 0
 
-CWD=$(printf '%s' "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cwd',''))" 2>/dev/null)
+# Parse the payload ONCE into shell variables. Until now each script pulled out
+# `cwd` and threw the rest away, which is why the daemon could not tell which
+# session dispatched an agent or edited a file.
+#
+# Every value is shlex.quote'd on the Python side, so the eval cannot be injected
+# into by a payload. A malformed payload, a missing python3, anything at all:
+# every variable stays empty and the script carries on, because a hook that
+# fails must still exit 0.
+#
+# agent_id/agent_type are documented hook fields that were NOT verified on the
+# installed CLI (2.1.236). Forwarded when present, empty when not; the daemon
+# reads "absent" as unknown, never as "this is the lead".
+eval "$(printf '%s' "$INPUT" | python3 -c '
+import sys, json, shlex
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+if not isinstance(d, dict):
+    d = {}
+ti = d.get("tool_input")
+if not isinstance(ti, dict):
+    ti = {}
+pairs = (("CWD", d.get("cwd")), ("SID", d.get("session_id")),
+         ("AGENT_ID", d.get("agent_id")), ("AGENT_TYPE", d.get("agent_type")),
+         ("TRANSCRIPT", d.get("transcript_path")), ("TOOL", d.get("tool_name")),
+         ("FILE_PATH", ti.get("file_path")), ("SUBAGENT", ti.get("subagent_type")),
+         ("DESC", ti.get("description")), ("TOOL_USE_ID", d.get("tool_use_id")))
+for k, v in pairs:
+    print(k + "=" + shlex.quote(v if isinstance(v, str) else ""))
+' 2>/dev/null)"
 [ -z "$CWD" ] && exit 0
 
 BASE="${MEMORY_MCP_URL:-http://127.0.0.1:${MEMORY_MCP_DAEMON_PORT:-8765}}"
 AUTH=()
 [ -n "$MEMORY_MCP_TOKEN" ] && AUTH=(-H "Authorization: Bearer ${MEMORY_MCP_TOKEN}")
 
+# The identity every hook forwards, in one array so adding a field is one edit
+# rather than five.
+IDENT=(
+  --data-urlencode "session_id=${SID}"
+  --data-urlencode "agent_id=${AGENT_ID}"
+  --data-urlencode "agent_type=${AGENT_TYPE}"
+  --data-urlencode "transcript_path=${TRANSCRIPT}"
+)
+
 # Short timeout: this runs before every edit, so it must never be felt. A
 # timeout is an allow, which is why 2 seconds is safe to insist on.
-ANSWER=$(curl -s -G --max-time 2 "${AUTH[@]}" "${BASE}/api/hook/gate" \
-  --data-urlencode "cwd=${CWD}" 2>/dev/null)
+# tool_name and file_path ride along: the gate is the only hook that runs
+# before every Edit/Write, so it is also the edit ledger and the only place
+# that can tell an edit inside the project from one in /tmp.
+ANSWER=$(curl -s -G --max-time 2 "${AUTH[@]}" "${IDENT[@]}" "${BASE}/api/hook/gate" \
+  --data-urlencode "cwd=${CWD}" \
+  --data-urlencode "tool_name=${TOOL}" \
+  --data-urlencode "file_path=${FILE_PATH}" 2>/dev/null)
 [ -z "$ANSWER" ] && exit 0
 
 REASON=$(printf '%s' "$ANSWER" | python3 -c "

@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 15
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -123,6 +123,42 @@ _TASK_DDL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_task_attach_task ON task_attachments (task_id)",
     "CREATE INDEX IF NOT EXISTS idx_task_attach_id ON task_attachments (id)",
+    # v15: TaskService.attach looks a (task, bytes) pair up before inserting, so
+    # the same file attached twice to one task is one row and one upload.
+    "CREATE INDEX IF NOT EXISTS idx_task_attach_hash ON task_attachments (task_id, sha256)",
+    # v15: files the user put in the Claude compose box, copied out of the
+    # session transcript on first sight and parked until the session binds one
+    # to a task. The bytes live in the same content-addressed store as
+    # task_attachments, so binding costs no second copy.
+    #
+    # No PRIMARY KEY, for the task_outbox reason below: plain indexes, and every
+    # read addresses a row by id or by (claude_session_id, sha256).
+    """
+    CREATE TABLE IF NOT EXISTS attachment_inbox (
+        -- The pending_id the session is told to bind with.
+        id                VARCHAR NOT NULL,
+        -- Claude Code's session id from the hook payload, NOT a memory session
+        -- id. With sha256 it is the idempotency key: one paste, one row.
+        claude_session_id VARCHAR,
+        sha256            VARCHAR NOT NULL,
+        filename          VARCHAR NOT NULL,
+        content_type      VARCHAR,
+        size_bytes        BIGINT NOT NULL DEFAULT 0,
+        path              VARCHAR NOT NULL,
+        -- Where the bytes came from: 'transcript'.
+        source            VARCHAR,
+        created_at        TIMESTAMP DEFAULT current_timestamp,
+        bound_task_id     VARCHAR,
+        bound_at          TIMESTAMP,
+        dismissed_at      TIMESTAMP,
+        -- The line the session is told, and when it was put in its context.
+        notice            VARCHAR,
+        notified_at       TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_attach_inbox_id ON attachment_inbox (id)",
+    "CREATE INDEX IF NOT EXISTS idx_attach_inbox_session "
+    "ON attachment_inbox (claude_session_id, sha256)",
     "CREATE INDEX IF NOT EXISTS idx_task_time_task ON task_time_entries (task_id)",
     # A task deleted here must not come back from the board (v13). The remote
     # card is archived by the flusher, but until that lands - and forever, if
@@ -698,6 +734,42 @@ def migrate_v13_to_v14(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (14)")
 
 
+#: What v15 must leave behind before it may stamp itself.
+_V15_INDEXES = frozenset({
+    "idx_task_attach_hash", "idx_attach_inbox_id", "idx_attach_inbox_session",
+})
+
+
+def migrate_v14_to_v15(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v14 -> v15: the compose-box attachment inbox, and a hash index.
+
+    `attachment_inbox` is new and `task_attachments` only gains an index, so no
+    existing row changes and an unmigrated reader is unaffected. Created through
+    `create_task_tables`, the same helper a fresh database uses, so the two shapes
+    cannot drift.
+
+    Stamped only once the table and all three indexes are really there - the v14
+    rule. `create_task_tables` swallows a failed CREATE, and a database marked v15
+    without its inbox would fail every hook scan with nothing left to repair it.
+    """
+    create_task_tables(conn)
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    if "attachment_inbox" not in tables:
+        raise RuntimeError("schema v15: could not create attachment_inbox - not stamping")
+    indexes = {
+        row[0] for row in conn.execute("SELECT index_name FROM duckdb_indexes()").fetchall()
+    }
+    missing = _V15_INDEXES - indexes
+    if missing:
+        raise RuntimeError(f"schema v15: could not create {sorted(missing)} - not stamping")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (15)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -762,6 +834,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 14:
         migrate_v13_to_v14(conn)
         version = 14
+    if version < 15:
+        migrate_v14_to_v15(conn)
+        version = 15
     return version
 
 

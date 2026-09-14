@@ -38,6 +38,11 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  // link id -> board name, and EMPTY whenever the project mirrors to fewer than
+  // two boards: with one board every task goes there, so the chip would be a
+  // label on every row saying nothing. With several, it is the only place a
+  // mis-route is visible without opening the task.
+  const [boardNames, setBoardNames] = useState<Record<number, string>>({});
   // `visible` is computed below; the clear callback reads it through a ref
   // so it does not have to be declared after it.
   const visibleRef = useRef<Task[]>([]);
@@ -85,6 +90,33 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
     setLoading(true);
     void load();
   }, [load]);
+
+  // Beside the task list, not after it: the rows render either way, and a
+  // project with no board is the normal case, so a failure is silent.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getProjectLinks(projectSlug)
+      .then((res) => {
+        if (cancelled) return;
+        if (res.links.length < 2) {
+          setBoardNames({});
+          return;
+        }
+        const names: Record<number, string> = {};
+        for (const link of res.links) {
+          names[link.id] =
+            link.label || link.remote_work_package_id.slice(0, 8);
+        }
+        setBoardNames(names);
+      })
+      .catch(() => {
+        if (!cancelled) setBoardNames({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectSlug]);
 
   const refresh = useCallback(async () => {
     await load();
@@ -325,6 +357,7 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
               <TaskBoardView
                 tasks={visible}
                 meta={meta}
+                boardNames={boardNames}
                 onOpenTask={(task) => setOpenTaskId(task.id)}
                 onChangeState={changeState}
               />
@@ -332,6 +365,7 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
               <TaskListView
                 tasks={visible}
                 meta={meta}
+                boardNames={boardNames}
                 collapsedStates={collapsed}
                 onToggleState={toggleState}
                 onOpenTask={(task) => setOpenTaskId(task.id)}

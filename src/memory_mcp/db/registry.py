@@ -16,7 +16,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from memory_mcp.config import settings
@@ -86,6 +86,43 @@ CREATE TABLE IF NOT EXISTS project_links (
     UNIQUE(slug, remote_work_package_id)
 );
 CREATE INDEX IF NOT EXISTS idx_project_links_slug ON project_links(slug);
+CREATE TABLE IF NOT EXISTS client_sessions (
+    session_id      TEXT PRIMARY KEY,
+    slug            TEXT,
+    cwd             TEXT,
+    transcript_path TEXT,
+    first_seen      TEXT NOT NULL,
+    last_seen       TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS session_dispatches (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    slug        TEXT,
+    agent_type  TEXT NOT NULL,
+    tool_use_id TEXT,
+    description TEXT,
+    at          TEXT NOT NULL,
+    asked       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_session_dispatches ON session_dispatches(session_id);
+CREATE TABLE IF NOT EXISTS session_subagent_stops (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    agent_id    TEXT,
+    agent_type  TEXT,
+    at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_subagent_stops ON session_subagent_stops(session_id);
+CREATE TABLE IF NOT EXISTS session_edits (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    slug        TEXT,
+    path        TEXT NOT NULL,
+    tool        TEXT NOT NULL,
+    by_agent    TEXT,
+    at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_edits ON session_edits(session_id);
 """
 
 # `project_links` above is the task bridge's routing table.
@@ -109,6 +146,20 @@ CREATE INDEX IF NOT EXISTS idx_project_links_slug ON project_links(slug);
 # Credentials are deliberately NOT in this table: the PAT lives in
 # get_credential/set_credential below, keyed by server URL, so one token covers
 # every project and never enters the committable .claude-memory snapshot.
+#
+# `client_sessions` / `session_dispatches` / `session_edits` are the hook
+# ledgers: what the daemon now remembers about a CLAUDE CODE session, keyed on
+# the session_id every hook payload carries. Before them, every hook script
+# extracted only `cwd` and the daemon could not tell which session dispatched an
+# agent or edited a file - so "you have edited five files without handing this
+# to the specialist who owns it" was unsayable.
+#
+# They are machine-local bookkeeping, not project memory, which is why they live
+# here and not in the per-project DuckDB: nothing in them should travel in the
+# committable .claude-memory snapshot or reach an org server, and both hook paths
+# already pay the cost of opening this registry. Nothing but a path, a tool name
+# and an agent type is stored - never file content, never a prompt. Pruned after
+# a week (prune_session_ledgers), because a stale session is noise.
 
 _migration_lock = threading.Lock()
 
@@ -157,6 +208,16 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         # committed .claude-memory/manifest.json so a project survives being
         # moved or renamed, on this machine and on a teammate's.
         conn.execute("ALTER TABLE projects ADD COLUMN project_uid TEXT")
+    # session_dispatches predates `asked` on any registry a release candidate
+    # touched. Without the column every INSERT would fail - silently, because the
+    # ledger accessors swallow errors - and the ledger would stop filling.
+    dispatch_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(session_dispatches)").fetchall()
+    }
+    if dispatch_cols and "asked" not in dispatch_cols:
+        conn.execute(
+            "ALTER TABLE session_dispatches ADD COLUMN asked INTEGER NOT NULL DEFAULT 0"
+        )
     # Created here rather than in _SCHEMA: executescript runs before the ALTER
     # above, so on an existing registry the column would not exist yet.
     conn.execute(
@@ -274,6 +335,259 @@ def set_setting(key: str, value: str) -> None:
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
             (key, str(value)),
         )
+
+
+# ---------- hook session ledgers (Claude Code sessions) ----------
+#
+# Every function here is wrapped: a hook runs before an edit, and a registry
+# locked by another process must cost the caller nothing worse than a missing
+# ledger row. A write that fails is dropped silently, a read that fails is empty.
+
+AGENT_ID_SUPPORTED_KEY = "hooks:agent_id_supported"
+
+
+def touch_client_session(
+    session_id: str,
+    *,
+    slug: str | None = None,
+    cwd: str | None = None,
+    transcript_path: str | None = None,
+) -> None:
+    """Record that this Claude Code session was seen, keeping `first_seen`.
+
+    Called from every hook route, so it is an upsert that only ever fills in
+    blanks: a later hook with no `transcript_path` must not erase the one an
+    earlier hook knew.
+    """
+    if not session_id:
+        return
+    ts = now_iso()
+    try:
+        with registry_conn() as conn:
+            # INSERT OR IGNORE + UPDATE rather than an UPSERT clause: two plain
+            # statements work on every SQLite this package can be installed
+            # against, and first_seen is preserved by construction.
+            conn.execute(
+                "INSERT OR IGNORE INTO client_sessions "
+                "(session_id, slug, cwd, transcript_path, first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, slug or None, cwd or None, transcript_path or None, ts, ts),
+            )
+            conn.execute(
+                "UPDATE client_sessions SET "
+                "  slug = COALESCE(?, slug), "
+                "  cwd = COALESCE(?, cwd), "
+                "  transcript_path = COALESCE(?, transcript_path), "
+                "  last_seen = ? "
+                "WHERE session_id = ?",
+                (slug or None, cwd or None, transcript_path or None, ts, session_id),
+            )
+    except Exception:  # noqa: BLE001 - a ledger must never fail a hook
+        pass
+
+
+def client_session(session_id: str) -> dict | None:
+    if not session_id:
+        return None
+    try:
+        with registry_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM client_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    return dict(row) if row else None
+
+
+def record_dispatch(
+    session_id: str,
+    *,
+    slug: str | None = None,
+    agent_type: str,
+    tool_use_id: str | None = None,
+    description: str | None = None,
+    asked: bool = False,
+) -> None:
+    """Append "this session dispatched that agent type". Append-only on purpose:
+    the same agent dispatched twice is two rows, and the delegation check asks
+    whether a role was EVER dispatched this session.
+
+    `asked`: the hook put a permission prompt in front of this dispatch, so
+    whether it ran is unknown (PreToolUse fires before the user answers). Such a
+    row still counts as dispatch HISTORY, but not as RUNNING - a declined prompt
+    must not leave a phantom agent that makes every dispatch for the next hour
+    prompt too."""
+    if not session_id or not agent_type:
+        return
+    try:
+        with registry_conn() as conn:
+            conn.execute(
+                "INSERT INTO session_dispatches "
+                "(session_id, slug, agent_type, tool_use_id, description, at, asked) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, slug or None, agent_type, tool_use_id or None,
+                 description or None, now_iso(), 1 if asked else 0),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def record_edit(
+    session_id: str,
+    *,
+    slug: str | None = None,
+    path: str,
+    tool: str,
+    by_agent: str | None = None,
+) -> None:
+    """Append "this session was about to edit that file".
+
+    `by_agent` is the agent type when the payload carried an `agent_id`, and NULL
+    for the lead. On a build that sends no `agent_id` every edit looks like the
+    lead's - see `agent_id_supported`.
+    """
+    if not session_id or not path:
+        return
+    try:
+        with registry_conn() as conn:
+            conn.execute(
+                "INSERT INTO session_edits "
+                "(session_id, slug, path, tool, by_agent, at) VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, slug or None, path, tool or "", by_agent or None, now_iso()),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def record_subagent_stop(
+    session_id: str, *, agent_id: str | None = None, agent_type: str | None = None,
+) -> None:
+    """Append "a subagent of this session finished" (the SubagentStop hook).
+
+    It cannot be joined to its dispatch row: PreToolUse carries a `tool_use_id`,
+    SubagentStop an `agent_id`, and no payload carries both. So it is a count, and
+    `running_dispatches` subtracts counts - which is all "how many are running
+    now?" needs."""
+    if not session_id:
+        return
+    try:
+        with registry_conn() as conn:
+            conn.execute(
+                "INSERT INTO session_subagent_stops (session_id, agent_id, agent_type, at) "
+                "VALUES (?, ?, ?, ?)",
+                (session_id, agent_id or None, agent_type or None, now_iso()),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+#: A dispatch older than this is presumed finished. It bounds the damage of a
+#: missed SubagentStop (a hook that failed, a client that never sends it): the
+#: concurrency prompt then fires on a real burst, and never on dispatches that
+#: ended long ago but were not counted out.
+RUNNING_WINDOW_MINUTES = 60
+
+
+def running_dispatches(session_id: str, *, window_minutes: int = RUNNING_WINDOW_MINUTES) -> int:
+    """How many of this session's agents are still running, best estimate.
+
+    Dispatches in the window minus stops in the window, floored at 0. When it is
+    wrong it is wrong LOW - a stop counted against an older dispatch - which
+    means one prompt fewer, never a prompt that cannot be satisfied.
+    """
+    if not session_id:
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
+    try:
+        with registry_conn() as conn:
+            started = conn.execute(
+                "SELECT COUNT(*) FROM session_dispatches "
+                "WHERE session_id = ? AND at >= ? AND asked = 0",
+                (session_id, cutoff),
+            ).fetchone()[0]
+            stopped = conn.execute(
+                "SELECT COUNT(*) FROM session_subagent_stops WHERE session_id = ? AND at >= ?",
+                (session_id, cutoff),
+            ).fetchone()[0]
+    except Exception:  # noqa: BLE001 - unknown means "do not prompt"
+        return 0
+    return max(0, int(started) - int(stopped))
+
+
+def dispatches_for(session_id: str) -> list[dict]:
+    if not session_id:
+        return []
+    try:
+        with registry_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM session_dispatches WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    return [dict(r) for r in rows]
+
+
+def edits_for(session_id: str) -> list[dict]:
+    if not session_id:
+        return []
+    try:
+        with registry_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM session_edits WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    return [dict(r) for r in rows]
+
+
+def prune_session_ledgers(days: int = 7) -> int:
+    """Drop ledger rows older than `days`. Returns rows deleted (0 on failure).
+
+    Called from the SessionStart path, which is the one hook that fires once per
+    session rather than once per turn.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        with registry_conn() as conn:
+            deleted = 0
+            for sql in (
+                "DELETE FROM session_dispatches WHERE at < ?",
+                "DELETE FROM session_subagent_stops WHERE at < ?",
+                "DELETE FROM session_edits WHERE at < ?",
+                "DELETE FROM client_sessions WHERE last_seen < ?",
+            ):
+                deleted += conn.execute(sql, (cutoff,)).rowcount
+            return deleted
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def note_agent_id(agent_id: str | None) -> None:
+    """Remember, once, that this CLI build sends `agent_id` on hook payloads.
+
+    `agent_id`/`agent_type` are documented hook fields but were NOT verified on
+    the installed CLI (2.1.236), so nothing may depend on them. This is how the
+    daemon learns the truth from the payloads themselves: until a non-empty
+    `agent_id` arrives, "is this a subagent?" honestly answers "unknown" instead
+    of guessing "the lead".
+    """
+    if not agent_id:
+        return
+    try:
+        if get_setting(AGENT_ID_SUPPORTED_KEY) == "1":
+            return
+        set_setting(AGENT_ID_SUPPORTED_KEY, "1")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def agent_id_supported() -> bool:
+    try:
+        return get_setting(AGENT_ID_SUPPORTED_KEY) == "1"
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ---------- remote credentials (client side) ----------
@@ -493,6 +807,92 @@ def _link_public(row: sqlite3.Row) -> dict:
     return link
 
 
+# What a `match_paths` entry may contain, and why so little.
+#
+# An entry is a repo-relative PREFIX matched on whole path segments: `apps/api`
+# owns `apps/api/tests/x.py` and not `apps/api-old/x.py`. A trailing `/**` or `/*`
+# is accepted and normalised away, because it is what people type and a prefix
+# already means "and everything under it". ANY OTHER glob is refused here, at
+# write time, naming the entry: `apps/*/api` or `*.py` would otherwise be stored
+# and silently never match, and tasks would pile onto the default board with no
+# error - which is exactly the bug path routing exists to fix. "Longest prefix
+# wins" also has no defensible tie-break once a wildcard sits mid-path, so
+# supporting one needs a match mode and a stated rule first, not a looser check.
+_GLOB_CHARS = frozenset("*?[]")
+
+# Sentinel for update_project_link: "leave this field alone", distinct from None,
+# which for match_paths and label means "clear it".
+_UNSET = object()
+
+
+def _normalise_match_path(entry: object) -> str:
+    """One `match_paths` entry in its stored form, or ValidationError naming it."""
+    from memory_mcp.exceptions import ValidationError
+
+    if not isinstance(entry, str):
+        raise ValidationError(f"match_paths entry {entry!r} is not a string")
+    path = entry.strip().replace("\\", "/")
+    if path.startswith(("/", "~")) or (len(path) > 1 and path[1] == ":"):
+        raise ValidationError(
+            f"match_paths entry {entry!r} is absolute. Give a path relative to "
+            "the repository root, e.g. 'apps/api'."
+        )
+    while True:
+        path = path.rstrip("/")
+        if path.endswith("/**"):
+            path = path[:-3]
+        elif path.endswith("/*"):
+            path = path[:-2]
+        else:
+            break
+    segments = [s for s in path.split("/") if s not in ("", ".")]
+    if ".." in segments:
+        raise ValidationError(
+            f"match_paths entry {entry!r} contains '..'. A binding names a "
+            "subtree inside this repository, never a way out of it."
+        )
+    normalised = "/".join(segments)
+    if any(ch in _GLOB_CHARS for ch in normalised):
+        raise ValidationError(
+            f"match_paths entry {entry!r} uses a glob that is not supported. Only "
+            "a plain prefix is matched - 'apps/backend', or 'apps/backend/**', "
+            "which means the same. A wildcard anywhere else would be stored and "
+            "silently never match."
+        )
+    if not normalised:
+        raise ValidationError(
+            f"match_paths entry {entry!r} names the whole repository. Leave "
+            "match_paths empty and make that board the default instead."
+        )
+    return normalised
+
+
+def _validate_match_paths(entries: object) -> list[str] | None:
+    """Normalise a `match_paths` list for storage, refusing what cannot match.
+
+    Called by every writer - upsert_project_link and update_project_link - so no
+    surface can store a pattern the router cannot honour. Blank entries are
+    dropped, duplicates collapse, order is kept. None or an empty result is
+    stored as NULL: "this board owns no subtree".
+    """
+    from memory_mcp.exceptions import ValidationError
+
+    if entries is None:
+        return None
+    if isinstance(entries, str) or not isinstance(entries, (list, tuple)):
+        raise ValidationError(
+            'match_paths must be a list of repo-relative paths, e.g. ["apps/api"]'
+        )
+    normalised: list[str] = []
+    for entry in entries:
+        if isinstance(entry, str) and not entry.strip():
+            continue
+        path = _normalise_match_path(entry)
+        if path not in normalised:
+            normalised.append(path)
+    return normalised or None
+
+
 def upsert_project_link(
     slug: str, *, base_url: str, remote_project_id: str,
     remote_work_package_id: str, socket_url: str | None = None,
@@ -506,9 +906,15 @@ def upsert_project_link(
     Keyed on (slug, remote_work_package_id), which is the UNIQUE constraint, so
     re-running a bootstrap updates the existing row rather than adding a second
     link to the same board.
+
+    `match_paths=None` KEEPS what an existing row holds; a list (even `[]`)
+    replaces it. Before this, every refresh - `refresh_state_map` after a column
+    change, a re-run bootstrap, a re-attach - wrote NULL over the board's path
+    bindings, and routing would quietly have gone back to the default.
     """
     import json
 
+    paths = _validate_match_paths(match_paths)
     with registry_conn() as conn:
         # A project links to many boards but only one is the default, so promoting
         # this row demotes the rest. Without this, re-linking a project to a new
@@ -533,15 +939,17 @@ def upsert_project_link(
                    default_list_id = excluded.default_list_id,
                    default_assignee_id = excluded.default_assignee_id,
                    state_list_map = excluded.state_list_map,
-                   match_paths = excluded.match_paths,
+                   match_paths = CASE WHEN ? THEN excluded.match_paths
+                                      ELSE project_links.match_paths END,
                    active = 1""",
             (
                 slug, provider, base_url.rstrip("/"), socket_url,
                 remote_project_id, remote_work_package_id, label,
                 1 if is_default else 0, default_list_id, default_assignee_id,
                 json.dumps(state_list_map) if state_list_map else None,
-                json.dumps(match_paths) if match_paths else None,
+                json.dumps(paths) if paths else None,
                 now_iso(),
+                1 if match_paths is not None else 0,
             ),
         )
         row = conn.execute(
@@ -564,6 +972,61 @@ def get_project_links(slug: str, *, active_only: bool = True) -> list[dict]:
 def get_default_project_link(slug: str) -> dict | None:
     links = get_project_links(slug)
     return links[0] if links else None
+
+
+def update_project_link(
+    link_id: int, *, match_paths: object = _UNSET, label: object = _UNSET,
+    is_default: bool | None = None,
+) -> dict | None:
+    """Change a link in place, with no network call. None when there is no such link.
+
+    Only what is passed changes. `match_paths=None` or `[]` clears the binding;
+    `label=None` or `""` clears the label, so tasks route by work package id.
+    `is_default=True` promotes this link and demotes the rest, exactly as
+    upsert_project_link does. `is_default=False` on the CURRENT default is
+    refused: a project whose boards have no default cannot route a task that
+    names none, and the right move is promoting another board.
+    """
+    import json
+
+    from memory_mcp.exceptions import ValidationError
+
+    fields: dict[str, object] = {}
+    if match_paths is not _UNSET:
+        paths = _validate_match_paths(match_paths)
+        fields["match_paths"] = json.dumps(paths) if paths else None
+    if label is not _UNSET:
+        fields["label"] = (str(label).strip() if label is not None else "") or None
+
+    with registry_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM project_links WHERE id = ?", (link_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        if is_default is False and row["is_default"]:
+            raise ValidationError(
+                f"board {row['label'] or row['remote_work_package_id']!r} is the "
+                f"default for '{row['slug']}'. Promote another board to default "
+                "instead - a project with boards and no default cannot route a "
+                "task that names none."
+            )
+        if is_default:
+            conn.execute(
+                "UPDATE project_links SET is_default = 0 WHERE slug = ?",
+                (row["slug"],),
+            )
+            fields["is_default"] = 1
+        if fields:
+            assignments = ", ".join(f"{name} = ?" for name in fields)
+            conn.execute(
+                f"UPDATE project_links SET {assignments} WHERE id = ?",
+                (*fields.values(), link_id),
+            )
+        row = conn.execute(
+            "SELECT * FROM project_links WHERE id = ?", (link_id,)
+        ).fetchone()
+    return _link_public(row)
 
 
 def delete_project_link(link_id: int) -> bool:

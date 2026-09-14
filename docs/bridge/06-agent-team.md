@@ -57,9 +57,11 @@ Confirmed capabilities (see `03-claude-ui-surfaces.md` for the UI side of the sa
 - **Subagents inherit the session's MCP servers.** ✅ **Verified 2026-09-04 by probe**, not assumed:
   all 66 `mcp__memory__*` tools are available to a subagent immediately, with no `ToolSearch` and no
   extra configuration, and the server's own instructions are injected verbatim too.
-- **`isolation: worktree`** gives an agent its own git worktree, auto-cleaned if unchanged. Frontend and
-  backend agents can work the same repo in parallel without colliding.
-  (asoode already has a `.claude/worktrees` directory, so this path is proven here.)
+- **`isolation: worktree`** gives an agent its own git worktree, auto-cleaned if unchanged.
+  ✅ **Confirmed 2026-09-04**, and **deliberately unused by this team since 2026-09-13** on the
+  user's instruction: whether a dispatch runs in a worktree is the user's choice in the Claude
+  interface. A worktree sits at the last commit, so an agent dispatched to verify uncommitted work
+  would see a tree without it. Two agents still run in parallel — they share the one checkout.
 - **Skills** are available to agents. Six design skills are installed at `~/.claude/skills/`:
   `design` (the comprehensive entry point the `designer` agent uses), `design-system`,
   `ui-styling`, `brand`, `slides`, `banner-design`. They are invoked on demand rather than
@@ -78,30 +80,39 @@ go, attach evidence, stop the clock on every finish, `memory_session_end` last) 
 rules (tokens, no invented tools or versions, "not verified" over asserting). A role file adds
 its identity, craft and hand-offs; an expert file `extends:` a role and adds the stack layer.
 
-| Agent | Extends | Effort | Isolation | Owns |
-|---|---|---|---|---|
-| `pm` | `_base` | max | none | Planning in isolated context; the main session is normally the lead |
-| `backend` | `_base` | xhigh | worktree | APIs, services, data models, schema, migrations |
-| `frontend` | `_base` | xhigh | worktree | UI implementation to the designer's spec, verified in the browser |
-| `designer` | `_base` | max | none | Tokens, component specs, flows, visual review — before any UI is built |
-| `test` | `_base` | max | worktree | Verifying other agents' work on the running product; the gate before a commit |
-| `reviewer` | `_base` | max | none | Independent review; **no Edit/Write** (`disallowedTools`); preloads `code-review`, `security-review` |
-| `devops` | `_base` | xhigh | none | CI, builds, deploys, containers, monitoring; stops before anything irreversible |
-| `docs` | `_base` | high | none | READMEs, API docs, changelogs for readers outside the session |
-| `dotnet` | `backend` | xhigh | worktree | .NET layout, DI and services — consulted before backend |
-| `nodejs` | `backend` | xhigh | worktree | Node layout: always NestJS / Next.js / pnpm — consulted before backend |
-| `react` | `frontend` | xhigh | worktree | pnpm + Vite + Tailwind + shadcn, every shadcn component wrapped once |
-| `app` | `frontend` | xhigh | worktree | Kotlin Multiplatform mobile, Android and iOS pixel-identical |
-| `python` | `backend` | xhigh | worktree | FastAPI + Pydantic v2, uv, ruff, mypy strict, SQLAlchemy 2.0 |
-| `go` | `backend` | xhigh | worktree | stdlib `net/http`, `cmd/`+`internal/`, sqlc over an ORM |
-| `rust` | `backend` | xhigh | worktree | tokio + axum, thiserror/anyhow, sqlx compile-time-checked queries |
-| `kotlin` | `backend` | xhigh | worktree | **Server-side** Kotlin: Ktor, coroutines, Exposed/jOOQ + Flyway |
+| Agent | Extends | Effort | Owns |
+|---|---|---|---|
+| `pm` | `_base` | max | Planning in isolated context; the main session is normally the lead |
+| `backend` | `_base` | xhigh | APIs, services, data models, schema, migrations |
+| `frontend` | `_base` | xhigh | UI implementation to the designer's spec, verified in the browser |
+| `designer` | `_base` | max | Tokens, component specs, flows, visual review — before any UI is built |
+| `test` | `_base` | max | Verifying other agents' work on the running product; the gate before a commit |
+| `reviewer` | `_base` | max | Independent review; **no Edit/Write** (`disallowedTools`); preloads `code-review`, `security-review` |
+| `devops` | `_base` | xhigh | CI, builds, deploys, containers, monitoring; stops before anything irreversible |
+| `docs` | `_base` | high | READMEs, API docs, changelogs for readers outside the session |
+| `dotnet` | `backend` | xhigh | .NET layout, DI and services — consulted before backend |
+| `nodejs` | `backend` | xhigh | Node layout: always NestJS / Next.js / pnpm — consulted before backend |
+| `react` | `frontend` | xhigh | pnpm + Vite + Tailwind + shadcn, every shadcn component wrapped once |
+| `app` | `frontend` | xhigh | Kotlin Multiplatform mobile, Android and iOS pixel-identical |
+| `react-native` | `frontend` | xhigh | Repos already on React Native: Expo or bare, native modules, simulator and emulator verification — never new mobile work |
+| `python` | `backend` | xhigh | FastAPI + Pydantic v2, uv, ruff, mypy strict, SQLAlchemy 2.0 |
+| `go` | `backend` | xhigh | stdlib `net/http`, `cmd/`+`internal/`, sqlc over an ORM |
+| `rust` | `backend` | xhigh | tokio + axum, thiserror/anyhow, sqlx compile-time-checked queries |
+| `kotlin` | `backend` | xhigh | **Server-side** Kotlin: Ktor, coroutines, Exposed/jOOQ + Flyway |
+
+No definition declares `isolation` — the column that used to sit here said `worktree` for ten of them
+and is gone on purpose (2026-09-13). Parallel agents share the one checkout.
 
 `kotlin` and `app` are deliberately separate: `app` owns Kotlin Multiplatform for phones,
 `kotlin` owns Kotlin on a server. Each disowns the other's territory in writing, because a
 brief sent to the wrong one costs a full dispatch before anyone notices.
 
-All sixteen pin `claude-opus-5`. No definition names its MCP tools in frontmatter: subagents
+`react-native` exists only for repos that are already React Native; new native mobile work is
+Kotlin Multiplatform and goes to `app`, and the definition says so in its own text. On a Next.js
+repo `nodejs` is the owner and `react` is dispatched on top of it for screens and components —
+both definitions carry their half.
+
+All seventeen pin `claude-opus-5`. No definition names its MCP tools in frontmatter: subagents
 inherit the memory server in full, and an allowlist would filter it out — `reviewer` is the one
 denylist. Skills are invoked on demand (`designer` names `/design` in its body); only `reviewer`
 preloads.
@@ -110,7 +121,7 @@ preloads.
 
 Added 2026-09-08, after the four language experts were written to a higher bar than the eight
 roles. Each definition carries three sections, and `TestEveryAgentMeetsTheStandard` asserts all
-sixteen do — on the **composed** body, so a section inherited from a parent counts:
+seventeen do — on the **composed** body, so a section inherited from a parent counts:
 
 - **Non-negotiables** — the opinions the agent will not re-litigate per task, each with its
   reason. Without them every dispatch re-derives the same decision, differently.
@@ -126,7 +137,7 @@ are two copies that will drift apart.
 
 The standard is enforced rather than agreed for the same reason the PreToolUse gate exists — a
 convention that lives only in whichever files happen to follow it decays the moment someone adds
-a seventeenth agent.
+an eighteenth agent.
 
 
 **The main session is the lead**, not `pm`: the orchestration brief rides the
@@ -179,7 +190,9 @@ written from assumption, and it is now possible to say which parts survived cont
 
 - Whether an explicit `tools:` allowlist filters inherited MCP tools. No definition uses one,
   so nothing depends on the answer; `reviewer` uses `disallowedTools` instead.
-- Whether `isolation: worktree` behaves as assumed for two invocations of the same agent.
+- ~~Whether `isolation: worktree` behaves as assumed for two invocations of the same agent.~~
+  **Moot since 2026-09-13: no definition declares `isolation`.** Worktree isolation is the user's
+  per-dispatch choice in the Claude interface, so the team never depends on its semantics.
 
 **One operational fact, learned the hard way:** Claude Code enumerates `~/.claude/agents/` at
 **session start**. Agents installed mid-session are not dispatchable until a restart —
@@ -243,8 +256,10 @@ config stays per-repo and committed.
 - **Subagent output is not shown to the user** — the parent relays it. Deep trees lose fidelity.
 - **Cost scales with the team.** Five opus agents on one task is a lot of tokens for what is often one
   agent's job. Default to delegating to *one* agent; fan out only when the work is genuinely parallel.
-- **Worktree isolation is per-agent, not per-task.** Two invocations of `backend` in the same session
-  may or may not share a worktree — verify before relying on it.
+- **Parallel agents share one checkout.** No definition declares `isolation`, so two agents
+  dispatched at once edit the same working tree unless the user turns on worktree isolation in the
+  Claude interface. The brief has to give each one a disjoint set of files; nothing else separates
+  them.
 
 ## Open questions
 

@@ -11,6 +11,10 @@ color: green
 You implement the web UI when the project is on the React stack, to the designer's spec, in the
 browser, as the frontend agent does — plus the stack's own rules.
 
+On a Next.js repo `nodejs` owns the project — layout, routing, server components, the data layer,
+pnpm — and you are dispatched on top of it for screens and components; the shadcn wrapper rule and
+browser verification are yours there too.
+
 ### Non-negotiables (the user's words)
 
 - **Always pnpm. Always Vite. Always Tailwind. Always the shadcn/ui component set** for any

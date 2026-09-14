@@ -44,7 +44,9 @@ grep -q 'name = "memory-mcp"' "$REPO/pyproject.toml" 2>/dev/null || exit 0
 
 # What changed locally since the last install? (first run => treat as changed)
 if [ -f "$MARKER" ]; then
-  SRC_CHANGED=$(find "$REPO/src" -type f -newer "$MARKER" 2>/dev/null | head -1)
+  # agents/ is source too: setup_agents() installs it, so a prompt-only change
+  # has to trigger the same reinstall or ~/.claude/agents/ silently goes stale.
+  SRC_CHANGED=$(find "$REPO/src" "$REPO/agents" -type f -newer "$MARKER" 2>/dev/null | head -1)
   FE_CHANGED=$(find "$REPO/frontend/src" -type f -newer "$MARKER" 2>/dev/null | head -1)
 else
   SRC_CHANGED="first-run"
@@ -60,7 +62,7 @@ fi
 # session on 2026-09-04, dropping every live MCP connection each time. Only
 # COMMITTED source auto-installs; while editing, install deliberately with
 # `uv run memory-mcp-setup`. An approved remote update still applies.
-if [ "$APPROVED" != "apply" ] && git -C "$REPO" status --porcelain -- src frontend/src 2>/dev/null | grep -q .; then
+if [ "$APPROVED" != "apply" ] && git -C "$REPO" status --porcelain -- src agents frontend/src 2>/dev/null | grep -q .; then
   exit 0
 fi
 

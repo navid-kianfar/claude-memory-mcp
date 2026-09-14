@@ -73,6 +73,15 @@ _MIRROR_SUPPRESSED: contextvars.ContextVar[int] = contextvars.ContextVar(
 )
 
 
+class MirroredRerouteError(ValidationError):
+    """A re-route refused because the task already has a card where it is.
+
+    task_sync is keyed (task_id, link_id) and no platform here can move a card
+    between boards, so changing link_id after the first mirror would create a
+    SECOND card on the new board. The HTTP layer answers 409.
+    """
+
+
 class TaskService:
     """Business logic for the task store."""
 
@@ -86,6 +95,7 @@ class TaskService:
         outbox_repo=None,
         mirror=None,
         attachment_repo=None,
+        path_resolver=None,
     ):
         self._task_repo = task_repo
         self._provenance_repo = provenance_repo
@@ -95,6 +105,11 @@ class TaskService:
         # this service never imports the bridge: a task store must work with
         # no asoode configured at all.
         self._link_resolver = link_resolver
+        # The full routing decision - path and target together - as
+        # `(project, *, path, target, task) -> (routing, current_link)`
+        # (TaskBridge.routing_for). Injected for the same reason. Without it,
+        # only `target` routes, exactly as before path routing existed.
+        self._path_resolver = path_resolver
         # The bridge's durable half. Both optional: a task store with no asoode
         # configured must behave exactly as it always has.
         self._outbox = outbox_repo
@@ -181,9 +196,27 @@ class TaskService:
     # ---------- create ----------
 
     def create(self, request: CreateTaskRequest) -> Task:
+        return self.create_routed(request)[0]
+
+    def create_routed(self, request: CreateTaskRequest) -> tuple[Task, dict | None]:
+        """Create a task and say where it routes: `(task, routing)`.
+
+        `routing` is None when there was nothing to decide - no path, no target,
+        and fewer than two boards. Resolution happens BEFORE the insert, so a
+        refused route (wrong board name, a path outside the repo, a tie, a path
+        and a target that disagree) creates nothing.
+        """
         task_id = str(uuid.uuid4())
         if request.parent_id:
             self._check_parentable(request.project, request.parent_id)
+        routing, _ = self._resolve_path(request.project, request.path, request.target)
+        if self._path_resolver is None:
+            link_id = self._resolve_target(request.project, request.target)
+        else:
+            # Only a DECIDED board is frozen into link_id. A path that matched
+            # nothing, or no path at all, leaves it None, which follows the
+            # project default - the rule every pre-routing task already lives by.
+            link_id = routing["link_id"] if routing and routing["matched"] else None
         position = self._task_repo.next_position(request.project, request.parent_id)
 
         task = self._task_repo.insert(
@@ -202,7 +235,7 @@ class TaskService:
             parent_id=request.parent_id,
             position=position,
             source=request.source.value,
-            link_id=self._resolve_target(request.project, request.target),
+            link_id=link_id,
             role=request.role,
         )
 
@@ -211,12 +244,14 @@ class TaskService:
             request.project, task_id, "task_create",
             {"title": task.title, "source": task.source, "priority": task.priority},
         )
+        if routing is not None:
+            self._record_route(request.project, task_id, routing)
         self._enqueue(request.project, task_id, "create", {"title": task.title})
         if task.role:
             # So the board says which agent the card is for. Queued, never
             # blocking: creating a task must not wait on the network.
             self._enqueue(request.project, task_id, "role", {"role": task.role})
-        return task
+        return task, routing
 
     # ---------- read ----------
 
@@ -275,6 +310,26 @@ class TaskService:
         if not target or self._link_resolver is None:
             return None
         return self._link_resolver(project, target)
+
+    def _resolve_path(
+        self, project: str, path: str | None, target: str | None, task: Task | None = None,
+    ) -> tuple[dict | None, dict | None]:
+        """`(routing, current_link)` from the injected resolver; `(None, None)`
+        when none is wired. Raises what the resolver refuses."""
+        if self._path_resolver is None:
+            return None, None
+        return self._path_resolver(project, path=path, target=target, task=task)
+
+    def _record_route(self, project: str, task_id: str, routing: dict) -> None:
+        """Why the task landed where it did. The tool reply that says so is
+        gone once the session is, and route() runs later, at flush time."""
+        self._record(project, task_id, "task_route", {
+            key: routing.get(key)
+            for key in (
+                "path", "normalised", "matched", "matched_prefix", "link_id",
+                "board", "reason",
+            )
+        })
 
     def get(self, project: str, task_id: str) -> Task:
         return self._require(project, task_id)
@@ -339,10 +394,67 @@ class TaskService:
 
     def update(self, request: UpdateTaskRequest) -> tuple[Task, list[str]]:
         """Apply the given fields. Returns (task, names of fields that changed)."""
+        task, changed, _ = self.update_routed(request)
+        return task, changed
+
+    def _reroute(self, request: UpdateTaskRequest, before: Task) -> tuple[dict | None, int | None, bool]:
+        """Resolve an update's path/target. Returns (routing, new_link_id, changes).
+
+        Refused - before anything is written - when the task already has a card
+        on the board it would leave (MirroredRerouteError). A path matching no
+        board is no evidence, so the task keeps the board it has.
+        """
+        current: dict | None = None
+        if self._path_resolver is None:
+            if not request.target:
+                return None, None, False
+            new_id = self._resolve_target(request.project, request.target)
+            current_id = before.link_id
+            routing = None
+        else:
+            routing, current = self._resolve_path(
+                request.project, request.path, request.target, before,
+            )
+            if routing is None or not routing["matched"]:
+                return routing, None, False
+            new_id = routing["link_id"]
+            current_id = current["id"] if current else None
+
+        if (
+            current_id is not None and new_id != current_id and self._outbox is not None
+            and self._outbox.remote_id(request.project, before.id, current_id)
+        ):
+            here = (
+                (current or {}).get("label")
+                or (current or {}).get("remote_work_package_id")
+                or f"link {current_id}"
+            )
+            there = (routing or {}).get("board") or f"link {new_id}"
+            raise MirroredRerouteError(
+                f"{before.title!r} already has a card on board {here!r}. Moving it "
+                f"to {there!r} would create a SECOND card - no board move exists. "
+                f"Move or close the card on {here!r} by hand, then re-create the "
+                "task with the right path."
+            )
+        return routing, new_id, new_id != before.link_id
+
+    def update_routed(self, request: UpdateTaskRequest) -> tuple[Task, list[str], dict | None]:
+        """update() plus the routing decision when `path` or `target` was passed.
+
+        Returns (task, changed, routing). A link change shows in `changed` as
+        `link_id`; it queues no mirror op of its own, because the pending create
+        routes by link_id when it flushes and a task with a card cannot get here.
+        """
         before = self._require(request.project, request.task_id)
+
+        routing, new_link_id, link_changes = None, None, False
+        if request.path is not None or request.target is not None:
+            routing, new_link_id, link_changes = self._reroute(request, before)
 
         role_changed = False
         fields: dict = {}
+        if link_changes:
+            fields["link_id"] = new_link_id
         if request.title is not None:
             fields["title"] = request.title.strip()
         if request.description is not None:
@@ -372,9 +484,13 @@ class TaskService:
             role_changed = True
 
         if not fields:
-            return before, []
+            if routing is not None:
+                self._record_route(request.project, request.task_id, routing)
+            return before, [], routing
 
         task = self._task_repo.update(request.project, request.task_id, fields)
+        if routing is not None:
+            self._record_route(request.project, request.task_id, routing)
 
         state_changed = request.state is not None and request.state != before.state
         closed: list = []
@@ -461,7 +577,7 @@ class TaskService:
             self._enqueue(request.project, request.task_id, "role", {
                 "role": task.role,
             })
-        return task, changed
+        return task, changed, routing
 
     def reorder(self, project: str, ordered_ids: list[str]) -> int:
         """Apply a manual order to the given tasks, in the order supplied."""
@@ -487,7 +603,13 @@ class TaskService:
         self, project: str, task_id: str, source_path: str,
         filename: str | None = None, content_type: str | None = None,
     ) -> "TaskAttachment":
-        """Attach a file that exists on disk to a task."""
+        """Attach a file that exists on disk to a task.
+
+        Idempotent per (task, bytes): attaching a file this task already holds
+        returns the existing attachment unchanged - no second row, no audit
+        entry, no outbox op - so the board never gets the same file twice. The
+        blob is still restored first if it went missing from the store.
+        """
         import hashlib
         import mimetypes
         import shutil
@@ -531,7 +653,14 @@ class TaskService:
             size_bytes=size, sha256=sha,
         )
         if self._attachments is not None:
-            self._attachments.add(project, attachment, str(blob))
+            # Look-then-insert under the per-project lock: a compose-box bind
+            # and a tool call attaching the same bytes to the same task can
+            # arrive on two worker threads at once.
+            with self._claim_lock(project):
+                existing = self._attachments.find_by_hash(project, task_id, sha)
+                if existing is not None:
+                    return existing
+                self._attachments.add(project, attachment, str(blob))
         self._record(project, task_id, "task_attach",
                      {"filename": name, "size_bytes": size})
         self._enqueue(project, task_id, "attachment", {"attachment_id": attachment.id})

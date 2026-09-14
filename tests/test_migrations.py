@@ -434,6 +434,96 @@ def test_v13_db_gains_the_digest_tables(tmp_path):
         conn.close()
 
 
+def _make_v14_db(path) -> None:
+    """A database at v14 WITH work in it: the full schema minus everything v15
+    adds, a task, and a file already attached to it."""
+    conn = duckdb.connect(str(path))
+    create_schema(conn)
+    conn.execute("DROP INDEX IF EXISTS idx_task_attach_hash")
+    conn.execute("DROP TABLE IF EXISTS attachment_inbox")
+    conn.execute("DELETE FROM schema_version WHERE version >= 15")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (14)")
+    conn.execute(
+        "INSERT INTO tasks (id, title, state, source) VALUES ('t1', 'keep me', 'in_progress', 'user')"
+    )
+    conn.execute(
+        "INSERT INTO task_attachments (id, task_id, filename, content_type, size_bytes, "
+        "sha256, path) VALUES ('a1', 't1', 'proof.png', 'image/png', 12, 'abc', '/blob')"
+    )
+    conn.close()
+
+
+def _indexes(conn, table) -> set[str]:
+    return {
+        r[0] for r in conn.execute(
+            "SELECT index_name FROM duckdb_indexes() WHERE table_name = ?", [table]
+        ).fetchall()
+    }
+
+
+def test_v14_db_with_rows_gains_the_inbox_and_the_hash_index(tmp_path):
+    db = tmp_path / "v14.duckdb"
+    _make_v14_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        assert get_schema_version(conn) == 14
+        assert "attachment_inbox" not in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION == 15
+
+        assert "attachment_inbox" in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+        assert "idx_task_attach_hash" in _indexes(conn, "task_attachments")
+        assert {"idx_attach_inbox_id", "idx_attach_inbox_session"} <= _indexes(
+            conn, "attachment_inbox"
+        )
+        # Nothing that was there changed.
+        assert conn.execute("SELECT id, title FROM tasks").fetchall() == [("t1", "keep me")]
+        assert conn.execute(
+            "SELECT id, task_id, sha256 FROM task_attachments"
+        ).fetchall() == [("a1", "t1", "abc")]
+        # And the new table takes a row in the shape the repository writes.
+        conn.execute(
+            "INSERT INTO attachment_inbox (id, claude_session_id, sha256, filename, "
+            "content_type, size_bytes, path, source, notice) "
+            "VALUES ('p1', 's1', 'abc', 'x.png', 'image/png', 12, '/blob', 'transcript', 'n')"
+        )
+        assert run_migrations(conn) == 15, "idempotent"
+        assert conn.execute("SELECT count(*) FROM attachment_inbox").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_v15_tables_and_indexes_match_between_fresh_and_migrated(tmp_path):
+    fresh = duckdb.connect(str(tmp_path / "fresh15.duckdb"))
+    migrated_path = tmp_path / "migrated15.duckdb"
+    _make_v14_db(migrated_path)
+    migrated = duckdb.connect(str(migrated_path))
+    try:
+        create_schema(fresh)
+        run_migrations(migrated)
+        for table in ("attachment_inbox", "task_attachments"):
+            a = [(r[1], r[2], r[3], r[4]) for r in
+                 fresh.execute(f"PRAGMA table_info('{table}')").fetchall()]
+            b = [(r[1], r[2], r[3], r[4]) for r in
+                 migrated.execute(f"PRAGMA table_info('{table}')").fetchall()]
+            assert a == b, table
+            assert _indexes(fresh, table) == _indexes(migrated, table), table
+    finally:
+        fresh.close()
+        migrated.close()
+
+
+def test_v1_db_migrates_all_the_way_to_the_inbox(tmp_path):
+    db = tmp_path / "v1-to-15.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        assert run_migrations(conn) == 15
+        assert "attachment_inbox" in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+    finally:
+        conn.close()
+
+
 def test_digest_migration_is_idempotent(tmp_path):
     db = tmp_path / "v13-twice.duckdb"
     _make_v13_db(db)

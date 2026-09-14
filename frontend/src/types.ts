@@ -327,6 +327,11 @@ export interface Task {
   triage: boolean;
   /** Which agent role this task is for ("backend", "frontend", ...); null means anyone. */
   role: string | null;
+  /**
+   * Which linked board this task mirrors to; null until it is routed or
+   * mirrored. A project can link MANY boards, so this is what says which one.
+   */
+  link_id: number | null;
   /** Which session is holding this task; null means free. */
   claimed_by: string | null;
   claimed_at: string | null;
@@ -405,6 +410,14 @@ export interface TaskInput {
   parent_id?: string | null;
   source?: string;
   role?: string | null;
+  /**
+   * Repo-relative path this task is about ("frontend/src/components"). The
+   * server matches it against each link's `match_paths` (longest prefix wins)
+   * and routes the task to that board.
+   */
+  path?: string | null;
+  /** A board label, which overrides `path` matching. */
+  target?: string | null;
 }
 
 export interface TaskUpdate {
@@ -420,6 +433,33 @@ export interface TaskUpdate {
   estimated_minutes?: number | null;
   /** "" clears the role; omit to leave it alone. */
   role?: string;
+  /** See TaskInput.path - routes the task by repo-relative prefix. */
+  path?: string | null;
+  /** A board label. Refused with 409 when the task is already on another board. */
+  target?: string | null;
+}
+
+/**
+ * Where a task create/update decided to send the task. Returned by the task
+ * write routes so the UI can say which board it picked and why, rather than
+ * leaving a silent mis-route to be found on the board later.
+ */
+export interface Routing {
+  /** The path that was matched, or null when none was given. */
+  path: string | null;
+  matched: boolean;
+  /** The winning entry from the link's `match_paths`. */
+  matched_prefix?: string | null;
+  /** Human-readable account of the decision - always shown verbatim. */
+  reason: string;
+  link_id: number | null;
+  /** The board's label, for the message. */
+  board: string | null;
+  /**
+   * The links that were considered. The contract does not pin its shape, so
+   * the UI does not render it - `reason` is what it shows.
+   */
+  candidates?: unknown[];
 }
 
 export type LoadFromFolderSource =
@@ -471,6 +511,56 @@ export interface ProjectLink {
   remote_work_package_id: string;
   is_default: boolean;
   state_list_map: Record<string, string> | null;
+  /**
+   * Repo-relative prefixes this board owns ("apps/api", "frontend"). null or
+   * empty means the board is not bound to any subpath, so only the default
+   * flag decides. Longest prefix wins; the server normalises a trailing
+   * `/**` or `/*` away.
+   */
+  match_paths: string[] | null;
+}
+
+/** What a PATCH on a link may change. Only the fields passed are touched. */
+export interface ProjectLinkUpdate {
+  /** null clears the binding; the server rejects a bad pattern with a 400. */
+  match_paths?: string[] | null;
+  label?: string;
+  is_default?: boolean;
+}
+
+/**
+ * `matches` - the link already has these paths, nothing to do;
+ * `differs` - it is linked with different paths;
+ * `unlinked` - the board is not linked to this project yet.
+ */
+export type LinkProposalStatus = "matches" | "differs" | "unlinked";
+
+/**
+ * A binding a committed manifest suggests. NEVER applied automatically -
+ * linking a board is always an explicit act, so each proposal is a row with
+ * its own Apply button.
+ */
+export interface LinkProposal {
+  label: string | null;
+  remote_work_package_id: string;
+  base_url: string;
+  is_default: boolean;
+  match_paths: string[];
+  status: LinkProposalStatus;
+  /** The existing link this proposal concerns; null when `unlinked`. */
+  link_id: number | null;
+  /** What that link carries today, for the `differs` comparison. */
+  current_match_paths: string[] | null;
+}
+
+export interface ProjectLinksResponse {
+  slug: string;
+  links: ProjectLink[];
+  /**
+   * Optional on purpose: a daemon older than the manifest proposals sends no
+   * such key, and the UI must then simply show no Proposals card.
+   */
+  proposals?: LinkProposal[];
 }
 
 export interface BoardRef {

@@ -129,6 +129,9 @@ ROLE_COLORS: dict[str, str] = {
     "go": "#03a9f4",        # light blue, the gopher
     "rust": "#ff5722",      # deep orange, Rust's brand
     "kotlin": "#009688",    # teal - NOT app's purple; they are different agents
+    # Added 2026-09-13 with the agent. React's own cyan is react's, and the table
+    # is one colour per agent, so React Native takes the nearest free swatch.
+    "react-native": "#8bc34a",  # light green - NOT react's cyan
 }
 
 

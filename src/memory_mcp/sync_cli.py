@@ -281,8 +281,73 @@ def _write_sidecars(snap: Path) -> None:
     (snap / ".gitignore").write_text(_SNAPSHOT_GITIGNORE)
 
 
+#: The keys a manifest link carries - and so the only ones that can ever leave
+#: this machine through it. Out on purpose: the PAT (credentials live in the
+#: registry keyed by server URL), the SQLite `id` (machine-local, would mislead a
+#: reader elsewhere), default_list_id / default_assignee_id / state_list_map
+#: (rebuilt from the live board on attach; stale diff noise in git), socket_url,
+#: active, created_at (per installation).
+_MANIFEST_LINK_KEYS = (
+    "provider", "base_url", "remote_project_id", "remote_work_package_id",
+    "label", "is_default", "match_paths",
+)
+
+#: A committed file is shared input: long strings are cut rather than trusted.
+_MANIFEST_TEXT_LIMIT = 500
+
+
+def _manifest_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()[:_MANIFEST_TEXT_LIMIT]
+    return value or None
+
+
+def _manifest_links(links: object) -> list[dict]:
+    """Project links into what `.claude-memory/manifest.json` carries.
+
+    The ONE projection, used on every side - the daemon's sync-export, the
+    manifest write, and the proposals route reading a committed file back - so
+    export and the proposal diff cannot disagree about what a binding is.
+    Idempotent on its own output. Entries without a work package id (the
+    binding's identity) and non-dict junk are dropped; `match_paths` is always a
+    list, `[]` for none. Sorted default-first, then by label and id, so every
+    machine writes the same order and git diffs show real changes only.
+    """
+    out: list[dict] = []
+    for link in links if isinstance(links, list) else []:
+        if not isinstance(link, dict):
+            continue
+        package_id = _manifest_text(link.get("remote_work_package_id"))
+        if package_id is None:
+            continue
+        paths = link.get("match_paths")
+        out.append({
+            "provider": _manifest_text(link.get("provider")) or "asoode",
+            "base_url": (_manifest_text(link.get("base_url")) or "").rstrip("/"),
+            "remote_project_id": _manifest_text(link.get("remote_project_id")),
+            "remote_work_package_id": package_id,
+            "label": _manifest_text(link.get("label")),
+            "is_default": link.get("is_default") is True,
+            "match_paths": [
+                p[:_MANIFEST_TEXT_LIMIT] for p in paths if isinstance(p, str) and p.strip()
+            ] if isinstance(paths, list) else [],
+        })
+    out.sort(key=lambda l: (not l["is_default"], (l["label"] or "").lower(),
+                            l["remote_work_package_id"]))
+    return out
+
+
+def _read_manifest(snap: Path) -> dict:
+    try:
+        data = json.loads((snap / _MANIFEST).read_text())
+    except Exception:  # noqa: BLE001 - missing, half-written, conflict markers
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _write_manifest(snap: Path, project_id: str | None, slug: str,
-                    categories: dict[str, list]) -> None:
+                    categories: dict[str, list], links: list | None = None) -> None:
     """The one file in .claude-memory/ that stays JSON, and why.
 
     `context.detect_project_from_cwd` reads it on every project detection in the
@@ -290,14 +355,23 @@ def _write_manifest(snap: Path, project_id: str | None, slug: str,
     a DuckDB file - and take its lock - would be a real regression, so identity
     stays in ~300 bytes of text that git can also merge line by line. The
     memories, which are what actually grew, are in the database.
+
+    Version 3 adds `links`: the path->board bindings, so a clone knows which
+    work package owns which subtree and the mapping is reviewable in git. They
+    are small identity data of the same kind, hence here and not in the
+    snapshot database. `links=None` (a daemon too old to send them, or a JSON
+    migration) keeps what the file already carries rather than erasing it.
     """
+    if links is None:
+        links = _read_manifest(snap).get("links")
     (snap / _MANIFEST).write_text(json.dumps({
-        "version": 2,
+        "version": 3,
         "project_id": project_id,
         "slug": slug,
         "snapshot": SNAPSHOT_DB_NAME,
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "categories": sorted(c for c, items in categories.items() if items),
+        "links": _manifest_links(links),
         "exported_at": datetime.now(timezone.utc).isoformat(),
     }, indent=2))
 
@@ -329,7 +403,8 @@ def _export(cwd: str) -> None:
         provenance=provenance,
         tombstones=tombstones,
     )
-    _write_manifest(snap, project.project_uid if project else None, slug, categories)
+    _write_manifest(snap, project.project_uid if project else None, slug, categories,
+                    payload.get("links"))
     _write_sidecars(snap)
     _retire_legacy_json(snap, db_path, parse_failed)
 
@@ -350,6 +425,10 @@ def _import(cwd: str) -> None:
     has_db = db_path.is_file()
     if not has_db and not (snap / _MANIFEST).is_file():
         return  # no snapshot in this folder - nothing to import
+
+    # Before the memories, and independent of them: a snapshot this build
+    # refuses to read must not also hide the bindings notice.
+    _propose_links(slug, _read_manifest(snap))
 
     parse_failed: list[str] = []
     provenance: list[dict] = []
@@ -409,6 +488,38 @@ def _import(cwd: str) -> None:
         print(
             "[Memory MCP] Skipped unparseable snapshot files (resolve git "
             f"conflicts): {', '.join(parse_failed)}"
+        )
+
+
+def _propose_links(slug: str, manifest: dict) -> None:
+    """Hand the manifest's bindings to the daemon as PROPOSALS, and say so.
+
+    Never a bind: the daemon stores them and diffs them against this machine's
+    links; project_links is not touched, because linking is always explicit and
+    a hook must not be able to put a private project on someone's server. One
+    line is printed when anything is not already applied. A manifest without a
+    `links` key (version 2 and older) proposes nothing. A daemon without the
+    route (older build) or not running costs nothing but the notice.
+    """
+    links = manifest.get("links")
+    if not isinstance(links, list):
+        return
+    try:
+        result = _daemon(
+            f"/api/projects/{slug}/asoode/link-proposals", "POST", {"links": links},
+        )
+    except (OSError, ValueError):  # URLError/HTTPError are OSErrors; bad JSON
+        return
+    pending = [
+        p for p in (result.get("proposals") or [])
+        if isinstance(p, dict) and p.get("status") != "matches"
+    ]
+    if pending:
+        n = len(pending)
+        print(
+            f"[Memory MCP] {n} path->board {'binding' if n == 1 else 'bindings'} in "
+            f"{SNAPSHOT_DIRNAME}/ {'is' if n == 1 else 'are'} not applied. "
+            "Review with memory_asoode_links."
         )
 
 

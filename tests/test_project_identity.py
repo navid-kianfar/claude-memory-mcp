@@ -4,6 +4,12 @@ Before this, moving a folder (or renaming it) made the next Claude session
 register a second project, because detection matched on the bound path and then
 on the folder name. The uid lives in .claude-memory/manifest.json, which is
 committed, so it survives a move, a rename, and a teammate's clone.
+
+A LINKED WORKTREE is the exception that rule needed. It carries the same committed
+uid as the checkout it came from, so "rebind to wherever the uid is seen" bound
+projects to `.claude/worktrees/<task>` - observed in the live registry, not
+theorised. Every absolute path in the real checkout then looked like it was outside
+the project root, and the binding dangled the moment the worktree was removed.
 """
 
 import json
@@ -170,3 +176,84 @@ def test_claim_without_a_uid_falls_back_to_detection(tmp_path):
     result = container.project_service.claim_folder(str(folder), None, None)
 
     assert result == {"slug": "no-manifest-yet", "action": "unclaimed"}
+
+
+# ---------- linked worktrees resolve, and bind nothing ----------
+
+
+def _worktree(tmp_path, name, parent):
+    """A folder shaped like `git worktree add` leaves one: `.git` is a FILE
+    holding a gitdir pointer, not a directory."""
+    folder = _folder(tmp_path, name)
+    (folder / ".git").write_text(f"gitdir: {parent}/.git/worktrees/{name}\n")
+    return folder
+
+
+def test_a_worktree_of_a_known_project_resolves_without_rebinding(tmp_path, repo):
+    main = _folder(tmp_path, "mainline")
+    container.project_service.claim_folder(str(main), UID, "mainline")
+    slug = repo.get_by_uid(UID).slug
+    tree = _worktree(tmp_path, "wt-feature", main)
+
+    result = container.project_service.claim_folder(str(tree), UID, "mainline")
+
+    assert result == {"slug": slug, "action": "worktree"}
+    assert repo.get(slug).project_path == str(main)
+
+
+def test_a_claude_worktree_path_resolves_without_rebinding(tmp_path, repo):
+    """The second witness: Claude Code's own agent worktrees, which may be real
+    clones rather than git worktrees and so have a `.git` directory."""
+    main = _folder(tmp_path, "mainline")
+    container.project_service.claim_folder(str(main), UID, "mainline")
+    slug = repo.get_by_uid(UID).slug
+    tree = _folder(tmp_path, "mainline/.claude/worktrees/task-abc")
+    (tree / ".git").mkdir()
+
+    result = container.project_service.claim_folder(str(tree), UID, "mainline")
+
+    assert result["action"] == "worktree"
+    assert repo.get(slug).project_path == str(main)
+
+
+def test_a_worktree_of_an_UNKNOWN_uid_registers_nothing(tmp_path, repo):
+    """A fresh clone registers itself; a worktree must not. Registering one would
+    create a project whose path vanishes when the worktree is removed."""
+    main = _folder(tmp_path, "never-seen")
+    before = len(repo.list_all())
+    tree = _worktree(tmp_path, "wt-orphan", main)
+
+    result = container.project_service.claim_folder(str(tree), UID, "never-seen")
+
+    assert result["action"] == "unclaimed"
+    assert len(repo.list_all()) == before
+    assert repo.get_by_uid(UID) is None
+
+
+def test_a_normal_checkout_with_a_git_directory_still_rebinds(tmp_path, repo):
+    """The worktree rule must not cost a moved folder its rebind."""
+    original = _folder(tmp_path, "ordinary")
+    (original / ".git").mkdir()
+    container.project_service.claim_folder(str(original), UID, "ordinary")
+    moved = _folder(tmp_path, "ordinary-moved")
+    (moved / ".git").mkdir()
+
+    result = container.project_service.claim_folder(str(moved), UID, "ordinary")
+
+    assert result["action"] == "rebound"
+    assert repo.get(result["slug"]).project_path == str(moved)
+
+
+def test_the_worktree_predicate_reads_both_witnesses(tmp_path):
+    from memory_mcp.services.project_service import is_linked_worktree
+
+    plain = _folder(tmp_path, "plain")
+    (plain / ".git").mkdir()
+    pointer = _worktree(tmp_path, "pointer", plain)
+    claude = _folder(tmp_path, "x/.claude/worktrees/task-1")
+
+    assert is_linked_worktree(plain) is False
+    assert is_linked_worktree(pointer) is True
+    assert is_linked_worktree(claude) is True
+    # A folder with no .git at all is not a worktree either.
+    assert is_linked_worktree(_folder(tmp_path, "bare")) is False

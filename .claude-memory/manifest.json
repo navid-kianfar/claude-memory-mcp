@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "project_id": "6a7fd2f4-e16a-4585-b373-9ede6e234b25",
   "slug": "claude-memory-mcp",
   "snapshot": "memory.duckdb",
@@ -14,5 +14,16 @@
     "project_plan",
     "reference"
   ],
-  "exported_at": "2026-09-11T01:22:53.827494+00:00"
+  "links": [
+    {
+      "provider": "asoode",
+      "base_url": "https://api.asoode.com",
+      "remote_project_id": "d00a21df-d78c-4d1f-8423-23591136cef8",
+      "remote_work_package_id": "a67ab907-496e-411b-be40-5b227d58857e",
+      "label": "Claude Memory MCP",
+      "is_default": true,
+      "match_paths": []
+    }
+  ],
+  "exported_at": "2026-09-14T00:14:30.194228+00:00"
 }

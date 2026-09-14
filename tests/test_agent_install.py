@@ -122,14 +122,21 @@ class TestAgentInstall:
 
     def test_a_chain_composes_in_order_and_leaves_no_marker(self, agent_dirs):
         """dotnet -> backend -> _base: the expert layer lands where backend put
-        its marker, between backend's craft and the shared contract."""
+        its marker, between backend's craft and the shared contract, and every
+        key the child leaves unset arrives from the NEAREST ancestor that set it.
+
+        (This used to assert on `isolation`, which no definition declares any
+        more - worktree isolation is the user's per-dispatch choice. `color` and
+        `effort` carry the same inheritance, and `effort` also pins precedence:
+        backend's xhigh must beat _base's high.)
+        """
         source, dest = agent_dirs
         _write(source, "_base.md",
-               "---\nabstract: true\nmodel: claude-opus-5\n---\n"
+               "---\nabstract: true\nmodel: claude-opus-5\neffort: high\n---\n"
                "{{EXTENSION}}\n\n## Shared\n")
         _write(source, "backend.md",
-               "---\nname: backend\ndescription: b\nextends: _base\nisolation: worktree\n---\n"
-               "## Backend craft\n{{EXTENSION}}\n")
+               "---\nname: backend\ndescription: b\nextends: _base\neffort: xhigh\n"
+               "color: orange\n---\n## Backend craft\n{{EXTENSION}}\n")
         _write(source, "dotnet.md",
                "---\nname: dotnet\ndescription: d\nextends: backend\n---\n"
                "## The .NET layer\n")
@@ -138,8 +145,10 @@ class TestAgentInstall:
 
         dotnet = (dest / "dotnet.md").read_text()
         front, body = setup_mod.parse_agent(dotnet)
-        assert front["isolation"] == "worktree", "inherited through the chain"
         assert front["name"] == "dotnet"
+        assert front["color"] == "orange", "inherited through the chain"
+        assert front["effort"] == "xhigh", "the nearer layer wins over the base"
+        assert front["model"] == "claude-opus-5", "reaches the child from the base"
         assert body.index("## Backend craft") < body.index("## The .NET layer") < body.index("## Shared")
         assert "{{EXTENSION}}" not in dotnet
         assert "{{EXTENSION}}" not in (dest / "backend.md").read_text()
@@ -156,6 +165,44 @@ class TestAgentInstall:
         _write(source, "b.md", "---\nname: b\nextends: a\n---\nB\n")
         with pytest.raises(setup_mod.AgentCompositionError, match="cannot extend itself"):
             setup_mod.setup_agents()
+
+    def test_disallowed_tools_accumulate_down_the_chain(self, agent_dirs):
+        """Every other key is nearest-layer-wins; a denial is not. A child that
+        denies more must never hand back what its base denied."""
+        src, dest = agent_dirs
+        _write(src, "_base.md",
+               "---\nabstract: true\nmodel: m\ndisallowedTools: Agent\n---\n{{EXTENSION}}\n")
+        _write(src, "reviewer.md",
+               "---\nname: reviewer\ndescription: r\nextends: _base\n"
+               "disallowedTools: Edit, Write, Agent\n---\nreview\n")
+        _write(src, "docs.md",
+               "---\nname: docs\ndescription: d\nextends: _base\n---\nwrite\n")
+
+        setup_mod.setup_agents()
+
+        reviewer, _ = setup_mod.parse_agent((dest / "reviewer.md").read_text())
+        docs, _ = setup_mod.parse_agent((dest / "docs.md").read_text())
+        assert reviewer["disallowedTools"] == "Agent, Edit, Write", "union, no duplicate"
+        assert docs["disallowedTools"] == "Agent", "inherited when the child says nothing"
+
+    def test_the_agent_name_marker_becomes_the_leaf_name_at_install(self, agent_dirs):
+        """A base cannot know which agent it is being composed into; install can."""
+        src, _ = agent_dirs
+        _write(src, "_base.md",
+               "---\nabstract: true\nmodel: m\n---\nI am {{AGENT_NAME}}.\n{{EXTENSION}}\n")
+        _write(src, "backend.md",
+               "---\nname: backend\ndescription: b\nextends: _base\n---\nlayer {{AGENT_NAME}}\n")
+        _write(src, "python.md",
+               "---\nname: python\ndescription: p\nextends: backend\n---\nexpert\n")
+        by_stem = {p.stem: p for p in src.glob("*.md")}
+
+        python = setup_mod.installable_agent_text(src / "python.md", by_stem)
+        backend = setup_mod.installable_agent_text(src / "backend.md", by_stem)
+
+        assert "I am python." in python
+        assert "layer python" in python, "a marker in a middle layer resolves to the LEAF"
+        assert "I am backend." in backend and "layer backend" in backend
+        assert "{{AGENT_NAME}}" not in python + backend
 
     def test_composition_is_idempotent(self, agent_dirs):
         source, dest = agent_dirs
@@ -192,7 +239,7 @@ class TestShippedAgentDefinitions:
         # extend backend
         "dotnet", "nodejs", "python", "go", "rust", "kotlin",
         # extend frontend
-        "react", "app",
+        "react", "react-native", "app",
     }
 
     @staticmethod
@@ -270,11 +317,23 @@ class TestShippedAgentDefinitions:
             "risks filtering out the inherited MCP tools it needs"
         )
 
-    def test_pm_is_not_tool_restricted(self):
-        """PM reads and writes. Fan-out protects its context; it is not a sandbox."""
+    def test_pm_reads_and_writes_but_does_not_dispatch(self):
+        """A dispatched pm plans in isolated context; the LEAD dispatches from its
+        plan. So pm keeps every tool but one - and never an allowlist, which would
+        filter out the MCP tools it needs."""
         front, _ = self._definitions()["pm"]
-        assert "disallowedTools" not in front, "pm must keep full tools"
+        assert [t.strip() for t in front["disallowedTools"].split(",")] == ["Agent"]
         assert "tools" not in front, "pm must not be narrowed by an allowlist"
+
+    def test_no_installed_agent_can_dispatch_another(self):
+        """Only the lead dispatches. On 2026-09-13 a reviewer spawned six "angle"
+        reviewers and one of those four more; every installed definition must
+        deny the Agent tool, including ones that deny other tools of their own."""
+        for stem, (front, _) in self._definitions().items():
+            denied = [t.strip() for t in front.get("disallowedTools", "").split(",")]
+            assert "Agent" in denied, f"{stem}.md can start agents"
+        reviewer = self._definitions()["reviewer"][0]["disallowedTools"]
+        assert "Edit" in reviewer and "Agent" in reviewer, "the union kept both"
 
     def test_every_agent_pins_opus_5(self):
         for stem, (front, _) in self._definitions().items():
@@ -287,6 +346,7 @@ class TestShippedAgentDefinitions:
             "backend": "xhigh", "frontend": "xhigh", "devops": "xhigh",
             "docs": "high",
             "dotnet": "xhigh", "nodejs": "xhigh", "react": "xhigh", "app": "xhigh",
+            "react-native": "xhigh",
             "python": "xhigh", "go": "xhigh", "rust": "xhigh", "kotlin": "xhigh",
         }
         for stem, (front, _) in self._definitions().items():
@@ -295,6 +355,19 @@ class TestShippedAgentDefinitions:
             assert effort == expected[stem], (
                 f"{stem}.md effort is {effort!r}, expected {expected[stem]!r}"
             )
+
+    def test_react_native_is_never_a_second_opinion_on_new_mobile_work(self):
+        """`react-native` exists for repos that are ALREADY React Native; the
+        standing rule for new native mobile is Kotlin Multiplatform, which is
+        `app` (memory d8b8baa3, 2026-09-13). And it inherits frontend's browser
+        rule, which cannot see a native screen, so its own layer must replace it.
+        """
+        _, body = self._definitions()["react-native"]
+        assert "already React Native" in body
+        assert "Kotlin Multiplatform" in body and "`app`" in body
+        lowered = body.lower()
+        assert "simulator" in lowered and "emulator" in lowered
+        assert "expo" in lowered and "bare" in lowered
 
     def test_every_agent_is_told_to_mind_tokens(self):
         """The user's standing constraint, not a nicety."""
@@ -319,12 +392,35 @@ class TestShippedAgentDefinitions:
             _, body = self._definitions()[stem]
             assert "test-credentials.json" in body, f"{stem}.md has no credential source"
 
-    def test_agents_that_share_the_repo_are_worktree_isolated(self):
-        """frontend/backend/test can run at once; without this they collide."""
-        definitions = self._definitions()
-        for stem in ("frontend", "backend", "test"):
-            assert definitions[stem][0].get("isolation") == "worktree", (
-                f"{stem}.md must declare isolation: worktree"
+    def test_no_definition_declares_its_own_isolation(self):
+        """Worktree isolation is the USER'S choice, made per dispatch in the
+        Claude interface. A definition that declares it takes that choice away -
+        and a worktree sits at the last commit, so an agent sent to verify
+        uncommitted work silently sees a tree without it, which is why test.md
+        needed a paragraph about exactly that. Stated by the user 2026-09-13:
+        "do not start a worktree by yourself. if the user checks the worktree in
+        claude interface it will be done automatically."
+
+        Composed definitions, so a key put back on a BASE fails here for every
+        agent that extends it - which is how it reached ten agents before.
+        """
+        for stem, (front, _) in self._definitions().items():
+            assert "isolation" not in front, (
+                f"{stem}.md declares isolation: {front.get('isolation')!r} - "
+                "worktree isolation is the user's per-dispatch choice in the "
+                "Claude interface, never the definition's"
+            )
+
+    def test_no_definition_promises_a_worktree_of_its_own(self):
+        """The prose has to move with the frontmatter, or the agent still acts as
+        if nothing else shares the tree and edits whatever it likes."""
+        for stem, (_, body) in self._definitions().items():
+            lowered = body.lower()
+            assert "your own worktree" not in lowered, (
+                f"{stem}.md still tells the agent it has its own worktree"
+            )
+            assert "worktree-isolated" not in lowered, (
+                f"{stem}.md still claims worktree isolation"
             )
 
     def test_every_agent_is_told_to_load_its_own_context(self):
@@ -343,6 +439,27 @@ class TestShippedAgentDefinitions:
         """A write that resolves its project implicitly has landed in the wrong one."""
         for stem, (_, body) in self._definitions().items():
             assert "project=" in body, f"{stem}.md never mentions passing project="
+
+    def test_every_installed_agent_names_itself_on_session_start(self):
+        """`memory_session_start(agent=...)` is what stops a subagent's start from
+        closing the lead's session, so each INSTALLED file must carry its own
+        name there as a literal - never a placeholder the agent has to fill in,
+        and never another agent's name inherited from a shared base."""
+        by_stem = {
+            p.stem: p for p in setup_mod.AGENTS_DIR.glob("*.md")
+            if p.name.lower() != "readme.md"
+        }
+        for stem, path in by_stem.items():
+            if setup_mod.is_abstract_agent(path):
+                continue
+            installed = setup_mod.installable_agent_text(path, by_stem)
+            front, _ = setup_mod.parse_agent(installed)
+            assert setup_mod.AGENT_NAME_MARKER not in installed, (
+                f"{stem}.md installs with the {setup_mod.AGENT_NAME_MARKER} marker unresolved"
+            )
+            assert f'agent="{front["name"]}"' in installed, (
+                f"{stem}.md is never told to pass agent=\"{front['name']}\" on session start"
+            )
 
 
     def test_designer_does_not_preload_skills(self):
@@ -489,6 +606,28 @@ class TestLeadBrief:
         assert "\n" not in line
         assert len(line) < 400, f"per-turn line is {len(line)} chars"
 
+    def test_the_stack_aware_line_stays_one_line_too(self, monkeypatch):
+        """With a cwd the line names this repo's own specialists; it is still one
+        line under 400 characters, against the repo's own definitions (what CI
+        has), and it no longer hands the lead "the cheaper path" as permission.
+        The per-state matrix is `tests/test_enforcement_stack.py`."""
+        from memory_mcp import enforcement
+
+        monkeypatch.setattr(enforcement, "AGENT_TEAM_DIR", setup_mod.AGENTS_DIR)
+        repo_root = str(setup_mod.AGENTS_DIR.parent)
+
+        for line in (
+            enforcement.agent_team_line(),
+            enforcement.agent_team_line(cwd=repo_root),
+        ):
+            assert line, "the repo's agent definitions must be readable"
+            assert "\n" not in line
+            assert len(line) < 400, f"per-turn line is {len(line)} chars"
+            assert "cheaper path" not in line
+        offered = enforcement.agent_team_line().split("Available: ", 1)[1].split(". ", 1)[0]
+        assert enforcement.LEAD_AGENT not in offered.split(", ")
+        assert "This repo: .=python" in enforcement.agent_team_line(cwd=repo_root)
+
     def test_no_agents_installed_means_no_injection(self, tmp_path, monkeypatch):
         """An unrelated machine must not get a roster of agents it does not have."""
         from memory_mcp import enforcement
@@ -496,6 +635,9 @@ class TestLeadBrief:
         monkeypatch.setattr(enforcement, "AGENT_TEAM_DIR", tmp_path / "none")
         assert enforcement.agent_team_line() == ""
         assert enforcement.agent_team_intro() == ""
+        repo_root = str(setup_mod.AGENTS_DIR.parent)
+        assert enforcement.agent_team_line(cwd=repo_root, slug="x", session_id="s") == ""
+        assert enforcement.agent_team_intro(cwd=repo_root) == ""
 
 
 class TestTheLanguageExperts:
@@ -585,7 +727,7 @@ class TestEveryAgentMeetsTheStandard:
         ),
         "What you produce": (
             "exactly what the output contains, so the next agent can build from "
-            "it without a second dispatch (~60k tokens)."
+            "it without a second dispatch (115k-380k tokens, measured)."
         ),
     }
 

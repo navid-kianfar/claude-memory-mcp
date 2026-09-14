@@ -426,6 +426,20 @@ class TestRoleLabelColours:
     def test_every_agent_has_its_own_colour(self):
         assert len(set(ROLE_COLORS.values())) == len(ROLE_COLORS)
 
+    def test_every_shipped_agent_has_a_fixed_colour(self):
+        """The md5 fallback is stable but arbitrary, and the convention is one a
+        person reads off the board. An agent added without an entry - react-native
+        was, on 2026-09-13 - silently gets whatever colour its hash lands on."""
+        from memory_mcp import setup as setup_mod
+
+        shipped = [
+            p.stem for p in setup_mod.AGENTS_DIR.glob("*.md")
+            if p.name.lower() != "readme.md" and not setup_mod.is_abstract_agent(p)
+        ]
+        assert shipped, "no agent definitions found - the test is not looking where they live"
+        missing = sorted(s for s in shipped if s not in ROLE_COLORS)
+        assert not missing, f"no fixed board colour for: {missing}"
+
     def test_every_colour_is_one_asoode_offers(self):
         """A hex outside the picker's swatches never matches a human's label."""
         assert all(c in LABEL_PALETTE for c in ROLE_COLORS.values())

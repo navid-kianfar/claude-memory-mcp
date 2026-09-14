@@ -34,10 +34,11 @@ from memory_mcp.asoode import (
 )
 
 from memory_mcp.asoode_client import AsoodeError
+from memory_mcp.exceptions import MemoryMCPError
 
-# Both are user-facing misconfiguration, not bugs: print the message, not a
-# traceback.
-_CLI_ERRORS = (AsoodeConfigError, AsoodeError)
+# All user-facing - misconfiguration, or a refused request such as a bad
+# --match-path - not bugs: print the message, not a traceback.
+_CLI_ERRORS = (AsoodeConfigError, AsoodeError, MemoryMCPError)
 
 USAGE = (
     "Usage: memory-mcp asoode "
@@ -258,29 +259,46 @@ def main(argv: list[str]) -> None:
             group.add_argument("--ref", help="the board's externalRef")
             group.add_argument("--wp-id", dest="wp_id", help="the work package id")
             p.add_argument("--label", default=None, help="name a task can route by")
-            p.add_argument(
-                "--not-default", action="store_true",
+            default_flag = p.add_mutually_exclusive_group()
+            default_flag.add_argument(
+                "--default", dest="is_default", action="store_const", const=True,
+                help="make it the default target, demoting the current default",
+            )
+            default_flag.add_argument(
+                "--not-default", dest="is_default", action="store_const", const=False,
                 help="attach without making it the default target",
             )
+            p.add_argument(
+                "--match-path", dest="match_paths", action="append", default=None,
+                metavar="PREFIX",
+                help="a repo subtree this board owns, e.g. apps/api (repeatable); "
+                     "tasks created with a path under it land on this board",
+            )
             ns = p.parse_args(rest)
+            # Neither flag: the board is the default only if the project has none
+            # yet. Attaching a second board no longer takes the default silently.
 
             def _local():
                 from memory_mcp.container import container
 
                 return container.task_bridge.attach(
                     ns.slug, external_ref=ns.ref, work_package_id=ns.wp_id,
-                    label=ns.label, is_default=not ns.not_default,
+                    label=ns.label, is_default=ns.is_default,
+                    match_paths=ns.match_paths,
                 )
 
             result = _route(
                 f"/api/projects/{ns.slug}/asoode/link", "POST",
                 {"attach": True, "external_ref": ns.ref, "work_package_id": ns.wp_id,
-                 "label": ns.label, "is_default": not ns.not_default},
+                 "label": ns.label, "is_default": ns.is_default,
+                 "match_paths": ns.match_paths},
                 _local, "attach the board",
             )
             wp = result["work_package"]
             print(f"attached {ns.slug} -> {wp['title']!r} ({wp['id']})")
             print(f"  externalRef {wp['external_ref']}  default={result['link']['is_default']}")
+            if result["link"].get("match_paths"):
+                print(f"  match paths: {', '.join(result['link']['match_paths'])}")
             print(f"  lists: {', '.join(i['title'] for i in result['lists'])}")
 
         elif cmd == "import":

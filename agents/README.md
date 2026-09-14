@@ -1,10 +1,10 @@
 # The agent team
 
-Sixteen specialised agents that work on projects using this server's memory and task board:
+Seventeen specialised agents that work on projects using this server's memory and task board:
 eight roles — `pm`, `backend`, `frontend`, `designer`, `test`, `reviewer`, `devops`, `docs` —
-and eight stack experts that extend a role. Extending `backend`: `dotnet`, `nodejs`, `python`,
-`go`, `rust`, `kotlin`. Extending `frontend`: `react`, `app`. All of them extend `_base.md`, the
-shared contract. The design and its verification status are in
+and nine stack experts that extend a role. Extending `backend`: `dotnet`, `nodejs`, `python`,
+`go`, `rust`, `kotlin`. Extending `frontend`: `react`, `react-native`, `app`. All of them extend
+`_base.md`, the shared contract. The design and its verification status are in
 [`docs/bridge/06-agent-team.md`](../docs/bridge/06-agent-team.md).
 
 **The main session is the lead.** It orchestrates directly rather than dispatching `pm` to do
@@ -29,10 +29,16 @@ will not argue about again, so a decision is made once and not re-litigated per 
 | `kotlin` | **server-side** Kotlin | Ktor (or Spring where it already runs), coroutines |
 | `react` | the pnpm + Vite + Tailwind + shadcn/ui stack | one app-owned wrapper per shadcn component |
 | `app` | **mobile** — Android and iOS from one codebase | Kotlin Multiplatform + Compose Multiplatform |
+| `react-native` | a repo that is **already** React Native | the repo's Expo or bare workflow, both platforms verified |
 
 **`kotlin` and `app` are not interchangeable.** `app` owns Kotlin Multiplatform for phones;
 `kotlin` owns Kotlin on a server. Both say so in their own definition, because a brief sent to
 the wrong one wastes a whole dispatch before anyone notices.
+
+**`react-native` is not a choice for new mobile work.** New native mobile is Kotlin Multiplatform,
+which is `app`. `react-native` exists for repos that were React Native before that rule, and says
+so in its own definition. On a **Next.js** repo, `nodejs` owns the project and `react` is
+dispatched on top of it for screens and components.
 
 ## This folder is the source of truth
 
@@ -111,9 +117,12 @@ by the installer, see above).
   the inherited MCP tools an agent needs, whereas a denylist leaves them intact. `reviewer` is
   the one real use: it is denied `Edit`/`Write` because a reviewer who can fix its own findings
   stops reviewing.
-- **`isolation: worktree`** — gives the agent its own git worktree. `frontend`, `backend` and
-  `test` have it so they can run at once. **Its work does not arrive on its own:** the changes
-  stay in the worktree until someone merges them deliberately.
+- **`isolation: worktree`** — supported by Claude Code and deliberately **used by no definition
+  here.** Whether a dispatch gets its own worktree is the user's choice in the Claude interface; a
+  definition that declares it takes that choice away, and a worktree sits at the last commit, so an
+  agent sent to verify uncommitted work silently sees a tree without it. Stated by the user on
+  2026-09-13: *"do not start a worktree by yourself. if the user checks the worktree in claude
+  interface it will be done automatically."* `tests/test_agent_install.py` enforces the absence.
 - **`skills`** — mostly *absent* on purpose. It preloads a skill's full content at startup on
   **every** dispatch, and most jobs need one or two, so `designer` names `/design` in its body
   and loads on demand instead. Only `reviewer` preloads, because it uses `code-review` and
@@ -137,8 +146,13 @@ They live once, in `_base.md`, and reach every definition through `extends`:
   one. *If the next agent needs it, comment on the task; if next month needs it, store a
   memory.* This works: `pm` posted a plan as a task comment and `frontend` picked it up from
   the board with nothing relayed through the session.
-- **Mind the tokens.** A dispatch costs ~60k at the floor, measured. Say so, and say what the
-  agent should read rather than letting it survey the repo.
+- **Mind the tokens.** A real dispatch costs 115k-380k tokens, measured on 2026-09-13. Say what
+  the agent should read rather than letting it survey the repo.
+- **Only the lead dispatches.** `_base.md` denies the `Agent` tool to every definition, and the
+  installer UNIONS `disallowedTools` down the `extends` chain, so a child that denies more (the
+  reviewer denies `Edit, Write, NotebookEdit`) can never hand `Agent` back. Before this, one
+  reviewer fanned out into six "angle" reviewers and one of those into four more. At most two
+  agents run at once; the dispatch hook prompts the user on a third.
 - **Work the task through its lifecycle, and stop the clock.** `memory_task_start` claims,
   clocks on and mirrors in_progress; `memory_task_done` or
   `memory_task_update(state="paused"|"blocked")` stops the clock; `memory_session_end` last.

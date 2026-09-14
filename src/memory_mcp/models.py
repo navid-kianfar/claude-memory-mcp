@@ -419,6 +419,10 @@ class CreateTaskRequest(BaseModel):
     # externalRef, or its id. Resolved to link_id before storage; None routes to
     # the project's default link.
     target: str | None = None
+    # The repo subtree the work touches ("apps/api/tests/test_x.py"). Matched
+    # against each linked board's match_paths - longest prefix wins - and frozen
+    # into link_id at create. NOT a file to attach; that is memory_task_attach.
+    path: str | None = Field(default=None, max_length=4096)
 
 
 class UpdateTaskRequest(BaseModel):
@@ -436,6 +440,10 @@ class UpdateTaskRequest(BaseModel):
     estimated_minutes: int | None = Field(default=None, ge=0)
     position: int | None = None
     role: str | None = None
+    # Re-route: the same meaning as on CreateTaskRequest. Refused once the task
+    # has a card on the board it would leave - there is no move between boards.
+    path: str | None = Field(default=None, max_length=4096)
+    target: str | None = None
 
 
 class TaskFilter(BaseModel):
@@ -511,6 +519,25 @@ class TaskAttachment(BaseModel):
     sha256: str
     created_at: datetime | None = None
     mirrored_at: datetime | None = None
+
+
+class PendingAttachment(BaseModel):
+    """A file the user put in the Claude compose box, parked until a session
+    binds it to a task. The bytes are already in the task store; `id` is the
+    pending_id memory_task_attach takes."""
+
+    id: str
+    claude_session_id: str | None = None
+    sha256: str
+    filename: str
+    content_type: str | None = None
+    size_bytes: int = 0
+    source: str | None = None
+    created_at: datetime | None = None
+    bound_task_id: str | None = None
+    bound_at: datetime | None = None
+    notice: str | None = None
+    notified_at: datetime | None = None
 
 
 class TaskDetail(BaseModel):

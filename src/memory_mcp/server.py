@@ -219,6 +219,14 @@ def _mirror_report(slug: str) -> dict | None:
         failure = outbox.last_failure(slug)
         if failure:
             report["last_error"] = failure
+        # A queue the flusher cannot read never records a failure of its own -
+        # every row keeps attempts = 0 - so say so here, where every task call
+        # shows it, instead of letting `pending` climb in silence.
+        if report["pending"] and outbox.unreadable(slug):
+            report["stalled"] = (
+                "the outbox holds rows the flusher cannot read; nothing is being "
+                "mirrored (see the daemon log)"
+            )
         return report
     except Exception:  # noqa: BLE001 - a report must never fail the write
         return None

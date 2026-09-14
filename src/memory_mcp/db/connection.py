@@ -106,6 +106,46 @@ def _ensure_initialized(db_path: Path) -> None:
         _initialized_dbs.add(path_str)
 
 
+# DuckDB optimizers that return WRONG results on this store's workload.
+#
+# `row_group_pruner` (DuckDB 1.5) answers `ORDER BY <column> ... LIMIT n` by
+# reading only the row groups whose min/max statistics can hold the first n
+# rows - and it counts rows that were already DELETED. A queue table is exactly
+# the shape that breaks it: each flushed row is deleted, and a delete held open
+# while another thread appends starts a new, tiny row group. Once the oldest
+# groups are fully deleted, the pruner keeps them, discards the groups that hold
+# the live rows, and the query returns nothing. On 2026-09-14 that made
+# `OutboxRepository.pending()` read ZERO rows from an outbox holding 558, so the
+# asoode mirror had silently stopped for three days with no error anywhere.
+# Reproduced from scratch on duckdb 1.5.1 and 1.5.2; see
+# tests/repositories/test_outbox_repository.py.
+#
+# Disabled on every project connection, so no `ORDER BY ... LIMIT` in any
+# repository can hit it - not only the one that was caught. An optimizer this
+# DuckDB does not have is skipped, because naming an unknown one is an error.
+_UNSAFE_OPTIMIZERS = ("row_group_pruner",)
+_disabled_optimizers_sql: str | None = None
+_disabled_optimizers_lock = threading.Lock()
+
+
+def _disable_unsafe_optimizers(conn: duckdb.DuckDBPyConnection) -> None:
+    global _disabled_optimizers_sql
+    if _disabled_optimizers_sql is None:
+        with _disabled_optimizers_lock:
+            if _disabled_optimizers_sql is None:
+                try:
+                    known = {row[0] for row in conn.execute(
+                        "SELECT name FROM duckdb_optimizers()").fetchall()}
+                except duckdb.Error:
+                    known = set()
+                names = [name for name in _UNSAFE_OPTIMIZERS if name in known]
+                _disabled_optimizers_sql = (
+                    f"SET disabled_optimizers = '{','.join(names)}'" if names else ""
+                )
+    if _disabled_optimizers_sql:
+        conn.execute(_disabled_optimizers_sql)
+
+
 def get_connection(slug: str) -> duckdb.DuckDBPyConnection:
     """Open a fresh connection for a project. Caller MUST close it when done.
 
@@ -131,6 +171,11 @@ def get_connection(slug: str) -> duckdb.DuckDBPyConnection:
         if hint is None:
             raise
         raise duckdb.IOException(f"{db_path.name}: {hint}") from e
+    try:
+        _disable_unsafe_optimizers(conn)
+    except Exception:
+        conn.close()
+        raise
     try:
         install_vss(conn)
     except Exception:

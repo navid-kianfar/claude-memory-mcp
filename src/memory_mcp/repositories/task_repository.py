@@ -1024,6 +1024,16 @@ class AttachmentInboxRepository:
         return [{"id": r[0], "title": r[1], "clock_session": r[2]} for r in rows]
 
 
+# Oldest first. Ordered by an EXPRESSION rather than the bare column so DuckDB's
+# row-group pruner cannot use `created_at`'s statistics - statistics that still
+# count deleted rows, which once made this read return nothing from a full
+# outbox. See db.connection._disable_unsafe_optimizers.
+OUTBOX_PENDING_SQL = (
+    "SELECT id, task_id, op, payload, attempts, last_error "
+    "FROM task_outbox ORDER BY epoch_us(created_at) ASC, rowid ASC LIMIT ?"
+)
+
+
 class OutboxRepository:
     """The bridge's durable half: what changed locally and has not been mirrored.
 
@@ -1059,11 +1069,9 @@ class OutboxRepository:
 
         try:
             with connect(project) as conn:
-                rows = conn.execute(
-                    "SELECT id, task_id, op, payload, attempts, last_error "
-                    "FROM task_outbox ORDER BY created_at ASC, rowid ASC LIMIT ?",
-                    [limit],
-                ).fetchall()
+                # OUTBOX_PENDING_SQL stays correct even on a connection without
+                # the optimizer guard; the mirror depends on this one read.
+                rows = conn.execute(OUTBOX_PENDING_SQL, [limit]).fetchall()
         except Exception:
             return []
         return [
@@ -1123,6 +1131,20 @@ class OutboxRepository:
         except Exception:
             return None
         return row[0] if row else None
+
+    def unreadable(self, project: str) -> int:
+        """Rows the outbox holds that `pending()` cannot return. 0 when healthy.
+
+        The failure this exists for was silent: `count(*)` said 558 while the
+        flusher's read returned nothing, so the flusher reported an empty queue,
+        recorded no error, and the board stopped updating for three days. A
+        non-zero answer here means the read itself is broken - not asoode, not
+        the network - and it is surfaced in the mirror report and the log.
+        """
+        depth = self.depth(project)
+        if depth == 0:
+            return 0
+        return depth if not self.pending(project, 1) else 0
 
     def depth(self, project: str) -> int:
         try:

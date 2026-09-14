@@ -1025,6 +1025,17 @@ class TaskBridge:
     def _flush_locked(self, slug: str, limit: int) -> dict:
         pending = self._outbox.pending(slug, limit)
         if not pending:
+            # An empty read of a non-empty outbox is not "nothing to do": the
+            # read is broken, and treating it as idle is how the mirror once
+            # stopped for three days without a single error.
+            unreadable = self._outbox.unreadable(slug)
+            if unreadable:
+                logger.error(
+                    "asoode mirror for %s is stalled: the outbox holds %d row(s) "
+                    "but the pending read returned none", slug, unreadable,
+                )
+                return {"flushed": 0, "failed": 0, "skipped": 0,
+                        "reason": f"outbox read returned no rows while {unreadable} are queued"}
             return {"flushed": 0, "failed": 0, "skipped": 0}
         if not get_project_links(slug):
             # Unlinked project: the rows describe work with nowhere to go. Drop

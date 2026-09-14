@@ -2,9 +2,12 @@
 # SubagentStop hook: tell the daemon one of this session's agents finished.
 #
 # WHY IT EXISTS. record-dispatch.sh counts agents IN at PreToolUse; this counts
-# them OUT. The difference is "how many are running right now", which is what
-# lets the dispatch hook put a prompt in front of a third concurrent agent
-# (2026-09-14: one session ran 15+ agents at once and hit the usage limit).
+# them OUT, by `agent_type`. The difference is "how many of this kind are running
+# right now", which lets the dispatch hook put a prompt in front of a third
+# concurrent agent OF A KIND (2026-09-14: one session ran 15+ agents at once and
+# hit the usage limit). A stop with no agent_type is recorded but never
+# subtracted: on the live registry those were the client's own internal agents,
+# with no dispatch behind them.
 #
 # WHY A SEPARATE SCRIPT. Hook matchers are installed per script (setup.py
 # HOOK_MATCHERS). record-dispatch.sh carries `Agent|Task`, which on SubagentStop

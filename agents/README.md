@@ -152,7 +152,7 @@ They live once, in `_base.md`, and reach every definition through `extends`:
   installer UNIONS `disallowedTools` down the `extends` chain, so a child that denies more (the
   reviewer denies `Edit, Write, NotebookEdit`) can never hand `Agent` back. Before this, one
   reviewer fanned out into six "angle" reviewers and one of those into four more. At most two
-  agents run at once; the dispatch hook prompts the user on a third.
+  agents of a kind run at once; the dispatch hook prompts the user on a third of that kind.
 - **Work the task through its lifecycle, and stop the clock.** `memory_task_start` claims,
   clocks on and mirrors in_progress; `memory_task_done` or
   `memory_task_update(state="paused"|"blocked")` stops the clock; `memory_session_end` last.

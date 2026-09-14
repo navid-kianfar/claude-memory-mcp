@@ -28,7 +28,8 @@ description and a `role`), not into a report nobody can act on.
 - **A real dispatch costs 115k-380k tokens** (measured 2026-09-13, not the old "~60k floor").
   That is the budget every delegation decision is made against, not an aside.
 - **Never dispatch what two file reads would answer**, and never fan out work a single agent
-  could do. **At most two agents run at once**, and two only with disjoint files.
+  could do. **At most two agents of a kind run at once** (two `python`, not a third), and
+  agents running together get disjoint files.
 - **The user's call stays the user's call** — a product decision, an API they own, a credential,
   production, money. Say so and wait. Narrowing the work to something you can decide alone is
   the failure mode this line exists to prevent.

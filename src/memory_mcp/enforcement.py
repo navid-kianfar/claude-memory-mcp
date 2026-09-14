@@ -253,17 +253,17 @@ _DIVISION_OF_WORK = (
     "specialism or genuinely parallel implementation. Keep integration work whose "
     "context you already hold - an agent pays to rediscover it. Never dispatch what "
     "two file reads would answer.",
-    "  - ONLY YOU DISPATCH, AND AT MOST TWO AT ONCE. No installed agent has the "
-    "Agent tool, so none can fan out - a reviewer splitting itself into 'angles' is "
-    "how one review became eleven agents. Two run together only with disjoint "
-    "files; a third dispatch while two are running puts a prompt in front of the "
-    "user.",
+    "  - ONLY YOU DISPATCH, AND AT MOST TWO AGENTS OF A KIND AT ONCE. No installed "
+    "agent has the Agent tool, so none can fan out - a reviewer splitting itself "
+    "into 'angles' is how one review became eleven agents. A third agent of a kind "
+    "(a third `python`) while two are running puts a prompt in front of the user; "
+    "different kinds may run side by side.",
     "  - Sequence: a stack expert before `backend` when the structure is undecided; "
     "`designer` before `frontend`/`react`/`app`; `reviewer` after an "
     "implementation, never instead of one; `test` before every commit, against the "
     "RUNNING instance (daemon, UI, board) - the repo's suite proves the code, the "
     "test agent proves the product.",
-    "  - Two agents run at once only when their file sets are disjoint: name each "
+    "  - Agents run at once only when their file sets are disjoint: name each "
     "agent's files in its brief. They share this one checkout. NEVER pass "
     "`isolation` to the Agent tool and never ask for a worktree: whether a dispatch "
     "runs isolated is the user's choice in the Claude interface, and a worktree "
@@ -893,10 +893,12 @@ def dispatch_gate(
     }
 
 
-#: How many agents may run at once before the next dispatch asks the user. Two:
-#: the most that is ever genuinely parallel here (two disjoint file sets in one
-#: checkout), and the user's limit after one session ran 15+ agents at once.
-MAX_RUNNING_AGENTS = 2
+#: How many agents OF ONE KIND may run at once before the next dispatch of that
+#: kind asks the user. The user's limit, set on 2026-09-14 after one session ran
+#: 15+ agents at once and corrected the same day from "two in total": "at most
+#: two agents OF A KIND at once". A `python`, a `react` and a `test` agent may
+#: run side by side; a third `python` asks.
+MAX_RUNNING_PER_KIND = 2
 
 
 def nested_dispatch_denial(agent_id: str | None) -> dict:
@@ -923,30 +925,36 @@ def nested_dispatch_denial(agent_id: str | None) -> dict:
     }
 
 
-def concurrency_gate(session_id: str | None) -> dict:
-    """`{"decision": "ask", ...}` when MAX_RUNNING_AGENTS are already running.
+def concurrency_gate(session_id: str | None, agent_type: str | None) -> dict:
+    """`{"decision": "ask", ...}` when MAX_RUNNING_PER_KIND agents of this
+    dispatch's kind are already running.
 
-    Counts every agent type - a reviewer or a test agent costs the same as an
-    implementer. Without a session id there is nothing to count, so no prompt.
+    Kinds are counted apart: two `python` agents running do not stop a `react`
+    or a `test` dispatch. Every kind counts, reviewers and test agents included -
+    three reviewers cost as much as three implementers. Without a session id or
+    a type there is nothing to count, so no prompt.
     """
-    if not session_id:
+    kind = (agent_type or "").strip()
+    if not session_id or not kind:
         return {}
-    running = running_dispatches(session_id)
-    if running < MAX_RUNNING_AGENTS:
+    running = running_dispatches(session_id, kind)
+    if running < MAX_RUNNING_PER_KIND:
         return {}
     return {
         "decision": "ask",
         "running": running,
+        "agent_type": kind,
         "reason": (
-            f"[Memory MCP] {running} agents are already running in this session "
-            f"and this would start another. Each real dispatch costs 115k-380k "
-            "tokens. Yes starts it anyway; No makes Claude wait for one to finish. "
-            "MEMORY_MCP_NO_GATE=1 turns this prompt off."
+            f"[Memory MCP] {running} `{kind}` agents are already running in this "
+            f"session and this would start another `{kind}`. Each real dispatch "
+            "costs 115k-380k tokens. Yes starts it anyway; No makes Claude wait for "
+            "one to finish. MEMORY_MCP_NO_GATE=1 turns this prompt off."
         ),
         "context": (
-            f"[Memory MCP] {running} agents are still running. Wait for one to "
-            f"report before dispatching another: at most {MAX_RUNNING_AGENTS} run "
-            "at once, and only with disjoint files."
+            f"[Memory MCP] {running} `{kind}` agents are still running. Wait for "
+            f"one to report before dispatching another `{kind}`: at most "
+            f"{MAX_RUNNING_PER_KIND} agents of a kind run at once. Agents of other "
+            "kinds may still be dispatched, with files disjoint from the running ones."
         ),
     }
 

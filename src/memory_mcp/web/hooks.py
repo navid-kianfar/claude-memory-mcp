@@ -463,7 +463,7 @@ async def _hook_dispatch(request):
         # Each gate on its own: one that errors lets the dispatch run, and must
         # not take the other gate's answer down with it.
         for gate in (
-            lambda: concurrency_gate(identity.session_id or None),
+            lambda: concurrency_gate(identity.session_id or None, subagent_type),
             lambda: dispatch_gate(
                 subagent_type,
                 cwd=identity.cwd or None,

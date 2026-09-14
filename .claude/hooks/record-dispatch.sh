@@ -15,8 +15,8 @@
 # IT ASKS - AND REFUSES EXACTLY ONE THING. The user's decision (2026-09-13,
 # offered deny / ask / text-only): a generic `backend`/`frontend` dispatch where
 # the repo's own specialist applies becomes a permission prompt naming that
-# specialist, and so does a third dispatch while two agents are still running
-# (2026-09-14, after one session ran 15+ agents at once). The one refusal is a
+# specialist, and so does a third agent OF A KIND while two of that kind are still
+# running (2026-09-14, after one session ran 15+ agents at once). The one refusal is a
 # SUBAGENT dispatching: only the lead starts agents. Every answer goes out as JSON
 # on exit 0; this script never exits 2.
 #

@@ -8,9 +8,12 @@ could dispatch. Three guards, tested here from the ledger up:
 
 - a SUBAGENT's dispatch is denied at the hook (the second guard; the first is
   `disallowedTools: Agent` in every definition, tested in test_agent_install);
-- a third agent while two are RUNNING asks the user;
-- running = dispatched - stopped, and a prompted dispatch is not counted as
-  running, so a declined prompt cannot leave a phantom agent behind.
+- a third agent OF A KIND while two of that kind are RUNNING asks the user
+  (the user's correction the same day: "at most two agents OF A KIND at once");
+- running = dispatched - stopped, per kind; a prompted dispatch is not counted
+  as running, so a declined prompt cannot leave a phantom agent behind; and a
+  stop that names no type frees nothing, because those are the client's own
+  internal agents.
 """
 
 import asyncio
@@ -25,7 +28,7 @@ from memory_mcp.db.registry import (
     record_subagent_stop, registry_conn, running_dispatches,
 )
 from memory_mcp.enforcement import (
-    MAX_RUNNING_AGENTS, combine_gates, concurrency_gate, nested_dispatch_denial,
+    MAX_RUNNING_PER_KIND, combine_gates, concurrency_gate, nested_dispatch_denial,
 )
 from tests.test_require_task_gate import _stub_daemon
 
@@ -44,42 +47,66 @@ def _backdate(table: str, minutes: int) -> None:
 
 
 class TestRunningDispatches:
-    def test_dispatched_minus_stopped(self):
+    def test_dispatched_minus_stopped_of_the_same_kind(self):
         for _ in range(3):
             record_dispatch("s1", agent_type="python")
-        record_subagent_stop("s1", agent_id="a1")
+        record_subagent_stop("s1", agent_id="a1", agent_type="python")
 
-        assert running_dispatches("s1") == 2
+        assert running_dispatches("s1", "python") == 2
+
+    def test_kinds_are_counted_apart(self):
+        record_dispatch("s1", agent_type="python")
+        record_dispatch("s1", agent_type="python")
+        record_dispatch("s1", agent_type="react")
+        record_subagent_stop("s1", agent_id="a1", agent_type="react")
+
+        assert running_dispatches("s1", "python") == 2
+        assert running_dispatches("s1", "react") == 0
+        assert running_dispatches("s1", "test") == 0
+
+    def test_a_stop_with_no_type_frees_nothing(self):
+        """Observed on the live registry: the client's own internal agents send
+        SubagentStop with no agent_type and have no dispatch behind them.
+        Subtracting them read the count low."""
+        record_dispatch("s1", agent_type="python")
+        record_dispatch("s1", agent_type="python")
+        record_subagent_stop("s1", agent_id="internal-1")
+        record_subagent_stop("s1", agent_id="internal-2")
+
+        assert running_dispatches("s1", "python") == 2
 
     def test_it_never_goes_negative(self):
-        record_subagent_stop("s1")
-        record_subagent_stop("s1")
+        record_subagent_stop("s1", agent_type="python")
+        record_subagent_stop("s1", agent_type="python")
 
-        assert running_dispatches("s1") == 0
+        assert running_dispatches("s1", "python") == 0
 
     def test_sessions_do_not_count_each_other(self):
         record_dispatch("s1", agent_type="python")
         record_dispatch("s2", agent_type="python")
 
-        assert running_dispatches("s1") == 1
+        assert running_dispatches("s1", "python") == 1
 
     def test_a_dispatch_older_than_the_window_is_presumed_finished(self):
         """Bounds a missed SubagentStop: it costs at most an hour, not forever."""
         record_dispatch("s1", agent_type="python")
         _backdate("session_dispatches", RUNNING_WINDOW_MINUTES + 5)
 
-        assert running_dispatches("s1") == 0
+        assert running_dispatches("s1", "python") == 0
 
     def test_a_prompted_dispatch_is_history_but_not_running(self):
         """PreToolUse fires before the user answers. A declined prompt must not
         leave a phantom agent that makes every dispatch for an hour prompt."""
         record_dispatch("s1", agent_type="backend", asked=True)
 
-        assert running_dispatches("s1") == 0
+        assert running_dispatches("s1", "backend") == 0
         assert [r["agent_type"] for r in dispatches_for("s1")] == ["backend"]
 
-    def test_no_session_is_zero(self):
-        assert running_dispatches("") == 0
+    def test_no_session_or_no_kind_is_zero(self):
+        record_dispatch("s1", agent_type="python")
+
+        assert running_dispatches("", "python") == 0
+        assert running_dispatches("s1", "") == 0
 
     def test_prune_drops_old_stops_too(self):
         record_subagent_stop("s1")
@@ -113,7 +140,7 @@ class TestAnOlderRegistry:
 
         assert "asked" in cols
         record_dispatch("s1", agent_type="python")
-        assert running_dispatches("s1") == 1
+        assert running_dispatches("s1", "python") == 1
 
 
 # ---------- the gates ----------
@@ -134,31 +161,44 @@ class TestNestedDispatch:
 
 class TestConcurrency:
     def test_below_the_limit_it_is_quiet(self):
-        for _ in range(MAX_RUNNING_AGENTS - 1):
+        for _ in range(MAX_RUNNING_PER_KIND - 1):
             record_dispatch("s1", agent_type="python")
 
-        assert concurrency_gate("s1") == {}
+        assert concurrency_gate("s1", "python") == {}
 
-    def test_at_the_limit_the_next_dispatch_asks(self):
-        for _ in range(MAX_RUNNING_AGENTS):
+    def test_at_the_limit_the_next_of_that_kind_asks_and_names_it(self):
+        for _ in range(MAX_RUNNING_PER_KIND):
             record_dispatch("s1", agent_type="reviewer")
 
-        answer = concurrency_gate("s1")
+        answer = concurrency_gate("s1", "reviewer")
 
         assert answer["decision"] == "ask"
-        assert answer["running"] == MAX_RUNNING_AGENTS
-        assert f"{MAX_RUNNING_AGENTS} agents are already running" in answer["reason"]
+        assert answer["running"] == MAX_RUNNING_PER_KIND
+        assert answer["agent_type"] == "reviewer"
+        assert f"{MAX_RUNNING_PER_KIND} `reviewer` agents are already running" in answer["reason"]
         assert answer["context"]
 
-    def test_a_finished_agent_frees_a_slot(self):
-        for _ in range(MAX_RUNNING_AGENTS):
+    def test_another_kind_is_not_held_back(self):
+        """The user's rule is per kind: two pythons running must not stop a
+        react or a test dispatch."""
+        for _ in range(MAX_RUNNING_PER_KIND):
             record_dispatch("s1", agent_type="python")
-        record_subagent_stop("s1")
 
-        assert concurrency_gate("s1") == {}
+        assert concurrency_gate("s1", "react") == {}
+        assert concurrency_gate("s1", "test") == {}
 
-    def test_no_session_no_prompt(self):
-        assert concurrency_gate(None) == {}
+    def test_a_finished_agent_frees_a_slot_of_its_own_kind(self):
+        for _ in range(MAX_RUNNING_PER_KIND):
+            record_dispatch("s1", agent_type="python")
+        record_subagent_stop("s1", agent_type="react")
+        assert concurrency_gate("s1", "python")["decision"] == "ask", "another kind's stop"
+
+        record_subagent_stop("s1", agent_type="python")
+        assert concurrency_gate("s1", "python") == {}
+
+    def test_no_session_or_no_kind_no_prompt(self):
+        assert concurrency_gate(None, "python") == {}
+        assert concurrency_gate("s1", None) == {}
 
 
 class TestCombineGates:
@@ -212,19 +252,23 @@ class TestTheRoute:
         assert answer["decision"] == "deny"
         assert dispatches_for("s1") == [], "a refused agent never runs, so it is not history"
 
-    def test_the_third_concurrent_dispatch_asks(self):
+    def test_the_third_of_a_kind_asks_but_other_kinds_go_through(self):
         answers = [
             _dispatch(session_id="s1", cwd="/nowhere", subagent_type="python")
-            for _ in range(MAX_RUNNING_AGENTS + 1)
+            for _ in range(MAX_RUNNING_PER_KIND + 1)
         ]
 
-        assert answers[:MAX_RUNNING_AGENTS] == [{}] * MAX_RUNNING_AGENTS
+        assert answers[:MAX_RUNNING_PER_KIND] == [{}] * MAX_RUNNING_PER_KIND
         assert answers[-1]["decision"] == "ask"
-        assert len(dispatches_for("s1")) == MAX_RUNNING_AGENTS + 1
-        assert running_dispatches("s1") == MAX_RUNNING_AGENTS, "the prompted one is not running"
+        assert len(dispatches_for("s1")) == MAX_RUNNING_PER_KIND + 1
+        assert running_dispatches("s1", "python") == MAX_RUNNING_PER_KIND, (
+            "the prompted one is not running"
+        )
+        assert _dispatch(session_id="s1", cwd="/nowhere", subagent_type="react") == {}
+        assert _dispatch(session_id="s1", cwd="/nowhere", subagent_type="test") == {}
 
     def test_subagent_stop_is_counted_and_gates_nothing(self):
-        for _ in range(MAX_RUNNING_AGENTS):
+        for _ in range(MAX_RUNNING_PER_KIND):
             _dispatch(session_id="s1", cwd="/nowhere", subagent_type="python")
 
         answer = _dispatch(
@@ -233,7 +277,7 @@ class TestTheRoute:
         )
 
         assert answer == {}
-        assert running_dispatches("s1") == MAX_RUNNING_AGENTS - 1
+        assert running_dispatches("s1", "python") == MAX_RUNNING_PER_KIND - 1
         assert _dispatch(session_id="s1", cwd="/nowhere", subagent_type="python") == {}
 
 

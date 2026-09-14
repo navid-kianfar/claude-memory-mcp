@@ -466,8 +466,8 @@ def record_subagent_stop(
 
     It cannot be joined to its dispatch row: PreToolUse carries a `tool_use_id`,
     SubagentStop an `agent_id`, and no payload carries both. So it is a count, and
-    `running_dispatches` subtracts counts - which is all "how many are running
-    now?" needs."""
+    `running_dispatches` subtracts counts of the same `agent_type` - which is all
+    "how many of this kind are running now?" needs."""
     if not session_id:
         return
     try:
@@ -488,26 +488,35 @@ def record_subagent_stop(
 RUNNING_WINDOW_MINUTES = 60
 
 
-def running_dispatches(session_id: str, *, window_minutes: int = RUNNING_WINDOW_MINUTES) -> int:
-    """How many of this session's agents are still running, best estimate.
+def running_dispatches(
+    session_id: str, agent_type: str, *, window_minutes: int = RUNNING_WINDOW_MINUTES,
+) -> int:
+    """How many of this session's agents OF ONE KIND are still running, best estimate.
 
-    Dispatches in the window minus stops in the window, floored at 0. When it is
-    wrong it is wrong LOW - a stop counted against an older dispatch - which
-    means one prompt fewer, never a prompt that cannot be satisfied.
+    Per kind because that is the limit the user set on 2026-09-14: "at most two
+    agents OF A KIND at once" - two `python` agents, while a `react` and a `test`
+    may run beside them.
+
+    Dispatches of that type in the window minus stops of that type in the
+    window, floored at 0. A stop that names NO type is never subtracted: on the
+    live registry those were the client's own internal agents, with no dispatch
+    behind them, and subtracting them read the count low. A dispatched agent's
+    SubagentStop carries its `agent_type` (observed on the installed client).
     """
-    if not session_id:
+    if not session_id or not agent_type:
         return 0
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
     try:
         with registry_conn() as conn:
             started = conn.execute(
                 "SELECT COUNT(*) FROM session_dispatches "
-                "WHERE session_id = ? AND at >= ? AND asked = 0",
-                (session_id, cutoff),
+                "WHERE session_id = ? AND agent_type = ? AND at >= ? AND asked = 0",
+                (session_id, agent_type, cutoff),
             ).fetchone()[0]
             stopped = conn.execute(
-                "SELECT COUNT(*) FROM session_subagent_stops WHERE session_id = ? AND at >= ?",
-                (session_id, cutoff),
+                "SELECT COUNT(*) FROM session_subagent_stops "
+                "WHERE session_id = ? AND agent_type = ? AND at >= ?",
+                (session_id, agent_type, cutoff),
             ).fetchone()[0]
     except Exception:  # noqa: BLE001 - unknown means "do not prompt"
         return 0

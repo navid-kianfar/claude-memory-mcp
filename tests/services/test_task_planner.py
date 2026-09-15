@@ -213,8 +213,9 @@ class FailsOnTask:
     def create(self, request):
         return self.create_routed(request)[0]
 
-    def comment(self, *args, **kwargs):
-        return self._inner.comment(*args, **kwargs)
+    def __getattr__(self, name):
+        # Everything but the create goes to the real service unchanged.
+        return getattr(self._inner, name)
 
 
 def count(project: str, table: str) -> int:
@@ -319,3 +320,218 @@ class TestTheMirrorWaitsForTheCommit:
             project=project, title="One off", description="x",
         ))
         assert nudges == [1]
+
+
+def ids_of(result: dict) -> list[str]:
+    return [task["id"] for task in result["tasks"]]
+
+
+class TestAPlanIsSafeToRetry:
+    """OBSERVED 2026-09-04, and again 2026-09-15: a plan did all its work, its
+    response was lost to a daemon restart, the caller sent it again, and a
+    second identical set of tasks and board cards was created."""
+
+    def test_the_same_plan_twice_returns_the_first_set(self, planner, project):
+        first = planner.plan(project, REQUEST, ITEMS)
+        again = planner.plan(project, REQUEST, ITEMS)
+
+        assert first["deduplicated"] is False
+        assert again["deduplicated"] is True
+        assert ids_of(again) == ids_of(first), "same ids, in plan order"
+        assert again["count"] == 3
+        assert "NOTHING new was created" in again["note"]
+        assert container.task_service.list_tasks(project, limit=50).total == 3
+
+    def test_a_retry_queues_nothing_for_the_board(self, planner, project):
+        planner.plan(project, REQUEST, ITEMS)
+        outbox_after_first = count(project, "task_outbox")
+        comments_after_first = count(project, "task_comments")
+        assert outbox_after_first > 0, "the first plan must have queued its creates"
+
+        planner.plan(project, REQUEST, ITEMS)
+
+        assert count(project, "task_outbox") == outbox_after_first
+        assert count(project, "task_comments") == comments_after_first
+
+    def test_a_retry_that_rewords_a_description_is_still_the_same_plan(self, planner, project):
+        first = planner.plan(project, REQUEST, ITEMS)
+        reworded = [{**ITEMS[0], "description": "Reworded on the retry."}, *ITEMS[1:]]
+
+        again = planner.plan(project, REQUEST, reworded)
+
+        assert again["deduplicated"] is True
+        assert ids_of(again) == ids_of(first)
+        assert again["tasks"][0]["description"] == ITEMS[0]["description"], (
+            "the earlier task is returned as it is; the repeat is not applied"
+        )
+
+    def test_whitespace_at_the_ends_does_not_make_a_new_plan(self, planner, project):
+        first = planner.plan(project, REQUEST, ITEMS)
+        padded = [{**item, "title": f"  {item['title']} "} for item in ITEMS]
+
+        again = planner.plan(project, f"\n{REQUEST}  ", padded)
+
+        assert ids_of(again) == ids_of(first)
+
+    def test_a_different_title_is_a_new_plan(self, planner, project):
+        first = planner.plan(project, REQUEST, ITEMS)
+        retitled = [*ITEMS[:2], {**ITEMS[2], "title": "Write the changelog"}]
+
+        second = planner.plan(project, REQUEST, retitled)
+
+        assert second["deduplicated"] is False
+        assert set(ids_of(second)).isdisjoint(ids_of(first))
+        assert container.task_service.list_tasks(project, limit=50).total == 6
+
+    def test_the_same_titles_in_another_order_are_a_new_plan(self, planner, project):
+        first = planner.plan(project, REQUEST, ITEMS)
+
+        second = planner.plan(project, REQUEST, list(reversed(ITEMS)))
+
+        assert second["deduplicated"] is False
+        assert set(ids_of(second)).isdisjoint(ids_of(first))
+
+    def test_a_different_request_is_a_new_plan(self, planner, project):
+        first = planner.plan(project, REQUEST, ITEMS)
+
+        second = planner.plan(project, f"{REQUEST}, please", ITEMS)
+
+        assert second["deduplicated"] is False
+        assert set(ids_of(second)).isdisjoint(ids_of(first))
+
+    def test_a_plan_is_never_deduplicated_across_projects(self, planner, project):
+        container.project_service.init_project("planner-other", "Planner Other")
+        first = planner.plan(project, REQUEST, ITEMS)
+
+        other = planner.plan("planner-other", REQUEST, ITEMS)
+
+        assert other["deduplicated"] is False
+        assert set(ids_of(other)).isdisjoint(ids_of(first))
+        assert container.task_service.list_tasks("planner-other", limit=50).total == 3
+
+    def test_an_earlier_plan_with_a_deleted_task_does_not_count(self, planner, project):
+        first = planner.plan(project, REQUEST, ITEMS)
+        container.task_service.delete(project, ids_of(first)[1])
+
+        second = planner.plan(project, REQUEST, ITEMS)
+
+        assert second["deduplicated"] is False
+        assert second["count"] == 3
+        assert set(ids_of(second)).isdisjoint(ids_of(first))
+
+    def test_an_earlier_plan_with_an_archived_task_does_not_count(self, planner, project):
+        first = planner.plan(project, REQUEST, ITEMS)
+        container.task_service.archive(project, ids_of(first)[0])
+
+        second = planner.plan(project, REQUEST, ITEMS)
+
+        assert second["deduplicated"] is False
+        assert set(ids_of(second)).isdisjoint(ids_of(first))
+
+    def test_finished_work_still_counts_as_the_plan(self, planner, project):
+        first = planner.plan(project, REQUEST, ITEMS)
+        container.task_service.done(project, ids_of(first)[0])
+
+        again = planner.plan(project, REQUEST, ITEMS)
+
+        assert ids_of(again) == ids_of(first)
+        assert again["tasks"][0]["state"] == "done", "returned as it is now"
+
+    def test_once_the_window_has_passed_the_plan_is_created_again(
+        self, planner, project, monkeypatch,
+    ):
+        from memory_mcp.services import task_planner
+
+        first = planner.plan(project, REQUEST, ITEMS)
+        monkeypatch.setattr(task_planner, "PLAN_RETRY_WINDOW_SECONDS", 0)
+
+        second = planner.plan(project, REQUEST, ITEMS)
+
+        assert second["deduplicated"] is False
+        assert set(ids_of(second)).isdisjoint(ids_of(first))
+
+    def test_a_retry_after_a_rolled_back_plan_is_not_a_retry(self, project):
+        """The record rolls back with the plan: a retry must create the set,
+        not answer with the ids of tasks that were never committed."""
+        service = FailsOnTask(container.task_service, fail_on=2)
+        planner = TaskPlanner(service)
+        with pytest.raises(PlanError):
+            planner.plan(project, REQUEST, ITEMS)
+        service._fail_on = 0
+
+        result = planner.plan(project, REQUEST, ITEMS)
+
+        assert result["deduplicated"] is False
+        assert count(project, "tasks") == 3
+
+    def test_sub_tasks_come_back_in_plan_order(self, planner, project):
+        items = [*ITEMS, {"title": "Add a test", "description": "Cover it.",
+                          "parent_index": 0}]
+        first = planner.plan(project, REQUEST, items)
+
+        again = planner.plan(project, REQUEST, items)
+
+        assert ids_of(again) == ids_of(first)
+        assert again["tasks"][3]["parent_id"] == ids_of(first)[0]
+
+    def test_a_bound_retry_drains_the_queue_but_creates_nothing(self, project):
+        class Bridge:
+            flushes = 0
+
+            def links(self, slug):
+                return [{"id": 1}]
+
+            def flush(self, slug):
+                Bridge.flushes += 1
+                return {"flushed": 0, "failed": 0, "remaining": 0}
+
+        planner = TaskPlanner(container.task_service, Bridge())
+        first = planner.plan(project, REQUEST, ITEMS)
+        outbox_after_first = count(project, "task_outbox")
+
+        again = planner.plan(project, REQUEST, ITEMS)
+
+        assert again["deduplicated"] is True and again["mirrored"] is True
+        assert ids_of(again) == ids_of(first)
+        assert Bridge.flushes == 2
+        assert count(project, "task_outbox") == outbox_after_first
+
+    def test_the_tool_reports_the_retry(self, project):
+        from memory_mcp import server
+
+        tasks = [dict(item) for item in ITEMS]
+        first = server.memory_task_plan(request=REQUEST, tasks=tasks, project=project)
+        again = server.memory_task_plan(request=REQUEST, tasks=tasks, project=project)
+
+        assert first["deduplicated"] is False
+        assert again["deduplicated"] is True
+        assert ids_of(again) == ids_of(first)
+
+
+class TestAnExistingDatabaseUpgradesIntoIt:
+    """The migration run against a database that already holds work, through
+    the ordinary open path - not a fixture built at the new version."""
+
+    def test_a_v15_project_gains_retry_safe_plans(self, planner, project):
+        import memory_mcp.db.connection as connection_module
+        from memory_mcp.models import CreateTaskRequest
+
+        kept = container.task_service.create(CreateTaskRequest(
+            project=project, title="Made before the upgrade", description="x",
+        ))
+        with connect(project) as conn:
+            conn.execute("DROP TABLE task_plans")
+            conn.execute("DELETE FROM schema_version WHERE version >= 16")
+            conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (15)")
+        # The next open is a first open in this process, so it migrates.
+        connection_module._initialized_dbs.clear()
+
+        first = planner.plan(project, REQUEST, ITEMS)
+        again = planner.plan(project, REQUEST, ITEMS)
+
+        with connect(project) as conn:
+            version = conn.execute("SELECT max(version) FROM schema_version").fetchone()[0]
+        assert version == 16
+        assert ids_of(again) == ids_of(first)
+        assert container.task_service.get(project, kept.id).title == "Made before the upgrade"
+        assert container.task_service.list_tasks(project, limit=50).total == 4

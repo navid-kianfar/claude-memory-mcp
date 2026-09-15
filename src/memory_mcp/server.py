@@ -673,6 +673,18 @@ def memory_task_plan(
 
     List them in dependency order - the queue is worked top-down. They are
     mirrored to the asoode board immediately when the project is bound.
+
+    SAFE TO RETRY. A plan is idempotent on its exact content: the same project,
+    the same verbatim `request` and the same titles in the same order (each
+    trimmed at its ends; nothing else normalised) within 30 minutes of an earlier
+    plan returns THAT plan's task ids, in order, with `deduplicated: true` and a
+    `note` - and creates nothing locally or on the board. So if a response is
+    lost, send the identical call again rather than checking by hand. The
+    returned tasks are as they are now; differing descriptions or other fields
+    in the repeat are not applied, and those entries carry no `routing`. A plan
+    whose request or any title differs is always a new plan, and an earlier plan
+    with a deleted or archived task no longer counts. Every answer carries
+    `deduplicated`.
     """
     def _run():
         slug = _resolve(project)
@@ -1575,6 +1587,13 @@ def memory_task_add(
     Descriptions are MARKDOWN - headings, lists, bold, `code`, fenced blocks.
     Use them. The board renders it (the mirror converts to HTML on the way
     out), so a wall of unformatted prose is a choice, not a constraint.
+
+    SAFE TO RETRY. If a call's response is lost (a daemon restart, a dropped
+    session) and you send it again: an add whose title, description and
+    parent_id exactly match a live task created in the same project within the
+    last minute returns THAT task with `deduplicated: true` and a note, and
+    creates nothing locally or on the board. Other fields of the repeat are not
+    applied. After the minute, an identical add is created as asked.
     """
     def _run():
         slug = _resolve(project)
@@ -1593,7 +1612,8 @@ def memory_task_add(
             role=role,
             path=path,
         )
-        task, routing = container.task_service.create_routed(req)
+        added = container.task_service.add_routed(req)
+        task = added.task
         answer = {
             "status": "ok",
             "task": task.model_dump(mode="json"),
@@ -1602,8 +1622,16 @@ def memory_task_add(
                 "user asks for this one."
             ),
         }
-        if routing is not None:
-            answer["routing"] = routing
+        if added.is_deduplicated:
+            answer["deduplicated"] = True
+            answer["note"] = (
+                "An identical task (same title, description and parent) was created "
+                "in this project within the last minute, so it is returned and "
+                "NOTHING new was created. If a second copy is really wanted, give it "
+                "a distinguishing title or add it again after a minute."
+            )
+        if added.routing is not None:
+            answer["routing"] = added.routing
         hint = decomposition_hint(
             task.description, has_parent=task.parent_id is not None,
         )

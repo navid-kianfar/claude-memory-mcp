@@ -441,6 +441,7 @@ def _make_v14_db(path) -> None:
     create_schema(conn)
     conn.execute("DROP INDEX IF EXISTS idx_task_attach_hash")
     conn.execute("DROP TABLE IF EXISTS attachment_inbox")
+    conn.execute("DROP TABLE IF EXISTS task_plans")
     conn.execute("DELETE FROM schema_version WHERE version >= 15")
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (14)")
     conn.execute(
@@ -469,7 +470,7 @@ def test_v14_db_with_rows_gains_the_inbox_and_the_hash_index(tmp_path):
         assert get_schema_version(conn) == 14
         assert "attachment_inbox" not in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
 
-        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION == 15
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
 
         assert "attachment_inbox" in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
         assert "idx_task_attach_hash" in _indexes(conn, "task_attachments")
@@ -487,7 +488,7 @@ def test_v14_db_with_rows_gains_the_inbox_and_the_hash_index(tmp_path):
             "content_type, size_bytes, path, source, notice) "
             "VALUES ('p1', 's1', 'abc', 'x.png', 'image/png', 12, '/blob', 'transcript', 'n')"
         )
-        assert run_migrations(conn) == 15, "idempotent"
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION, "idempotent"
         assert conn.execute("SELECT count(*) FROM attachment_inbox").fetchone()[0] == 1
     finally:
         conn.close()
@@ -518,7 +519,7 @@ def test_v1_db_migrates_all_the_way_to_the_inbox(tmp_path):
     _make_v1_db(db)
     conn = duckdb.connect(str(db))
     try:
-        assert run_migrations(conn) == 15
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
         assert "attachment_inbox" in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
     finally:
         conn.close()
@@ -533,3 +534,63 @@ def test_digest_migration_is_idempotent(tmp_path):
         assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
     finally:
         conn.close()
+
+
+def _make_v15_db(path) -> None:
+    """A database at v15 WITH work in it: the full schema minus the v16 plan
+    record, and a task already planned."""
+    conn = duckdb.connect(str(path))
+    create_schema(conn)
+    conn.execute("DROP TABLE IF EXISTS task_plans")
+    conn.execute("DELETE FROM schema_version WHERE version >= 16")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (15)")
+    conn.execute(
+        "INSERT INTO tasks (id, title, state, source) VALUES ('t1', 'planned earlier', 'todo', 'claude')"
+    )
+    conn.close()
+
+
+def test_v15_db_with_rows_gains_the_plan_record(tmp_path):
+    db = tmp_path / "v15.duckdb"
+    _make_v15_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        assert get_schema_version(conn) == 15
+        assert "task_plans" not in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION == 16
+
+        assert "task_plans" in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+        assert "idx_task_plans_hash" in _indexes(conn, "task_plans")
+        assert conn.execute("SELECT id, title FROM tasks").fetchall() == [
+            ("t1", "planned earlier")
+        ]
+        # The new table takes a row in the shape the repository writes.
+        conn.execute(
+            "INSERT INTO task_plans (id, request_hash, task_ids) VALUES (?, ?, ?)",
+            ["p1", "abc", ["t1"]],
+        )
+        assert run_migrations(conn) == 16, "idempotent"
+        assert conn.execute("SELECT task_ids FROM task_plans").fetchall() == [(["t1"],)]
+    finally:
+        conn.close()
+
+
+def test_v16_plan_record_matches_between_fresh_and_migrated(tmp_path):
+    fresh = duckdb.connect(str(tmp_path / "fresh16.duckdb"))
+    migrated_path = tmp_path / "migrated16.duckdb"
+    _make_v15_db(migrated_path)
+    migrated = duckdb.connect(str(migrated_path))
+    try:
+        create_schema(fresh)
+        run_migrations(migrated)
+        a = [(r[1], r[2], r[3], r[4]) for r in
+             fresh.execute("PRAGMA table_info('task_plans')").fetchall()]
+        b = [(r[1], r[2], r[3], r[4]) for r in
+             migrated.execute("PRAGMA table_info('task_plans')").fetchall()]
+        assert a == b
+        assert _indexes(fresh, "task_plans") == _indexes(migrated, "task_plans")
+        assert get_schema_version(fresh) == get_schema_version(migrated) == 16
+    finally:
+        fresh.close()
+        migrated.close()

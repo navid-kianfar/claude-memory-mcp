@@ -26,6 +26,8 @@ import contextlib
 import contextvars
 import threading
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from memory_mcp.config import settings
@@ -51,6 +53,16 @@ CLAIM_LEASE_MINUTES = 30
 # How many candidates claim_next will try before giving up for this call.
 _CLAIM_ATTEMPTS = 10
 
+# How recent an identical memory_task_add must be to count as a retry of it. A
+# minute covers a lost response and an immediate re-send; a deliberate second
+# copy asked for after that is created as asked.
+ADD_RETRY_WINDOW_SECONDS = 60
+
+# How many recorded plans with one fingerprint recorded_plan weighs. More than
+# one only matters when the newest has since lost a task; the bound keeps the
+# read small whatever the table holds.
+_PLAN_CANDIDATES = 5
+
 # Fields a change to which is worth a remote call. Position, claim and lease are
 # local bookkeeping; everything else here has a field on the board.
 _MIRRORED_FIELDS = frozenset({
@@ -71,6 +83,16 @@ _MAX_RECONSTRUCTED_MINUTES = 240
 _MIRROR_SUPPRESSED: contextvars.ContextVar[int] = contextvars.ContextVar(
     "mirror_suppressed", default=0,
 )
+
+
+@dataclass(frozen=True)
+class AddedTask:
+    """What `add_routed` did: the task, where it routes, and whether it is an
+    earlier identical task returned instead of a new one."""
+
+    task: Task
+    routing: dict | None
+    is_deduplicated: bool
 
 
 class MirroredRerouteError(ValidationError):
@@ -125,14 +147,20 @@ class TaskService:
         # daemons, this lock stops being enough and the claim must move to the
         # SQLite registry, where a cross-process UPDATE ... WHERE is atomic.
         self._claim_locks: dict[str, threading.Lock] = {}
+        # The same shape for add_routed's "look for an identical task, else
+        # create" pair: two identical adds racing must not both miss.
+        self._add_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
     def _claim_lock(self, project: str) -> threading.Lock:
+        return self._project_lock(self._claim_locks, project)
+
+    def _project_lock(self, locks: dict[str, threading.Lock], project: str) -> threading.Lock:
         with self._locks_guard:
-            lock = self._claim_locks.get(project)
+            lock = locks.get(project)
             if lock is None:
                 lock = threading.Lock()
-                self._claim_locks[project] = lock
+                locks[project] = lock
             return lock
 
     # ---------- helpers ----------
@@ -197,6 +225,64 @@ class TaskService:
 
     def create(self, request: CreateTaskRequest) -> Task:
         return self.create_routed(request)[0]
+
+    def add_routed(self, request: CreateTaskRequest) -> AddedTask:
+        """memory_task_add's create, safe to retry.
+
+        A call whose response was lost is re-sent by its caller, and without
+        this a daemon restart turns one requirement into two local tasks and two
+        board cards. So an add whose title, description and parent exactly match
+        a live task created in this project within ADD_RETRY_WINDOW_SECONDS
+        returns THAT task, flagged, and creates nothing.
+
+        Deliberately narrow, and deliberately not in `create_routed`: the board
+        import and the UI's POST /tasks also create through that, and two
+        identical cards arriving from the board are two cards. Past the window
+        an identical add is a deliberate second copy and is created.
+        """
+        title = request.title.strip()
+        with self._project_lock(self._add_locks, request.project):
+            existing = self._task_repo.recent_identical(
+                request.project, title, request.description, request.parent_id,
+                ADD_RETRY_WINDOW_SECONDS,
+            )
+            if existing is not None:
+                return AddedTask(task=existing, routing=None, is_deduplicated=True)
+            task, routing = self.create_routed(request)
+        return AddedTask(task=task, routing=routing, is_deduplicated=False)
+
+    # ---------- plans ----------
+
+    def recorded_plan(
+        self, project: str, request_hash: str, window_seconds: int,
+    ) -> tuple[Task, ...] | None:
+        """The tasks of the newest plan recorded under `request_hash` within
+        `window_seconds` whose tasks all still exist unarchived, in plan order;
+        None when there is no such plan.
+
+        A plan that has lost a task - deleted, or archived - no longer counts:
+        returning the survivors would answer a retry with part of a plan and
+        call it the whole.
+        """
+        plans = self._task_repo.recent_plans(
+            project, request_hash, window_seconds, _PLAN_CANDIDATES,
+        )
+        if not plans:
+            return None
+        candidate_ids = tuple(task_id for plan in plans for task_id in plan)
+        live = self._task_repo.live_tasks(project, candidate_ids)
+        by_id = {task.id: task for task in live}
+        for plan in plans:
+            if all(task_id in by_id for task_id in plan):
+                return tuple(by_id[task_id] for task_id in plan)
+        return None
+
+    def record_plan(self, project: str, request_hash: str, task_ids: Sequence[str]) -> None:
+        """Remember the tasks one plan created, so a retry can find them. Joins
+        an open transaction, so it rolls back with the plan it describes."""
+        plan_uuid = uuid.uuid4()
+        plan_id = str(plan_uuid)
+        self._task_repo.record_plan(project, plan_id, request_hash, task_ids)
 
     def create_routed(self, request: CreateTaskRequest) -> tuple[Task, dict | None]:
         """Create a task and say where it routes: `(task, routing)`.

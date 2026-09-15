@@ -5,6 +5,7 @@ they are not a MemoryCategory, so they never reach the git-committed
 .claude-memory/ snapshot however long the list gets.
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 
 from memory_mcp.db.connection import connect
@@ -671,6 +672,85 @@ class TaskRepository:
         except Exception:  # noqa: BLE001 - table absent on an old schema
             return False
         return row is not None
+
+    # ---------- retry detection ----------
+    #
+    # A tool call that does its work and then loses its response - a daemon
+    # restart, a dropped MCP session, a client timeout - is retried by the
+    # caller. These reads are how a retry finds the first call's work instead of
+    # doing it again. Every one is windowed in SQL against the database's own
+    # clock, the same clock `created_at` was stamped with.
+
+    def recent_identical(
+        self, project: str, title: str, description: str | None,
+        parent_id: str | None, window_seconds: int,
+    ) -> Task | None:
+        """The newest live task with exactly this title, description and parent,
+        created within the last `window_seconds`; None when there is none.
+
+        Exact equality on purpose: a near-miss is a different task, and
+        silently folding it into an existing one would lose a requirement.
+        """
+        with connect(project) as conn:
+            row = conn.execute(
+                f"""
+                SELECT {TASK_COLUMNS} FROM tasks
+                WHERE title = ?
+                  AND description IS NOT DISTINCT FROM ?
+                  AND parent_id IS NOT DISTINCT FROM ?
+                  AND archived_at IS NULL
+                  AND created_at >= (current_timestamp - INTERVAL (?) SECOND)::TIMESTAMP
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                [title, description, parent_id, window_seconds],
+            ).fetchone()
+        return _row_to_task(row) if row else None
+
+    def record_plan(
+        self, project: str, plan_id: str, request_hash: str, task_ids: Sequence[str],
+    ) -> None:
+        """Remember which tasks one plan created, in plan order."""
+        ordered_ids = list(task_ids)
+        with connect(project) as conn:
+            conn.execute(
+                "INSERT INTO task_plans (id, request_hash, task_ids) VALUES (?, ?, ?)",
+                [plan_id, request_hash, ordered_ids],
+            )
+
+    def recent_plans(
+        self, project: str, request_hash: str, window_seconds: int, limit: int,
+    ) -> tuple[tuple[str, ...], ...]:
+        """The task ids of each plan recorded under `request_hash` within the
+        last `window_seconds`, newest plan first, each in its own plan order."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                """
+                SELECT task_ids FROM task_plans
+                WHERE request_hash = ?
+                  AND created_at >= (current_timestamp - INTERVAL (?) SECOND)::TIMESTAMP
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                [request_hash, window_seconds, limit],
+            ).fetchall()
+        return tuple(tuple(row[0]) for row in rows)
+
+    def live_tasks(self, project: str, task_ids: Sequence[str]) -> tuple[Task, ...]:
+        """The tasks among `task_ids` that still exist and are not archived, in
+        no particular order. A deleted task has no row; an archived one is
+        filtered out here."""
+        if not task_ids:
+            return ()
+        placeholders = ", ".join("?" for _ in task_ids)
+        params = list(task_ids)
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"SELECT {TASK_COLUMNS} FROM tasks "
+                f"WHERE id IN ({placeholders}) AND archived_at IS NULL",
+                params,
+            ).fetchall()
+        return tuple(_row_to_task(row) for row in rows)
 
     def list_meta(self, project: str) -> dict[str, dict]:
         """Per-task row metadata for the list view, in four grouped queries.

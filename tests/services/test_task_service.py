@@ -1033,3 +1033,122 @@ class TestParentTimeRollsUpOnRead:
         detail = container.task_service.detail(slug, task.id)
         assert detail.minutes_spent == 7
         assert detail.minutes_spent_total == detail.minutes_spent
+
+
+class TestAddIsSafeToRetry:
+    """memory_task_add whose response was lost is re-sent by its caller. An
+    identical add within a minute returns the first task; nothing else does."""
+
+    def _added(self, container, slug, title="Retry me", **kw):
+        return container.task_service.add_routed(
+            CreateTaskRequest(project=slug, title=title, **kw)
+        )
+
+    def test_an_identical_add_returns_the_first_task(self, container):
+        slug = _project(container, "t-retry")
+        first = self._added(container, slug, description="the same words")
+
+        again = self._added(container, slug, description="the same words")
+
+        assert first.is_deduplicated is False
+        assert again.is_deduplicated is True
+        assert again.task.id == first.task.id
+        assert container.task_service.list_tasks(slug).total == 1
+
+    def test_a_retry_queues_nothing_for_the_board(self, container):
+        slug = _project(container, "t-retry-outbox")
+        self._added(container, slug, description="d")
+        with get_connection(slug) as conn:
+            queued = conn.execute("SELECT count(*) FROM task_outbox").fetchone()[0]
+        assert queued > 0, "the first add must have queued its create"
+
+        self._added(container, slug, description="d")
+
+        with get_connection(slug) as conn:
+            assert conn.execute("SELECT count(*) FROM task_outbox").fetchone()[0] == queued
+
+    def test_a_different_description_is_a_new_task(self, container):
+        slug = _project(container, "t-retry-desc")
+        first = self._added(container, slug, description="one")
+
+        second = self._added(container, slug, description="two")
+
+        assert second.is_deduplicated is False
+        assert second.task.id != first.task.id
+
+    def test_the_same_sub_task_under_two_parents_is_two_tasks(self, container):
+        slug = _project(container, "t-retry-parent")
+        parent_a = _add(container, slug, title="A")
+        parent_b = _add(container, slug, title="B")
+        under_a = self._added(container, slug, title="Tests", description="d",
+                              parent_id=parent_a.id)
+
+        under_b = self._added(container, slug, title="Tests", description="d",
+                              parent_id=parent_b.id)
+
+        assert under_b.is_deduplicated is False
+        assert under_b.task.id != under_a.task.id
+
+    def test_a_deliberate_re_add_after_the_window_is_created(self, container):
+        slug = _project(container, "t-retry-window")
+        first = self._added(container, slug, description="d")
+        _backdate_creation(slug, first.task.id, minutes=2)
+
+        second = self._added(container, slug, description="d")
+
+        assert second.is_deduplicated is False
+        assert second.task.id != first.task.id
+
+    def test_an_archived_task_is_not_a_match(self, container):
+        slug = _project(container, "t-retry-archived")
+        first = self._added(container, slug, description="d")
+        container.task_service.archive(slug, first.task.id)
+
+        second = self._added(container, slug, description="d")
+
+        assert second.is_deduplicated is False
+        assert second.task.id != first.task.id
+
+    def test_never_across_projects(self, container):
+        one = _project(container, "t-retry-one")
+        two = _project(container, "t-retry-two")
+        first = self._added(container, one, description="d")
+
+        other = self._added(container, two, description="d")
+
+        assert other.is_deduplicated is False
+        assert other.task.id != first.task.id
+
+    def test_the_plain_create_path_is_not_deduplicated(self, container):
+        """The board import and the UI create through `create`: two identical
+        cards arriving from the board are two cards."""
+        slug = _project(container, "t-retry-create")
+        first = _add(container, slug, description="d")
+
+        second = _add(container, slug, description="d")
+
+        assert second.id != first.id
+
+    def test_the_tool_says_nothing_new_was_created(self):
+        from memory_mcp import server
+        from memory_mcp.container import container as app_container
+
+        slug = "t-retry-tool"
+        app_container.project_service.init_project(slug, "Retry Tool")
+        first = server.memory_task_add(title="Tool retry", description="d", project=slug)
+
+        again = server.memory_task_add(title="Tool retry", description="d", project=slug)
+
+        assert "deduplicated" not in first
+        assert again["deduplicated"] is True
+        assert again["task"]["id"] == first["task"]["id"]
+        assert "NOTHING new was created" in again["note"]
+
+
+def _backdate_creation(slug, task_id, *, minutes):
+    """Age a task, so a test can stand after the retry window without waiting."""
+    from datetime import datetime, timedelta
+
+    created_at = datetime.now() - timedelta(minutes=minutes)
+    with get_connection(slug) as conn:
+        conn.execute("UPDATE tasks SET created_at = ? WHERE id = ?", [created_at, task_id])

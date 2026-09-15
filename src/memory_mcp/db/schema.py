@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 15
+CURRENT_SCHEMA_VERSION = 16
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -172,6 +172,26 @@ _TASK_DDL = (
         deleted_at TIMESTAMP DEFAULT current_timestamp
     )
     """,
+    # v16: one row per memory_task_plan that created tasks, so a retried plan -
+    # the call did its work, its response was lost to a daemon restart, the
+    # caller sent it again - returns the first set instead of doubling it on
+    # the board. `request_hash` is an exact fingerprint of the project, the
+    # verbatim request and the ordered titles (TaskPlanner.plan_fingerprint);
+    # `task_ids` keeps the plan's own order, which no column on `tasks` does -
+    # every task in one plan shares the transaction's created_at, and positions
+    # restart under each parent.
+    #
+    # No PRIMARY KEY, for the task_outbox reason: plain index, and every read
+    # addresses rows by request_hash.
+    """
+    CREATE TABLE IF NOT EXISTS task_plans (
+        id           VARCHAR NOT NULL,
+        request_hash VARCHAR NOT NULL,
+        task_ids     VARCHAR[] NOT NULL,
+        created_at   TIMESTAMP DEFAULT current_timestamp
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_task_plans_hash ON task_plans (request_hash)",
 )
 
 
@@ -770,6 +790,37 @@ def migrate_v14_to_v15(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (15)")
 
 
+def migrate_v15_to_v16(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v15 -> v16: the plan record that makes memory_task_plan idempotent.
+
+    `task_plans` is new and nothing else changes, so every existing row keeps
+    its shape and an unmigrated reader is unaffected. Nothing is backfilled: a
+    plan created before the upgrade has no record, so only a retry straddling
+    the upgrade itself goes uncaught - once, for at most the dedup window.
+    Created through `create_task_tables`, the helper a fresh database uses, so
+    the two shapes cannot drift.
+
+    Stamped only once the table and its index are really there - the v14 rule:
+    `create_task_tables` swallows a failed CREATE, and a database marked v16
+    without the table would fail every plan with nothing left to repair it.
+    """
+    create_task_tables(conn)
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    if "task_plans" not in tables:
+        raise RuntimeError("schema v16: could not create task_plans - not stamping")
+    indexes = {
+        row[0] for row in conn.execute("SELECT index_name FROM duckdb_indexes()").fetchall()
+    }
+    if "idx_task_plans_hash" not in indexes:
+        raise RuntimeError("schema v16: could not create idx_task_plans_hash - not stamping")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (16)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -837,6 +888,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 15:
         migrate_v14_to_v15(conn)
         version = 15
+    if version < 16:
+        migrate_v15_to_v16(conn)
+        version = 16
     return version
 
 

@@ -2,7 +2,7 @@
 name: kotlin
 description: Server-side Kotlin expert (NOT mobile - that is `app`). Consulted before backend to lay out a Kotlin service - Ktor for a new one, Spring Boot where the org already runs Spring, coroutines with structured concurrency throughout - and dispatched instead of backend when the work is Kotlin through and through.
 extends: backend
-effort: xhigh
+effort: high
 color: teal
 ---
 

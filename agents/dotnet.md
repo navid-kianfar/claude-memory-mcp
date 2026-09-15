@@ -2,7 +2,7 @@
 name: dotnet
 description: .NET expert. Consulted before backend to lay out a .NET solution - projects, DI, services, configuration, performance - and dispatched instead of backend when the work is .NET through and through.
 extends: backend
-effort: xhigh
+effort: high
 color: orange
 ---
 

@@ -110,9 +110,14 @@ by the installer, see above).
 
 - **`model`** — every agent here pins `claude-opus-5` by its full id rather than the `opus`
   alias, so a new Opus cannot silently change how the team behaves.
-- **`effort`** — `low` | `medium` | `high` | `xhigh` | `max`. `max` for pm, designer, test and
-  reviewer; `xhigh` for backend, frontend and devops; `high` for docs, which runs often and
-  writes prose rather than reasoning deeply.
+- **`effort`** — `low` | `medium` | `high` | `xhigh` | `max`. `max` for pm and designer;
+  `xhigh` for test and reviewer; `high` for every stack expert, backend, frontend and devops;
+  `medium` for docs, which runs often and writes prose rather than reasoning deeply (and for
+  the `_base` default). Every level but pm's and designer's was lowered one step on
+  2026-09-15, because the agents' token spend was too high.
+- **One reviewer, never a fan-out** — at most one `reviewer` runs at a time (the dispatch gate
+  asks before a second; other kinds allow two), and `reviewer` is denied `Workflow` as well as
+  `Agent`, so it reviews and tests as a single agent.
 - **`disallowedTools`, not `tools`** — prefer the denylist. An allowlist risks filtering out
   the inherited MCP tools an agent needs, whereas a denylist leaves them intact. `reviewer` is
   the one real use: it is denied `Edit`/`Write` because a reviewer who can fix its own findings
@@ -152,7 +157,8 @@ They live once, in `_base.md`, and reach every definition through `extends`:
   installer UNIONS `disallowedTools` down the `extends` chain, so a child that denies more (the
   reviewer denies `Edit, Write, NotebookEdit`) can never hand `Agent` back. Before this, one
   reviewer fanned out into six "angle" reviewers and one of those into four more. At most two
-  agents of a kind run at once; the dispatch hook prompts the user on a third of that kind.
+  agents of a kind run at once, and one `reviewer`; the dispatch hook prompts the user past
+  that. `reviewer` is also denied `Workflow`, so it cannot fan out by another door.
 - **Work the task through its lifecycle, and stop the clock.** `memory_task_start` claims,
   clocks on and mirrors in_progress; `memory_task_done` or
   `memory_task_update(state="paused"|"blocked")` stops the clock; `memory_session_end` last.

@@ -168,15 +168,30 @@ class TestConcurrency:
 
     def test_at_the_limit_the_next_of_that_kind_asks_and_names_it(self):
         for _ in range(MAX_RUNNING_PER_KIND):
-            record_dispatch("s1", agent_type="reviewer")
+            record_dispatch("s1", agent_type="test")
+
+        answer = concurrency_gate("s1", "test")
+
+        assert answer["decision"] == "ask"
+        assert answer["running"] == MAX_RUNNING_PER_KIND
+        assert answer["agent_type"] == "test"
+        assert f"{MAX_RUNNING_PER_KIND} `test` agents are already running" in answer["reason"]
+        assert answer["context"]
+
+    def test_only_one_reviewer_runs_at_a_time(self):
+        """The user, 2026-09-15: the review agent has one instance running."""
+        assert concurrency_gate("s1", "reviewer") == {}
+        record_dispatch("s1", agent_type="reviewer")
 
         answer = concurrency_gate("s1", "reviewer")
 
         assert answer["decision"] == "ask"
-        assert answer["running"] == MAX_RUNNING_PER_KIND
-        assert answer["agent_type"] == "reviewer"
-        assert f"{MAX_RUNNING_PER_KIND} `reviewer` agents are already running" in answer["reason"]
-        assert answer["context"]
+        assert answer["running"] == 1
+        assert "1 `reviewer` agent is already running" in answer["reason"]
+        assert "at most 1 `reviewer` at once" in answer["context"]
+
+        record_subagent_stop("s1", agent_type="reviewer")
+        assert concurrency_gate("s1", "reviewer") == {}
 
     def test_another_kind_is_not_held_back(self):
         """The user's rule is per kind: two pythons running must not stop a

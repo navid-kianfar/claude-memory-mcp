@@ -2,7 +2,7 @@
 name: python
 description: Python expert. Consulted before backend to lay out a Python service - FastAPI and Pydantic v2 for APIs, uv for everything, ruff and mypy strict as the floor - and dispatched instead of backend when the work is Python through and through.
 extends: backend
-effort: xhigh
+effort: high
 color: amber
 ---
 

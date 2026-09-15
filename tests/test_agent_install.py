@@ -317,6 +317,14 @@ class TestShippedAgentDefinitions:
             "risks filtering out the inherited MCP tools it needs"
         )
 
+    def test_the_reviewer_cannot_fan_out(self):
+        """The user, 2026-09-15: the reviewer reviews and tests as a single agent.
+        Agent comes from _base; Workflow would launch agents by another door."""
+        front, body = self._definitions()["reviewer"]
+        banned = [t.strip() for t in front["disallowedTools"].split(",")]
+        assert "Agent" in banned and "Workflow" in banned
+        assert "You are one agent, and you stay one" in body
+
     def test_pm_reads_and_writes_but_does_not_dispatch(self):
         """A dispatched pm plans in isolated context; the LEAD dispatches from its
         plan. So pm keeps every tool but one - and never an allowlist, which would
@@ -342,12 +350,13 @@ class TestShippedAgentDefinitions:
     def test_effort_levels_are_valid_and_deliberate(self):
         valid = {"low", "medium", "high", "xhigh", "max"}
         expected = {
-            "pm": "max", "designer": "max", "test": "max", "reviewer": "max",
-            "backend": "xhigh", "frontend": "xhigh", "devops": "xhigh",
-            "docs": "high",
-            "dotnet": "xhigh", "nodejs": "xhigh", "react": "xhigh", "app": "xhigh",
-            "react-native": "xhigh",
-            "python": "xhigh", "go": "xhigh", "rust": "xhigh", "kotlin": "xhigh",
+            # Lowered one step on 2026-09-15 for token spend - all but pm and designer.
+            "pm": "max", "designer": "max", "test": "xhigh", "reviewer": "xhigh",
+            "backend": "high", "frontend": "high", "devops": "high",
+            "docs": "medium",
+            "dotnet": "high", "nodejs": "high", "react": "high", "app": "high",
+            "react-native": "high",
+            "python": "high", "go": "high", "rust": "high", "kotlin": "high",
         }
         for stem, (front, _) in self._definitions().items():
             effort = front.get("effort")

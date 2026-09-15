@@ -2,7 +2,7 @@
 name: react
 description: React expert for the pnpm + Vite + Tailwind + shadcn/ui stack. Wraps every shadcn component once in the app's own component so a change is made in one place.
 extends: frontend
-effort: xhigh
+effort: high
 color: green
 ---
 

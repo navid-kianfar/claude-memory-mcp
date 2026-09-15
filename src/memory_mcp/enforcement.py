@@ -257,7 +257,8 @@ _DIVISION_OF_WORK = (
     "agent has the Agent tool, so none can fan out - a reviewer splitting itself "
     "into 'angles' is how one review became eleven agents. A third agent of a kind "
     "(a third `python`) while two are running puts a prompt in front of the user; "
-    "different kinds may run side by side.",
+    "different kinds may run side by side. `reviewer` is ONE at a time, and it "
+    "reviews and tests as a single agent - a second reviewer prompts too.",
     "  - Sequence: a stack expert before `backend` when the structure is undecided; "
     "`designer` before `frontend`/`react`/`app`; `reviewer` after an "
     "implementation, never instead of one; `test` before every commit, against the "
@@ -900,6 +901,15 @@ def dispatch_gate(
 #: run side by side; a third `python` asks.
 MAX_RUNNING_PER_KIND = 2
 
+#: Kinds held below MAX_RUNNING_PER_KIND. The user, 2026-09-15: "the review
+#: agent can have only one instance running" - a review is one agent's pass.
+MAX_RUNNING_BY_KIND = {"reviewer": 1}
+
+
+def running_limit(agent_type: str) -> int:
+    """How many agents of this kind may run at once."""
+    return MAX_RUNNING_BY_KIND.get(agent_type, MAX_RUNNING_PER_KIND)
+
 
 def nested_dispatch_denial(agent_id: str | None) -> dict:
     """`{"decision": "deny", ...}` when a SUBAGENT tries to dispatch, else `{}`.
@@ -926,8 +936,8 @@ def nested_dispatch_denial(agent_id: str | None) -> dict:
 
 
 def concurrency_gate(session_id: str | None, agent_type: str | None) -> dict:
-    """`{"decision": "ask", ...}` when MAX_RUNNING_PER_KIND agents of this
-    dispatch's kind are already running.
+    """`{"decision": "ask", ...}` when this dispatch's kind is already at its
+    `running_limit` (two, one for `reviewer`).
 
     Kinds are counted apart: two `python` agents running do not stop a `react`
     or a `test` dispatch. Every kind counts, reviewers and test agents included -
@@ -938,22 +948,24 @@ def concurrency_gate(session_id: str | None, agent_type: str | None) -> dict:
     if not session_id or not kind:
         return {}
     running = running_dispatches(session_id, kind)
-    if running < MAX_RUNNING_PER_KIND:
+    limit = running_limit(kind)
+    if running < limit:
         return {}
+    agents = "agent is" if running == 1 else "agents are"
     return {
         "decision": "ask",
         "running": running,
         "agent_type": kind,
         "reason": (
-            f"[Memory MCP] {running} `{kind}` agents are already running in this "
+            f"[Memory MCP] {running} `{kind}` {agents} already running in this "
             f"session and this would start another `{kind}`. Each real dispatch "
             "costs 115k-380k tokens. Yes starts it anyway; No makes Claude wait for "
             "one to finish. MEMORY_MCP_NO_GATE=1 turns this prompt off."
         ),
         "context": (
-            f"[Memory MCP] {running} `{kind}` agents are still running. Wait for "
+            f"[Memory MCP] {running} `{kind}` {agents} still running. Wait for "
             f"one to report before dispatching another `{kind}`: at most "
-            f"{MAX_RUNNING_PER_KIND} agents of a kind run at once. Agents of other "
+            f"{limit} `{kind}` at once. Agents of other "
             "kinds may still be dispatched, with files disjoint from the running ones."
         ),
     }

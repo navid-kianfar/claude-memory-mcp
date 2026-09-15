@@ -2,7 +2,7 @@
 name: nodejs
 description: Node.js expert. Consulted before backend to lay out a Node project - always NestJS for APIs, workers and socket apps, always Next.js for server-rendered apps, always pnpm - and dispatched instead of backend when the work is Node through and through.
 extends: backend
-effort: xhigh
+effort: high
 color: orange
 ---
 

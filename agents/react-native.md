@@ -2,7 +2,7 @@
 name: react-native
 description: React Native expert for repos that are already React Native (new mobile work is Kotlin Multiplatform, owned by app) - Expo or bare workflow, native modules and the platform split, navigation, StyleSheet or Nativewind styling, verified on the iOS simulator and the Android emulator.
 extends: frontend
-effort: xhigh
+effort: high
 color: green
 ---
 

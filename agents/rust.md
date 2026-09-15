@@ -2,7 +2,7 @@
 name: rust
 description: Rust expert. Consulted before backend to lay out a Rust service - tokio and axum, thiserror in libraries and anyhow in binaries, sqlx with checked queries, clippy denied - and dispatched instead of backend when the work is Rust through and through.
 extends: backend
-effort: xhigh
+effort: high
 color: deep-orange
 ---
 

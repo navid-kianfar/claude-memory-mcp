@@ -1,7 +1,7 @@
 ---
 abstract: true
 model: claude-opus-5
-effort: high
+effort: medium
 disallowedTools: Agent
 ---
 {{EXTENSION}}

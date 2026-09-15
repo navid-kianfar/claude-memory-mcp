@@ -2,7 +2,7 @@
 name: go
 description: Go expert. Consulted before backend to lay out a Go service - stdlib net/http, cmd/ and internal/, sqlc over an ORM, errors wrapped and context everywhere - and dispatched instead of backend when the work is Go through and through.
 extends: backend
-effort: xhigh
+effort: high
 color: light-blue
 ---
 

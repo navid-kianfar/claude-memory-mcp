@@ -385,6 +385,38 @@ class TestShippedAgentDefinitions:
                 f"{stem}.md says nothing about token cost"
             )
 
+    CODE_WRITERS = {
+        "backend", "frontend", "test", "reviewer",
+        "dotnet", "nodejs", "python", "go", "rust", "kotlin",
+        "react", "react-native", "app",
+    }
+
+    def test_every_agent_that_writes_or_judges_code_carries_the_code_standard(self):
+        """Set by the user on 2026-09-15: no call inside another call's arguments,
+        arrays unless the items change, bulk changes as one set-based statement in
+        a transaction. It lives once, in `_code.md`, and must reach every agent
+        that writes code or reviews it - and only those."""
+        for stem, (_, body) in self._definitions().items():
+            carries = "## Code standard" in body
+            assert carries == (stem in self.CODE_WRITERS), (
+                f"{stem}.md {'lacks' if not carries else 'should not carry'} the code standard"
+            )
+            if carries:
+                lowered = body.lower()
+                for needle in ("nested inside another call", "an array, not a list",
+                               "one statement", "transaction", "no query inside a loop",
+                               "parameterised", "guard clauses", "never swallow",
+                               "fire-and-forget"):
+                    assert needle in lowered, f"{stem}.md code standard lost {needle!r}"
+
+    def test_each_stack_expert_names_its_own_forms_of_the_code_standard(self):
+        """A generic rule re-derived per task comes out different each time; each
+        expert names this stack's concrete array type and bulk statement."""
+        for stem in ("dotnet", "nodejs", "python", "go", "rust", "kotlin",
+                     "react", "react-native", "app"):
+            body = self._definitions()[stem][1]
+            assert "### The code standard, in" in body, f"{stem}.md has no stack code standard"
+
     def test_no_credential_is_committed_in_a_definition(self):
         """agents/ is version-controlled AND installs to ~/.claude/agents/."""
         import re

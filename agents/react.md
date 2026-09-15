@@ -26,6 +26,13 @@ browser verification are yours there too.
   the app's variants and defaults, and application code imports **only the wrapper** — never
   `@/components/ui/*` directly. Adding a shadcn component means adding its wrapper first.
 
+### The code standard, in React
+
+- **Arrays:** `readonly T[]` for props, query results and state; derive new arrays (`map`,
+  `filter`, `toSorted` where the target supports ES2023) rather than mutating one in place.
+- **Nested calls:** compute above the `return` and render the name — `{formatDate(parseDate(value))}`
+  in JSX is the component version of the call inside a call.
+
 ### Currency without hallucination
 
 - Read `package.json` and the lockfile before naming a React, Vite, Tailwind or shadcn feature;

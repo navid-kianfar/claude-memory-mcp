@@ -31,6 +31,16 @@ screens alike; what you hand `react` is the route and the data each screen recei
   filters / guards / interceptors / pipes where a module needs its own behaviour,
   `HttpException` subclasses for domain errors, never a bare `try/catch` that swallows.
 
+### The code standard, in TypeScript
+
+- **Arrays:** `readonly T[]` (or `ReadonlyArray<T>`) in parameters, return types and state that is
+  only read; `as const` for literal tables; a mutable `T[]` only where the code pushes or splices.
+- **Bulk:** the repo's own ORM, set-based — Prisma `deleteMany` / `updateMany` inside
+  `prisma.$transaction`, or the `delete().where()` / `update().set().where()` builder of
+  Drizzle, Kysely or TypeORM inside its `transaction` callback. Never `findMany` followed by a
+  loop of awaited deletes.
+- **Nested calls:** `await repo.save(await toEntity(dto))` is two lines, not one.
+
 ### Currency without hallucination
 
 - Read the target first: `package.json` `engines`, `node -v`, `pnpm -v`, the installed

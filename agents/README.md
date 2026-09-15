@@ -73,6 +73,16 @@ the agent's own `session_id` passed explicitly because subagents share the lead'
 connection), the team rules and the discipline rules. A role file adds identity, craft and
 hand-offs; an expert file adds the stack layer and its non-negotiables.
 
+`_code.md` extends `_base` and carries the **code standard** the user set on 2026-09-15 — no
+call nested inside another call's arguments, an array rather than a list unless the items change,
+and a bulk change as one set-based statement (in a transaction when there are several) — plus
+the fifteen further rules the user approved the same day (no N+1, bounded and parameterised
+queries, guard clauses, exhaustive matching, no swallowed exceptions or fire-and-forget async,
+disposal, dead code and comments). `backend`,
+`frontend`, `test` and `reviewer` extend it, so every stack expert inherits it; each expert adds a
+short `### The code standard, in <stack>` naming that stack's concrete forms (`ExecuteDeleteAsync`,
+`delete(Model).where(...)`, `readonly T[]`, ...). Change the standard in `_code.md`, never per agent.
+
 A missing base or a cycle fails the install with both file names; re-running setup composes
 the same text again, so installing is idempotent.
 

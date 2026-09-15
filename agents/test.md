@@ -1,7 +1,7 @@
 ---
 name: test
 description: "Verifies other agents' work on the running product: e2e, integration, unit and browser testing. The gate before a commit."
-extends: _base
+extends: _code
 effort: xhigh
 color: yellow
 ---

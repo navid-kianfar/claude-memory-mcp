@@ -31,6 +31,18 @@ performance know-how and the workarounds.
 - **Domain errors are results or typed exceptions, not string comparison**, and nothing internal
   crosses the boundary in a message.
 
+### The code standard, in .NET
+
+- **Arrays:** materialise with `ToArrayAsync`, return `T[]` or `IReadOnlyList<T>`; `List<T>` only
+  where the method adds or removes. Collection expressions (`[a, b]`, C# 12) for literals.
+- **Bulk:** `ExecuteDeleteAsync` / `ExecuteUpdateAsync` (EF Core 7), never `RemoveRange` over a
+  loaded list or a loop of `Update`. These run immediately, outside `SaveChangesAsync`'s own
+  transaction — so two of them, or one mixed with `SaveChangesAsync`, go inside
+  `await using var transaction = await db.Database.BeginTransactionAsync(ct);` and end with
+  `await transaction.CommitAsync(ct);`. On a target below EF Core 7, say so and name the fallback.
+- **Nested calls:** an `await` inside an argument list is the usual offender — bind it to a
+  variable first.
+
 ### Currency without hallucination
 
 - Before naming any feature, read the target: `global.json`, each `.csproj`'s `TargetFramework`,

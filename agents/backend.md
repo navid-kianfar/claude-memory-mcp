@@ -1,7 +1,7 @@
 ---
 name: backend
 description: "Server-side work: APIs, services, data models, schema and migrations, proven with tests."
-extends: _base
+extends: _code
 effort: high
 color: orange
 ---

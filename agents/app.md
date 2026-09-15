@@ -20,6 +20,14 @@ You build the mobile app when the project has one, to the designer's spec, verif
   keyboard, share sheets, notification presentation, font hinting — never hidden behind
   "platform differences".
 
+### The code standard, in Kotlin Multiplatform
+
+- **Arrays:** read-only `List<T>` in state, UI models and signatures; `MutableList` only inside the
+  code that builds it, never exposed through a `StateFlow`.
+- **Bulk (local database):** one SQLDelight `DELETE ... WHERE` / `UPDATE ... WHERE` query, never a
+  loop of single-row calls; several statements inside `database.transaction { }`.
+- **Nested calls:** `f(g(x))` becomes a named `val` first, in composables as much as anywhere.
+
 ### Currency without hallucination
 
 - Read `gradle/libs.versions.toml`, the Kotlin and Compose Multiplatform plugin versions and the

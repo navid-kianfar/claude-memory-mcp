@@ -31,6 +31,18 @@ and dispatched **instead of** it when the work is Go through and through.
 - **Accept interfaces, return structs.** Define the interface where it is *consumed*, not beside
   the implementation — that is what keeps packages decoupled and mocks unnecessary.
 
+### The code standard, in Go
+
+- **Arrays:** Go has no read-only slice, so the rule becomes: size a slice once when the count is
+  known (`make([]T, len(src))` and assign by index), `append` only when it is genuinely unknown,
+  and never hand out an internal slice for callers to modify — `slices.Clone` (Go 1.21) when one
+  must leave.
+- **Bulk:** one sqlc `DELETE ... WHERE` / `UPDATE ... WHERE` query, with `= ANY($1)` for an id
+  set, never a loop of single-row calls. Several statements: `tx, err := pool.Begin(ctx)`,
+  `defer tx.Rollback(ctx)`, `queries.WithTx(tx)`, then `tx.Commit(ctx)`.
+- **Nested calls:** `f(g(x))` becomes a named intermediate — a call that returns an error already
+  forces this.
+
 ### Currency without hallucination
 
 - Read the target first: `go.mod` (module path and Go version), `go version`, the tool versions

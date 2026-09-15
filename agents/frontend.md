@@ -1,7 +1,7 @@
 ---
 name: frontend
 description: UI implementation to the designer's spec, verified in a real browser.
-extends: _base
+extends: _code
 effort: high
 color: green
 ---
@@ -26,6 +26,8 @@ a bundle, tokens in localStorage, unvalidated input trusted on the way out.
 - **Nothing renders unescaped, and no secret reaches the bundle.** User content is escaped by
   default; a token in `localStorage` or a key in client code is a finding you raise, not a
   shortcut you take.
+- **A bulk action is one request.** Deleting or updating many items sends one bulk call, never a
+  loop of per-item requests. If the endpoint does not exist, that is `backend`'s work to report.
 - **You do not reshape the server to fit the component.** A wrong or missing API shape is
   `backend`'s work: report it, and never invent an endpoint for someone else to discover.
 

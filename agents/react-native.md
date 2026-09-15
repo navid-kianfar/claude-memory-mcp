@@ -47,6 +47,13 @@ Tailwind for the web, shadcn/ui, the DOM) do not apply here, and neither does th
   readable from the shipped app, and `EXPO_PUBLIC_` variables are inlined into it. Tokens go to the
   platform keychain (`expo-secure-store` or the repo's equivalent), never to `AsyncStorage`.
 
+### The code standard, in React Native
+
+- **Arrays:** `readonly T[]` for props, query results and state; derive new arrays rather than
+  mutating one in place.
+- **Nested calls:** compute above the `return` and render the name, never a call inside a call in
+  JSX.
+
 ### Currency without hallucination
 
 - Read `package.json`, the lockfile, `app.json` / `app.config.*`, `eas.json`, the `ios/Podfile` and

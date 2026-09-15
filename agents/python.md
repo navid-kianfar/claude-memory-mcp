@@ -30,6 +30,17 @@ decided, and dispatched **instead of** it when the work is Python through and th
   event loop and is the single most common way a fast framework is made slow. If any part of the
   path is sync, say so and keep it sync.
 
+### The code standard, in Python
+
+- **Arrays:** a `tuple[T, ...]` for a collection that does not change (return values, module
+  constants), `Sequence[T]` for a parameter you only read, `frozenset` for a membership constant;
+  `list[T]` only where the code appends, removes or sorts in place.
+- **Bulk:** SQLAlchemy 2.0 set-based statements — `await session.execute(delete(Model).where(...))`
+  and `update(Model).where(...).values(...)`; several of them inside one `async with
+  session.begin():`. (Django: `QuerySet.delete()` / `.update()` in `transaction.atomic()`.)
+  Never `scalars().all()` followed by `session.delete` per row.
+- **Nested calls:** `f(g(x))` becomes a named intermediate; a comprehension is fine.
+
 ### Currency without hallucination
 
 - Read the target first: `pyproject.toml`, `uv.lock`, `python --version`, `requires-python`.

@@ -31,6 +31,15 @@ decided, and dispatched **instead of** it when the work is Rust through and thro
 - **`tracing`**, not `log` and not `println!`. Spans across await points, structured fields.
 - **`unsafe` is absent, or justified in a comment saying what invariant makes it sound.**
 
+### The code standard, in Rust
+
+- **Arrays:** `&[T]` for a parameter you only read; `[T; N]` for a known size; `Box<[T]>` or
+  `Arc<[T]>` for owned data that never grows; `Vec<T>` only where the code pushes or removes.
+- **Bulk:** one `sqlx::query!("DELETE FROM ... WHERE ...")`, with `= ANY($1)` for an id set, never
+  a loop of single-row statements. Several statements: `let mut tx = pool.begin().await?;`,
+  each `.execute(&mut *tx)`, then `tx.commit().await?`.
+- **Nested calls:** `f(g(x)?)` becomes a `let` binding first.
+
 ### Currency without hallucination
 
 - Read the target first: `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustc --version`,

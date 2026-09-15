@@ -35,6 +35,17 @@ brief lands on you that is really a phone screen, say so and hand it back rather
 - **Gradle Kotlin DSL with a version catalog** (`libs.versions.toml`). Not Groovy, and not
   versions scattered across modules.
 
+### The code standard, in Kotlin
+
+- **Arrays:** read-only `List<T>` (`listOf`, `toList()`) in signatures, return values and state;
+  `MutableList` only where the code mutates it, and never exposed. `IntArray` and friends for a
+  measured primitive hot path.
+- **Bulk:** Exposed `deleteWhere { }` / `update({ }) { }`, or jOOQ `deleteFrom(...).where(...)`,
+  never a loop of single-row calls; several statements inside one `newSuspendedTransaction { }`
+  (or `dsl.transactionResult`). On Spring Data, a `@Modifying @Query` — a derived `deleteBy...`
+  loads every entity first.
+- **Nested calls:** `f(g(x))` becomes a named `val` first.
+
 ### Currency without hallucination
 
 - Read the target first: `libs.versions.toml`, `build.gradle.kts`, the Kotlin and JVM target,

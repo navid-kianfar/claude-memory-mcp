@@ -5,6 +5,7 @@ they are not a MemoryCategory, so they never reach the git-committed
 .claude-memory/ snapshot however long the list gets.
 """
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,6 +14,8 @@ from memory_mcp.db.connection import connect
 from memory_mcp.models import (
     PendingAttachment, Task, TaskAttachment, TaskComment, TaskFilter, TaskTimeEntry,
 )
+
+logger = logging.getLogger(__name__)
 
 # Column order is load-bearing: every read uses this list and _row_to_task maps
 # by position. Append new columns AT THE END so existing indices stay valid.
@@ -959,6 +962,16 @@ class TaskRepository:
 # consistent", it is a loop with a side effect.
 MAX_OUTBOX_ATTEMPTS = 5
 
+# Failures that spend no attempt (an outage) are capped as well: past this many,
+# a failure counts. Retrying through an outage is right; retrying for free for
+# ever is the loop MAX_OUTBOX_ATTEMPTS exists to prevent.
+MAX_TRANSIENT_OUTBOX_FAILURES = 50
+
+
+class OutboxDamagedError(RuntimeError):
+    """A write to one outbox row found the row but could not touch it, even
+    after the table was rebuilt."""
+
 
 class AttachmentRepository:
     """Task attachments: metadata in DuckDB, bytes on disk.
@@ -1448,9 +1461,17 @@ class OutboxRepository:
         ]
 
     def resolve(self, project: str, row_id: str) -> None:
-        """Mirrored successfully - drop the row."""
-        with connect(project) as conn:
-            conn.execute("DELETE FROM task_outbox WHERE id = ?", [row_id])
+        """Mirrored successfully - drop the row.
+
+        Checked, not assumed. On 2026-09-16 the visitoranalytics10 outbox
+        answered `WHERE id = ?` with nothing for rows a plain SELECT returned:
+        this DELETE removed nothing, raised nothing, and the flusher re-sent the
+        same two Done cards every 1.2s for ten hours. A delete that misses a row
+        that is still there rebuilds the table and tries once more.
+        """
+        self._write_row(
+            project, row_id, "DELETE FROM task_outbox WHERE id = ? RETURNING id", [row_id],
+        )
 
     def fail(self, project: str, row_id: str, error: str, *, count: bool = True) -> bool:
         """Mirroring failed. Returns True if the row was given up on.
@@ -1463,21 +1484,55 @@ class OutboxRepository:
         `count=False` records the error without spending an attempt. That is
         for an outage - unreachable, 5xx - where the call had no effect at all
         and retrying is the only right answer. Five mutations during one outage
-        used to burn a row's five attempts and drop the pending change.
+        used to burn a row's five attempts and drop the pending change. Past
+        MAX_TRANSIENT_OUTBOX_FAILURES of those, a failure counts anyway.
         """
-        with connect(project) as conn:
-            conn.execute(
-                "UPDATE task_outbox SET attempts = attempts + ?, last_error = ? "
-                "WHERE id = ?",
-                [1 if count else 0, error[:500], row_id],
+        rows = self._write_row(
+            project, row_id,
+            "UPDATE task_outbox SET "
+            "attempts = attempts + CASE WHEN ? OR transient_failures >= ? THEN 1 ELSE 0 END, "
+            "transient_failures = transient_failures + CASE WHEN ? THEN 0 ELSE 1 END, "
+            "last_error = ? WHERE id = ? RETURNING attempts",
+            [count, MAX_TRANSIENT_OUTBOX_FAILURES, count, error[:500], row_id],
+        )
+        if rows and rows[0][0] >= MAX_OUTBOX_ATTEMPTS:
+            self._write_row(
+                project, row_id, "DELETE FROM task_outbox WHERE id = ? RETURNING id", [row_id],
             )
-            row = conn.execute(
-                "SELECT attempts FROM task_outbox WHERE id = ?", [row_id]
-            ).fetchone()
-            if row and row[0] >= MAX_OUTBOX_ATTEMPTS:
-                conn.execute("DELETE FROM task_outbox WHERE id = ?", [row_id])
-                return True
+            return True
         return False
+
+    def _write_row(self, project: str, row_id: str, sql: str, params: list) -> list:
+        """Run a write addressed to one row and prove it landed.
+
+        No row back is fine when the row is really gone (resolved by a flush
+        that raced this one). A row that a full read still holds means the
+        table's storage has stopped matching it: rebuild, retry once, and raise
+        OutboxDamagedError if even that misses - silence here is a resend loop.
+        """
+        from memory_mcp.db.schema import rebuild_outbox
+
+        with connect(project) as conn:
+            rows = conn.execute(sql, params).fetchall()
+            if rows or not self._holds(conn, row_id):
+                return rows
+            logger.error(
+                "task_outbox in %s holds row %s but a write addressed to it matched "
+                "nothing; rebuilding the table", project, row_id,
+            )
+            rebuild_outbox(conn)
+            rows = conn.execute(sql, params).fetchall()
+            if rows or not self._holds(conn, row_id):
+                return rows
+        raise OutboxDamagedError(
+            f"task_outbox in {project}: row {row_id} cannot be written even after a rebuild"
+        )
+
+    @staticmethod
+    def _holds(conn, row_id: str) -> bool:
+        # A full read compared in Python: the damage is a filter on `id` that
+        # matches nothing, so the check must not be one.
+        return any(r[0] == row_id for r in conn.execute("SELECT id FROM task_outbox").fetchall())
 
     def last_failure(self, project: str) -> str | None:
         """The newest error still sitting in the outbox, if any.
@@ -1682,6 +1737,19 @@ class OutboxRepository:
             with connect(project) as conn:
                 row = conn.execute(
                     "SELECT remote_task_id FROM task_sync WHERE task_id = ? AND link_id = ?",
+                    [task_id, link_id],
+                ).fetchone()
+        except Exception:
+            return None
+        return row[0] if row else None
+
+    def last_pushed_state(self, project: str, task_id: str, link_id: int) -> str | None:
+        """The state the board was last known to hold for this task's card: what
+        we last sent, or what an import last read."""
+        try:
+            with connect(project) as conn:
+                row = conn.execute(
+                    "SELECT last_pushed_state FROM task_sync WHERE task_id = ? AND link_id = ?",
                     [task_id, link_id],
                 ).fetchone()
         except Exception:

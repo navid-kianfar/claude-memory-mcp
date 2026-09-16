@@ -60,6 +60,7 @@ from memory_mcp.providers import (
     Container, ProviderAuthError, ProviderError, RemoteTimeEntry, TaskProvider,
     TransientProviderError,
 )
+from memory_mcp.repositories.task_repository import OutboxDamagedError
 from memory_mcp.services.echo_log import EchoLog
 from memory_mcp.db.registry import (
     _UNSET,
@@ -1185,10 +1186,18 @@ class TaskBridge:
                 else:
                     skipped += 1
                 self._outbox.resolve(slug, row["id"])
+            except OutboxDamagedError as e:
+                # The call went out; only the local cleanup failed, and failing
+                # the row would hit the same damage. Stop loudly - the state
+                # guard in _apply_state keeps the retry from re-sending it.
+                logger.error("asoode mirror for %s stopped: %s", slug, e)
+                return {"flushed": flushed, "failed": failed + 1, "skipped": skipped,
+                        "abandoned": abandoned, "reason": str(e)}
             except TransientProviderError as e:
                 # An outage is not the row's fault: keep it, note the error,
-                # spend no attempt. The change is still pending, not failing.
-                self._outbox.fail(slug, row["id"], str(e), count=False)
+                # spend no attempt - up to a cap, past which it counts.
+                if self._outbox.fail(slug, row["id"], str(e), count=False):
+                    abandoned += 1
                 failed += 1
                 break
             except ProviderError as e:
@@ -1273,8 +1282,7 @@ class TaskBridge:
         # everything it has: reconcile the state and the column.
         if created_here:
             return True
-        self._apply_state(slug, task, link, provider, remote_id)
-        return True
+        return self._apply_state(slug, task, link, provider, remote_id)
 
     def _ensure_remote(self, slug: str, task, link: dict, provider) -> tuple[str, bool]:
         """The remote id for a task, creating the card when there is none.
@@ -1354,7 +1362,8 @@ class TaskBridge:
         if task.role and caps.supports_labels:
             provider.set_role_label(remote_id, container_id, task.role)
         if task.state.value != "todo":
-            self._apply_state(slug, task, link, provider, remote_id)
+            # A card just created sits in ToDo whatever task_sync last said.
+            self._apply_state(slug, task, link, provider, remote_id, force=True)
         if task.archived_at is not None and caps.supports_archive:
             provider.archive(remote_id, True)
 
@@ -1379,9 +1388,24 @@ class TaskBridge:
                 remote_id, container_id, task.assignee, payload.get("assignee_before"),
             )
 
-    def _apply_state(self, slug: str, task, link: dict, provider, remote_id: str) -> None:
-        """Make the remote state - and the column - match the local one."""
-        provider.set_state(remote_id, task.state.value)
+    def _apply_state(
+        self, slug: str, task, link: dict, provider, remote_id: str, *, force: bool = False,
+    ) -> bool:
+        """Make the remote state - and the column - match the local one.
+
+        Returns False, sending nothing, when the board already holds this state
+        by our own record: several queued state rows converge on one send, and
+        a row that comes back - an outbox that could not delete it, a retry of a
+        call that landed - cannot put the same change-state and reposition on
+        the wire again. On 2026-09-16 that pair went out ~5,000 times per card.
+        `force` is for `push`, the repair path that must resend regardless.
+        """
+        state = task.state.value
+        if not force and self._outbox is not None and (
+            self._outbox.last_pushed_state(slug, task.id, link["id"]) == state
+        ):
+            return False
+        provider.set_state(remote_id, state)
         # asoode keeps state and column independent, so a Done card would sit in
         # To Do forever without this. Best-effort: the state is the truth, the
         # column is presentation, and failing to move it must not fail the flush.
@@ -1391,7 +1415,8 @@ class TaskBridge:
                 provider.move(remote_id, target_list)
             except ProviderError:
                 pass
-        self._remember(slug, task.id, link["id"], remote_id, task.state.value)
+        self._remember(slug, task.id, link["id"], remote_id, state)
+        return True
 
     def _flush_delete(self, slug: str, payload: dict) -> bool:
         """A task deleted locally: close its card(s), then archive them.
@@ -1504,6 +1529,9 @@ class TaskBridge:
                     continue
                 current = self._tasks.get(slug, local_id)
                 if current.title != title or current.state.value != state:
+                    # The board's state, remembered first: the update queues a
+                    # state row, and the board needs no copy of its own change.
+                    self._outbox.remember(slug, local_id, link["id"], remote.id, state)
                     self._tasks.update(UpdateTaskRequest(
                         project=slug, task_id=local_id, title=title,
                         state=TaskState(state),
@@ -2146,7 +2174,7 @@ class TaskBridge:
                 # An existing card: carry the real state and column over.
                 # Skipped for todo so a re-push of an unchanged list is cheap.
                 if not created and task.state.value != "todo":
-                    self._apply_state(slug, task, link, provider, remote_id)
+                    self._apply_state(slug, task, link, provider, remote_id, force=True)
                 pushed.append({
                     "task_id": task.id, "remote_id": remote_id,
                     "title": task.title, "state": task.state.value,

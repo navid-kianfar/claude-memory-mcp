@@ -238,7 +238,7 @@ def test_migration_adds_v6_bridge_tables(tmp_path):
 
         outbox_cols = {r[1] for r in conn.execute("PRAGMA table_info('task_outbox')").fetchall()}
         assert {"id", "task_id", "link_id", "op", "payload",
-                "created_at", "attempts", "last_error"} == outbox_cols
+                "created_at", "attempts", "last_error", "transient_failures"} == outbox_cols
 
         sync_cols = {r[1] for r in conn.execute("PRAGMA table_info('task_sync')").fetchall()}
         assert {"task_id", "link_id", "remote_task_id", "remote_updated_at",
@@ -628,7 +628,7 @@ def test_v16_db_with_time_gains_the_remote_id(tmp_path):
         assert get_schema_version(conn) == 16
         assert "remote_id" not in columns
 
-        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION == 17
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION == 18
 
         rows = conn.execute(
             "SELECT id, task_id, session_id, mirrored_at IS NOT NULL, remote_id "
@@ -636,7 +636,7 @@ def test_v16_db_with_time_gains_the_remote_id(tmp_path):
         ).fetchall()
         assert rows == [("e1", "t1", "s1", True, None)], "the existing stretch keeps its shape"
         conn.execute("UPDATE task_time_entries SET remote_id = 'board-1' WHERE id = 'e1'")
-        assert run_migrations(conn) == 17, "idempotent"
+        assert run_migrations(conn) == 18, "idempotent"
         assert conn.execute("SELECT remote_id FROM task_time_entries").fetchall() == [("board-1",)]
     finally:
         conn.close()
@@ -656,7 +656,7 @@ def test_v17_time_entries_match_between_fresh_and_migrated(tmp_path):
              migrated.execute("PRAGMA table_info('task_time_entries')").fetchall()]
         assert a == b
         assert _indexes(fresh, "task_time_entries") == _indexes(migrated, "task_time_entries")
-        assert get_schema_version(fresh) == get_schema_version(migrated) == 17
+        assert get_schema_version(fresh) == get_schema_version(migrated) == 18
     finally:
         fresh.close()
         migrated.close()

@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 17
+CURRENT_SCHEMA_VERSION = 18
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -199,6 +199,65 @@ _TASK_DDL = (
 )
 
 
+# The asoode outbox. A queue: rows are inserted and deleted constantly from more
+# than one thread, and it is the table DuckDB's storage has broken twice.
+#
+# Deliberately NO PRIMARY KEY and, since v18, NO INDEX. First the ART index got
+# into a state where a row could be read but never deleted ("Failed to delete
+# all rows from index"), so the flusher retried it forever and re-posted its side
+# effect each time. Then, on 2026-09-16, the rebuilt table did it again without
+# the key: `WHERE id = ?` matched nothing for rows a plain SELECT returned, so
+# every resolve and every fail was a silent no-op and two Done cards were
+# re-sent every 1.2s for ten hours. The table is small; an index buys nothing a
+# scan does not, and every one is one more structure that can disagree with the
+# rows. OutboxRepository checks that its writes land and rebuilds when not.
+_OUTBOX_DDL = """
+    CREATE TABLE IF NOT EXISTS task_outbox (
+        id         VARCHAR NOT NULL,
+        task_id    VARCHAR NOT NULL,
+        -- Null until a flush resolves which board the task routes to. The local
+        -- store must not have to know about links to record that something
+        -- changed, or every task mutation would depend on the registry.
+        link_id    INTEGER,
+        op         VARCHAR NOT NULL,
+        payload    VARCHAR,
+        created_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+        attempts   INTEGER NOT NULL DEFAULT 0,
+        last_error VARCHAR,
+        -- Failures that spent no attempt (an outage). Capped too: past a limit
+        -- they start counting, so no row can retry forever for free.
+        transient_failures INTEGER NOT NULL DEFAULT 0
+    )
+"""
+
+_OUTBOX_COLUMNS = (
+    "id", "task_id", "link_id", "op", "payload", "created_at", "attempts",
+    "last_error", "transient_failures",
+)
+
+
+def rebuild_outbox(conn: duckdb.DuckDBPyConnection) -> None:
+    """Copy task_outbox into a fresh table and swap it in, rows and order kept.
+
+    The repair for storage that no longer answers `WHERE id = ?`: a plain read
+    of every row still works, and a table written from that read is clean. Any
+    index is dropped on the way - see _OUTBOX_DDL. Raises on failure; the caller
+    decides whether that may stop anything.
+    """
+    present = {row[1] for row in conn.execute("PRAGMA table_info('task_outbox')").fetchall()}
+    select = ", ".join(c if c in present else "0" for c in _OUTBOX_COLUMNS)
+    conn.execute("DROP TABLE IF EXISTS task_outbox_rebuild")
+    conn.execute(_OUTBOX_DDL.replace("task_outbox (", "task_outbox_rebuild (", 1))
+    conn.execute(
+        f"INSERT INTO task_outbox_rebuild ({', '.join(_OUTBOX_COLUMNS)}) "
+        f"SELECT {select} FROM task_outbox ORDER BY epoch_us(created_at), rowid"
+    )
+    for name in ("idx_outbox_id", "idx_outbox_task", "idx_outbox_created"):
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+    conn.execute("DROP TABLE task_outbox")
+    conn.execute("ALTER TABLE task_outbox_rebuild RENAME TO task_outbox")
+
+
 _SYNC_DDL = (
     """
     CREATE TABLE IF NOT EXISTS task_sync (
@@ -211,31 +270,7 @@ _SYNC_DDL = (
         PRIMARY KEY (task_id, link_id)
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS task_outbox (
-        -- Deliberately NOT a PRIMARY KEY. This is a queue: rows are inserted and
-        -- deleted constantly from more than one thread, and DuckDB's ART index
-        -- got into a state where a row could be read but never deleted ("Failed
-        -- to delete all rows from index"), so the flusher retried it forever and
-        -- re-posted its side effect each time. The table is small and always
-        -- addressed by id through the non-unique index below; the PK bought
-        -- nothing and cost that.
-        id         VARCHAR NOT NULL,
-        task_id    VARCHAR NOT NULL,
-        -- Null until a flush resolves which board the task routes to. The local
-        -- store must not have to know about links to record that something
-        -- changed, or every task mutation would depend on the registry.
-        link_id    INTEGER,
-        op         VARCHAR NOT NULL,
-        payload    VARCHAR,
-        created_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
-        attempts   INTEGER NOT NULL DEFAULT 0,
-        last_error VARCHAR
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_outbox_id ON task_outbox(id)",
-    "CREATE INDEX IF NOT EXISTS idx_outbox_task ON task_outbox(task_id)",
-    "CREATE INDEX IF NOT EXISTS idx_outbox_created ON task_outbox(created_at)",
+    _OUTBOX_DDL,
 )
 
 
@@ -848,6 +883,32 @@ def migrate_v16_to_v17(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (17)")
 
 
+def migrate_v17_to_v18(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v17 -> v18: rebuild task_outbox - repaired, unindexed, and with
+    `transient_failures`.
+
+    The rebuild is also the repair: an outbox whose storage stopped matching
+    `WHERE id = ?` (see _OUTBOX_DDL) comes out of it clean, so upgrading stops a
+    running resend loop without anyone touching the file. If the rebuild itself
+    fails the column is added in place, and the version is stamped only once the
+    column is really there - the v13 rule.
+    """
+    try:
+        rebuild_outbox(conn)
+    except Exception:
+        conn.execute("DROP TABLE IF EXISTS task_outbox_rebuild")
+        conn.execute(
+            "ALTER TABLE task_outbox ADD COLUMN IF NOT EXISTS "
+            "transient_failures INTEGER NOT NULL DEFAULT 0"
+        )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info('task_outbox')").fetchall()}
+    if "transient_failures" not in columns:
+        raise RuntimeError(
+            "schema v18: could not add task_outbox.transient_failures - not stamping"
+        )
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (18)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -921,6 +982,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 17:
         migrate_v16_to_v17(conn)
         version = 17
+    if version < 18:
+        migrate_v17_to_v18(conn)
+        version = 18
     return version
 
 

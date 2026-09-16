@@ -450,6 +450,22 @@ class TestAPlanIsSafeToRetry:
         assert second["deduplicated"] is False
         assert set(ids_of(second)).isdisjoint(ids_of(first))
 
+    def test_a_plan_record_past_the_window_is_pruned_by_the_next_plan(
+        self, planner, project,
+    ):
+        """A record that can no longer match is dead weight; the table must not
+        grow by one row per plan for the life of the project."""
+        planner.plan(project, REQUEST, ITEMS)
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE task_plans SET created_at = created_at - INTERVAL 31 MINUTE"
+            )
+        other_items = [{**item, "title": item["title"] + " again"} for item in ITEMS]
+
+        planner.plan(project, REQUEST, other_items)
+
+        assert count(project, "task_plans") == 1
+
     def test_a_retry_after_a_rolled_back_plan_is_not_a_retry(self, project):
         """The record rolls back with the plan: a retry must create the set,
         not answer with the ids of tasks that were never committed."""
@@ -529,9 +545,11 @@ class TestAnExistingDatabaseUpgradesIntoIt:
         first = planner.plan(project, REQUEST, ITEMS)
         again = planner.plan(project, REQUEST, ITEMS)
 
+        from memory_mcp.db.schema import CURRENT_SCHEMA_VERSION
+
         with connect(project) as conn:
             version = conn.execute("SELECT max(version) FROM schema_version").fetchone()[0]
-        assert version == 16
+        assert version == CURRENT_SCHEMA_VERSION
         assert ids_of(again) == ids_of(first)
         assert container.task_service.get(project, kept.id).title == "Made before the upgrade"
         assert container.task_service.list_tasks(project, limit=50).total == 4

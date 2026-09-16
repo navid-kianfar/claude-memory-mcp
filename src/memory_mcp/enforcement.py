@@ -1160,6 +1160,50 @@ def format_session_end(slug: str) -> str:
     )
 
 
+# ---------- a task closed without ever being started ----------
+#
+# Measured 2026-09-15: every local task with no time was closed straight from
+# todo. On the latest batch (2026-09-11, five plan tasks closed in 50 seconds)
+# the tasks had no claim and no comment of their own, and the edit gate was open
+# because another task was in progress - so the close was the FIRST moment any
+# code could see the pattern. The reason already sat in `time_note.reason`, and
+# the next four closes went ahead regardless. Hence a separate, top-level line
+# that names what happened and the call to make next.
+
+_START_NEXT = (
+    "Call memory_task_start(task_id, session_id=<yours>) on the next task BEFORE "
+    "working it, so its clock runs while the work does."
+)
+
+
+def never_started_warning(title: str, time_note: dict | None) -> str | None:
+    """The line a close reply leads with when the task was never started, or None.
+
+    `time_note` is what the close recorded (`TaskDetail.time_note`); only a note
+    marked `never_started` produces a warning, so a task that was clocked, or
+    recovered from its state history, closes as quietly as it always did.
+    """
+    if not time_note or not time_note.get("never_started"):
+        return None
+    head = f"CLOSED WITHOUT BEING STARTED: {title!r} never had a clock running."
+    running_id = time_note.get("running_task_id")
+    if running_id:
+        running = time_note.get("running_task_title") or running_id
+        return (
+            f"{head} This session's clock was running on {running!r} ({running_id}) "
+            f"meanwhile, so the work was clocked to THAT task and nothing was "
+            f"recorded here. {_START_NEXT} Pause the other one with "
+            f"memory_task_update(state='paused') when you move off it - starting a "
+            f"task stops no other clock."
+        )
+    if time_note.get("recorded"):
+        return (
+            f"{head} Its {time_note.get('minutes')} minutes are an ESTIMATE from "
+            f"{time_note.get('from')}, marked manual. {_START_NEXT}"
+        )
+    return f"{head} No time was recorded: {time_note.get('reason')}. {_START_NEXT}"
+
+
 def rules_text_for_project(
     slug: str, *, cwd: str | None = None, session_id: str | None = None,
 ) -> str:

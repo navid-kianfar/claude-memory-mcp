@@ -558,7 +558,7 @@ def test_v15_db_with_rows_gains_the_plan_record(tmp_path):
         assert get_schema_version(conn) == 15
         assert "task_plans" not in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
 
-        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION == 16
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION >= 16
 
         assert "task_plans" in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
         assert "idx_task_plans_hash" in _indexes(conn, "task_plans")
@@ -570,7 +570,7 @@ def test_v15_db_with_rows_gains_the_plan_record(tmp_path):
             "INSERT INTO task_plans (id, request_hash, task_ids) VALUES (?, ?, ?)",
             ["p1", "abc", ["t1"]],
         )
-        assert run_migrations(conn) == 16, "idempotent"
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION, "idempotent"
         assert conn.execute("SELECT task_ids FROM task_plans").fetchall() == [(["t1"],)]
     finally:
         conn.close()
@@ -590,7 +590,85 @@ def test_v16_plan_record_matches_between_fresh_and_migrated(tmp_path):
              migrated.execute("PRAGMA table_info('task_plans')").fetchall()]
         assert a == b
         assert _indexes(fresh, "task_plans") == _indexes(migrated, "task_plans")
-        assert get_schema_version(fresh) == get_schema_version(migrated) == 16
+        assert get_schema_version(fresh) == get_schema_version(migrated) == CURRENT_SCHEMA_VERSION
     finally:
         fresh.close()
         migrated.close()
+
+
+def _make_v16_db(path) -> None:
+    """A database at v16 WITH time in it: the full schema minus the v17 remote id
+    on time entries, and a clocked stretch already mirrored."""
+    conn = duckdb.connect(str(path))
+    create_schema(conn)
+    # DuckDB refuses to drop a column from an indexed table, so the index comes
+    # off and goes back on: a real v16 table HAS it, and the ADD must cope.
+    conn.execute("DROP INDEX idx_task_time_task")
+    conn.execute("ALTER TABLE task_time_entries DROP COLUMN remote_id")
+    conn.execute("CREATE INDEX idx_task_time_task ON task_time_entries (task_id)")
+    conn.execute("DELETE FROM schema_version WHERE version >= 17")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (16)")
+    conn.execute(
+        "INSERT INTO tasks (id, title, state, source) VALUES ('t1', 'timed earlier', 'done', 'user')"
+    )
+    conn.execute(
+        "INSERT INTO task_time_entries (id, task_id, begin_at, end_at, mirrored_at, session_id) "
+        "VALUES ('e1', 't1', TIMESTAMP '2026-09-15 18:13:32.070311', "
+        "TIMESTAMP '2026-09-15 18:39:41.527999', TIMESTAMP '2026-09-15 18:40:00', 's1')"
+    )
+    conn.close()
+
+
+def test_v16_db_with_time_gains_the_remote_id(tmp_path):
+    db = tmp_path / "v16.duckdb"
+    _make_v16_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        columns = {r[1] for r in conn.execute("PRAGMA table_info('task_time_entries')").fetchall()}
+        assert get_schema_version(conn) == 16
+        assert "remote_id" not in columns
+
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION == 17
+
+        rows = conn.execute(
+            "SELECT id, task_id, session_id, mirrored_at IS NOT NULL, remote_id "
+            "FROM task_time_entries"
+        ).fetchall()
+        assert rows == [("e1", "t1", "s1", True, None)], "the existing stretch keeps its shape"
+        conn.execute("UPDATE task_time_entries SET remote_id = 'board-1' WHERE id = 'e1'")
+        assert run_migrations(conn) == 17, "idempotent"
+        assert conn.execute("SELECT remote_id FROM task_time_entries").fetchall() == [("board-1",)]
+    finally:
+        conn.close()
+
+
+def test_v17_time_entries_match_between_fresh_and_migrated(tmp_path):
+    fresh = duckdb.connect(str(tmp_path / "fresh17.duckdb"))
+    migrated_path = tmp_path / "migrated17.duckdb"
+    _make_v16_db(migrated_path)
+    migrated = duckdb.connect(str(migrated_path))
+    try:
+        create_schema(fresh)
+        run_migrations(migrated)
+        a = [(r[1], r[2], r[3], r[4]) for r in
+             fresh.execute("PRAGMA table_info('task_time_entries')").fetchall()]
+        b = [(r[1], r[2], r[3], r[4]) for r in
+             migrated.execute("PRAGMA table_info('task_time_entries')").fetchall()]
+        assert a == b
+        assert _indexes(fresh, "task_time_entries") == _indexes(migrated, "task_time_entries")
+        assert get_schema_version(fresh) == get_schema_version(migrated) == 17
+    finally:
+        fresh.close()
+        migrated.close()
+
+
+def test_v1_db_migrates_all_the_way_to_the_time_remote_id(tmp_path):
+    db = tmp_path / "legacy.duckdb"
+    _make_v1_db(db)
+    conn = duckdb.connect(str(db))
+    try:
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION
+        columns = {r[1] for r in conn.execute("PRAGMA table_info('task_time_entries')").fetchall()}
+        assert {"mirrored_at", "session_id", "remote_id"} <= columns
+    finally:
+        conn.close()

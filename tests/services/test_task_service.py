@@ -1000,6 +1000,254 @@ class TestClockIsMechanical:
         assert detail.time_note["minutes"] == _MAX_RECONSTRUCTED_MINUTES
 
 
+def _age(slug, *, minutes):
+    """Move everything the project has recorded `minutes` into the past.
+
+    The same as that much time passing before the next call: sessions, tasks,
+    claims, comments, provenance and time entries all shift together, so their
+    order and the gaps between them are kept.
+    """
+    shifts = (
+        "UPDATE sessions SET started_at = started_at - INTERVAL (?) MINUTE",
+        "UPDATE tasks SET created_at = created_at - INTERVAL (?) MINUTE, "
+        "claimed_at = claimed_at - INTERVAL (?) MINUTE",
+        "UPDATE task_comments SET created_at = created_at - INTERVAL (?) MINUTE",
+        "UPDATE provenance SET created_at = created_at - INTERVAL (?) MINUTE",
+        "UPDATE task_time_entries SET begin_at = begin_at - INTERVAL (?) MINUTE, "
+        "end_at = end_at - INTERVAL (?) MINUTE",
+    )
+    with get_connection(slug) as conn:
+        for statement in shifts:
+            placeholders = statement.count("?")
+            conn.execute(statement, [minutes] * placeholders)
+
+
+def _session(container, slug, session_id="s-closing"):
+    container.session_repo.insert(slug, session_id)
+    return session_id
+
+
+class TestNeverStartedTaskIsEstimated:
+    """A task closed straight from todo gets an ESTIMATE, not silence.
+
+    Measured on 2026-09-15: every local task with no time entry was closed
+    without ever being started, so there was no state history to recover from.
+    The user chose an honest estimate over refusing the close: manual, capped,
+    and naming the evidence it starts from.
+    """
+
+    def test_session_start_is_the_start_when_nothing_later_exists(self, container):
+        slug = _project(container, "t-est-session")
+        task = _add(container, slug)
+        session = _session(container, slug)
+        _age(slug, minutes=30)
+
+        detail = container.task_service.done(slug, task.id, session_id=session)
+
+        assert detail.time_note["recorded"] is True
+        assert detail.time_note["estimated"] is True
+        assert detail.time_note["from"] == "session-start"
+        assert detail.time_note["minutes"] == 30
+        assert detail.time_note["capped"] is False
+        entries = container.task_repo.entries_for(slug, task.id)
+        assert len(entries) == 1
+        assert entries[0].manual is True, "an estimate is not clocked time"
+        assert entries[0].session_id == session
+
+    def test_never_earlier_than_the_task_was_created(self, container):
+        slug = _project(container, "t-est-created")
+        session = _session(container, slug)
+        _age(slug, minutes=60)
+        task = _add(container, slug)
+        _age(slug, minutes=15)
+
+        detail = container.task_service.done(slug, task.id, session_id=session)
+
+        assert detail.time_note["from"] == "task-created"
+        assert detail.time_note["minutes"] == 15
+
+    def test_a_claim_later_than_the_session_start_wins(self, container):
+        slug = _project(container, "t-est-claim")
+        task = _add(container, slug)
+        session = _session(container, slug)
+        _age(slug, minutes=40)
+        assert container.task_service.claim_next(slug, session).id == task.id
+        _age(slug, minutes=15)
+
+        detail = container.task_service.done(slug, task.id, session_id=session)
+
+        assert detail.time_note["from"] == "claim"
+        assert detail.time_note["minutes"] == 15
+
+    def test_the_first_work_comment_is_evidence_without_a_session(self, container):
+        from memory_mcp.services.task_service import PLAN_REQUEST_COMMENT_PREFIX
+
+        slug = _project(container, "t-est-comment")
+        task = _add(container, slug)
+        container.task_service.comment(
+            slug, task.id, f"{PLAN_REQUEST_COMMENT_PREFIX}\n\nbuild it",
+        )
+        _age(slug, minutes=50)
+        container.task_service.comment(slug, task.id, "found the trap in the importer")
+        _age(slug, minutes=20)
+
+        detail = container.task_service.done(slug, task.id)
+
+        assert detail.time_note["from"] == "first-comment"
+        assert detail.time_note["minutes"] == 20
+
+    def test_the_plans_own_comment_is_not_evidence(self, container):
+        from memory_mcp.services.task_service import PLAN_REQUEST_COMMENT_PREFIX
+
+        slug = _project(container, "t-est-plan-comment")
+        task = _add(container, slug)
+        container.task_service.comment(
+            slug, task.id, f"{PLAN_REQUEST_COMMENT_PREFIX}\n\nbuild it",
+        )
+        _age(slug, minutes=50)
+
+        detail = container.task_service.done(slug, task.id)
+
+        assert detail.time_note["recorded"] is False
+        assert "no claim, comment or session" in detail.time_note["reason"]
+        assert container.task_repo.entries_for(slug, task.id) == []
+
+    def test_three_tasks_closed_in_sequence_split_the_time(self, container):
+        """The measured batch: plan tasks closed one after another. Each gets
+        the stretch since the previous close, never the same stretch twice."""
+        slug = _project(container, "t-est-batch")
+        first = _add(container, slug, title="One")
+        second = _add(container, slug, title="Two")
+        third = _add(container, slug, title="Three")
+        session = _session(container, slug)
+        _age(slug, minutes=30)
+
+        one = container.task_service.done(slug, first.id, session_id=session)
+        _age(slug, minutes=20)
+        container.task_service.update_routed(
+            UpdateTaskRequest(project=slug, task_id=second.id, state=TaskState.DONE),
+            session,
+        )
+        two = container.task_service.close_time_note(slug, second.id)
+        _age(slug, minutes=10)
+        three = container.task_service.done(slug, third.id, session_id=session)
+
+        assert (one.time_note["from"], one.time_note["minutes"]) == ("session-start", 30)
+        assert (two["from"], two["minutes"]) == ("session-previous-close", 20)
+        assert (three.time_note["from"], three.time_note["minutes"]) == (
+            "session-previous-close", 10,
+        )
+        stretches = sorted(
+            (entry.begin_at, entry.end_at)
+            for task in (first, second, third)
+            for entry in container.task_repo.entries_for(slug, task.id)
+        )
+        assert len(stretches) == 3
+        for earlier, later in zip(stretches, stretches[1:]):
+            assert earlier[1] <= later[0], "estimated stretches must not overlap"
+
+    def test_a_close_right_after_the_previous_one_records_nothing(self, container):
+        slug = _project(container, "t-est-quick")
+        first = _add(container, slug, title="One")
+        second = _add(container, slug, title="Two")
+        session = _session(container, slug)
+        _age(slug, minutes=30)
+        container.task_service.done(slug, first.id, session_id=session)
+
+        detail = container.task_service.done(slug, second.id, session_id=session)
+
+        assert detail.time_note["recorded"] is False
+        assert detail.time_note["from"] == "session-previous-close"
+        assert container.task_repo.entries_for(slug, second.id) == []
+
+    def test_the_estimate_is_capped(self, container):
+        from memory_mcp.services.task_service import _MAX_RECONSTRUCTED_MINUTES
+
+        slug = _project(container, "t-est-cap")
+        task = _add(container, slug)
+        session = _session(container, slug)
+        _age(slug, minutes=24 * 60)
+
+        detail = container.task_service.done(slug, task.id, session_id=session)
+
+        assert detail.time_note["capped"] is True
+        assert detail.time_note["minutes"] == _MAX_RECONSTRUCTED_MINUTES
+        entry = container.task_repo.entries_for(slug, task.id)[0]
+        span = entry.end_at - entry.begin_at
+        assert int(span.total_seconds() // 60) == _MAX_RECONSTRUCTED_MINUTES
+
+    def test_nothing_is_estimated_while_the_session_clocks_another_task(self, container):
+        """That clock already holds the stretch; a second entry counts it twice."""
+        slug = _project(container, "t-est-running")
+        parent = _add(container, slug, title="Parent")
+        task = _add(container, slug, title="Worked under the parent's clock")
+        session = _session(container, slug)
+        container.task_service.start(slug, parent.id, session)
+        _age(slug, minutes=30)
+
+        detail = container.task_service.done(slug, task.id, session_id=session)
+
+        assert detail.time_note["recorded"] is False
+        assert detail.time_note["running_task_id"] == parent.id
+        assert container.task_repo.entries_for(slug, task.id) == []
+
+    def test_another_sessions_clock_does_not_block_the_estimate(self, container):
+        slug = _project(container, "t-est-other-session")
+        other = _add(container, slug, title="Someone else's")
+        task = _add(container, slug)
+        container.task_service.start(slug, other.id, _session(container, slug, "s-other"))
+        session = _session(container, slug)
+        _age(slug, minutes=25)
+
+        detail = container.task_service.done(slug, task.id, session_id=session)
+
+        assert detail.time_note["recorded"] is True
+        assert detail.time_note["minutes"] == 25
+
+    def test_update_to_cancelled_estimates_like_done(self, container):
+        slug = _project(container, "t-est-cancel")
+        task = _add(container, slug)
+        session = _session(container, slug)
+        _age(slug, minutes=12)
+
+        container.task_service.update_routed(
+            UpdateTaskRequest(project=slug, task_id=task.id, state=TaskState.CANCELLED),
+            session,
+        )
+
+        note = container.task_service.close_time_note(slug, task.id)
+        assert (note["from"], note["minutes"]) == ("session-start", 12)
+        assert len(container.task_repo.entries_for(slug, task.id)) == 1
+
+    def test_an_inbound_close_estimates_nothing(self, container):
+        """A card closed on the board is not work done here."""
+        slug = _project(container, "t-est-inbound")
+        task = _add(container, slug)
+        session = _session(container, slug)
+        _age(slug, minutes=30)
+
+        with container.task_service.suppress_mirroring():
+            container.task_service.update_routed(
+                UpdateTaskRequest(project=slug, task_id=task.id, state=TaskState.DONE),
+                session,
+            )
+
+        assert container.task_repo.entries_for(slug, task.id) == []
+        assert container.task_service.close_time_note(slug, task.id) is None
+
+    def test_reclosing_a_closed_task_estimates_nothing(self, container):
+        slug = _project(container, "t-est-reclose")
+        task = _add(container, slug)
+        container.task_service.done(slug, task.id)
+        session = _session(container, slug)
+        _age(slug, minutes=30)
+
+        detail = container.task_service.done(slug, task.id, session_id=session)
+
+        assert detail.time_note is None
+        assert container.task_repo.entries_for(slug, task.id) == []
+
+
 class TestParentTimeRollsUpOnRead:
     """A parent's card reads 0 on asoode because the time is on its children.
 
@@ -1066,6 +1314,15 @@ class TestAddIsSafeToRetry:
 
         with get_connection(slug) as conn:
             assert conn.execute("SELECT count(*) FROM task_outbox").fetchone()[0] == queued
+
+    def test_whitespace_around_the_description_is_still_the_same_add(self, container):
+        slug = _project(container, "t-retry-trim")
+        first = self._added(container, slug, description="the same words\n")
+
+        again = self._added(container, slug, description="  the same words")
+
+        assert again.is_deduplicated is True
+        assert again.task.id == first.task.id
 
     def test_a_different_description_is_a_new_task(self, container):
         slug = _project(container, "t-retry-desc")

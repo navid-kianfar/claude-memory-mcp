@@ -29,6 +29,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 
 from memory_mcp.config import settings
 from memory_mcp.context import current_user
@@ -73,6 +74,40 @@ _MIRRORED_FIELDS = frozenset({
 # The longest stretch _reconstruct_time will credit to a task closed with no
 # clock. A card left in In Progress overnight must not claim the whole night.
 _MAX_RECONSTRUCTED_MINUTES = 240
+
+# The closed states as the provenance log spells them, for the evidence lookup.
+_CLOSED_STATE_VALUES = tuple(sorted(state.value for state in _CLOSED_STATES))
+
+# How memory_task_plan opens the comment that copies the request onto every task
+# it creates. That comment is written in the plan's own transaction, so it is no
+# evidence that anyone started working the task. The planner builds the body
+# from this same text; the two must stay in step.
+PLAN_REQUEST_COMMENT_PREFIX = "Decomposed from this request:"
+
+
+class EstimateEvidence(StrEnum):
+    """Where an estimated stretch for a never-started task begins - the `from`
+    on its time note, so the number always says what it rests on."""
+
+    CLAIM = "claim"
+    FIRST_COMMENT = "first-comment"
+    PREVIOUS_CLOSE = "session-previous-close"
+    SESSION_START = "session-start"
+    # Not evidence of work on its own: the floor every other source is raised
+    # to, because nobody works a task before it exists.
+    TASK_CREATED = "task-created"
+
+
+def _is_close(operation: str, details: dict) -> bool:
+    """Whether a provenance row records a task being closed: a `task_done`, or a
+    `task_update` that moved the state into a closed one."""
+    if operation == "task_done":
+        return True
+    if operation != "task_update":
+        return False
+    state_to = details.get("state_to")
+    return state_to in _CLOSED_STATE_VALUES and details.get("state_from") != state_to
+
 
 # Set while an INBOUND write is being applied, so it is not mirrored straight
 # back out. A contextvar rather than an attribute on the service: the service is
@@ -241,9 +276,10 @@ class TaskService:
         an identical add is a deliberate second copy and is created.
         """
         title = request.title.strip()
+        description = request.description.strip() if request.description is not None else None
         with self._project_lock(self._add_locks, request.project):
             existing = self._task_repo.recent_identical(
-                request.project, title, request.description, request.parent_id,
+                request.project, title, description, request.parent_id,
                 ADD_RETRY_WINDOW_SECONDS,
             )
             if existing is not None:
@@ -277,12 +313,15 @@ class TaskService:
                 return tuple(by_id[task_id] for task_id in plan)
         return None
 
-    def record_plan(self, project: str, request_hash: str, task_ids: Sequence[str]) -> None:
-        """Remember the tasks one plan created, so a retry can find them. Joins
-        an open transaction, so it rolls back with the plan it describes."""
+    def record_plan(
+        self, project: str, request_hash: str, task_ids: Sequence[str], retain_seconds: int,
+    ) -> None:
+        """Remember the tasks one plan created, so a retry can find them, and
+        drop records older than `retain_seconds`. Joins an open transaction, so
+        it rolls back with the plan it describes."""
         plan_uuid = uuid.uuid4()
         plan_id = str(plan_uuid)
-        self._task_repo.record_plan(project, plan_id, request_hash, task_ids)
+        self._task_repo.record_plan(project, plan_id, request_hash, task_ids, retain_seconds)
 
     def create_routed(self, request: CreateTaskRequest) -> tuple[Task, dict | None]:
         """Create a task and say where it routes: `(task, routing)`.
@@ -524,12 +563,17 @@ class TaskService:
             )
         return routing, new_id, new_id != before.link_id
 
-    def update_routed(self, request: UpdateTaskRequest) -> tuple[Task, list[str], dict | None]:
+    def update_routed(
+        self, request: UpdateTaskRequest, session_id: str | None = None,
+    ) -> tuple[Task, list[str], dict | None]:
         """update() plus the routing decision when `path` or `target` was passed.
 
         Returns (task, changed, routing). A link change shows in `changed` as
         `link_id`; it queues no mirror op of its own, because the pending create
         routes by link_id when it flushes and a task with a card cannot get here.
+
+        `session_id` is the memory session making the change. Only a close reads
+        it: it is what an estimate for a never-started task is split by.
         """
         before = self._require(request.project, request.task_id)
 
@@ -627,9 +671,14 @@ class TaskService:
             # history evidences one. Same rule as done(), because `update(state=
             # 'done')` is the other way to finish a task and must not be the
             # cheap way to finish it at zero minutes.
-            if request.state in _CLOSED_STATES and not closed:
+            # `before`, not the row as it is now: the release above has already
+            # cleared the claim, and the claim is part of the evidence.
+            if (
+                request.state in _CLOSED_STATES and not closed
+                and before.state not in _CLOSED_STATES
+            ):
                 recovered = self._reconstruct_time(
-                    request.project, request.task_id,
+                    request.project, before, session_id,
                 )
 
         changed = sorted(fields.keys())
@@ -642,6 +691,7 @@ class TaskService:
                 "state_to": task.state.value,
                 "clock_stopped": bool(closed),
                 "time_recovered": recovered,
+                "session_id": session_id,
             },
         )
         # Every field the board can hold. A local-only edit (position, claim,
@@ -1036,7 +1086,9 @@ class TaskService:
             self._enqueue(project, task_id, "time", {"entry_id": closed[0].id})
         return self.detail(project, task_id)
 
-    def _reconstruct_time(self, project: str, task_id: str) -> dict | None:
+    def _reconstruct_time(
+        self, project: str, task: Task, session_id: str | None,
+    ) -> dict | None:
         """Recover the stretch for a task being closed with NO time entry at all.
 
         Measured on 2026-09-05: 29 of 74 done tasks (39%) had no time entry,
@@ -1045,20 +1097,30 @@ class TaskService:
         covers what that cannot - a task closed straight out of todo, and rows
         that predate the fix.
 
-        NOT invention. The task's move into in_progress is in the provenance
-        log with a timestamp; the stretch between that and now is the interval
-        the card demonstrably sat in In Progress, which is what the clock would
-        have recorded. A task that was never in_progress has no such interval,
-        and this returns a warning rather than a number - the honest answer to
-        "how long did this take" is sometimes "nothing recorded it".
+        Two sources, in order of how much they can be trusted:
 
-        Capped: a card left in In Progress overnight would otherwise claim the
-        whole night. A capped entry says so, so the number is never silently
-        wrong.
+        1. STATE HISTORY. The task's move into in_progress is in the provenance
+           log with a timestamp; the stretch between that and now is the
+           interval the card demonstrably sat in In Progress.
+        2. AN ESTIMATE, for a task that was never in_progress (measured
+           2026-09-15: every local task with no time was closed straight from
+           todo). See `_estimate_never_started`.
+
+        Never for an inbound apply: a card closed on the board is not work done
+        here, and a stretch recorded now would mirror straight back as time
+        nobody worked. Its time is the board's to bring in.
         """
-        if self._task_repo.entries_for(project, task_id):
+        if _MIRROR_SUPPRESSED.get():
             return None
+        if self._task_repo.entries_for(project, task.id):
+            return None
+        began = self._entered_in_progress_at(project, task.id)
+        if began is None:
+            return self._estimate_never_started(project, task, session_id)
+        return self._record_state_history(project, task.id, began)
 
+    def _entered_in_progress_at(self, project: str, task_id: str) -> datetime | None:
+        """When the task last moved into in_progress, from provenance; or None."""
         began: datetime | None = None
         try:
             for entry in self._provenance_repo.for_memory(project, task_id):
@@ -1069,18 +1131,12 @@ class TaskService:
                     began = entry.created_at
         except Exception:  # noqa: BLE001 - bookkeeping must never fail a close
             began = None
+        return began
 
-        if began is None:
-            return {
-                "recorded": False,
-                "reason": (
-                    "closed with no time tracked: this task was never in "
-                    "in_progress, so there is no interval to recover. Use "
-                    "memory_task_start before working a task, or set "
-                    "estimated_minutes if the work happened elsewhere."
-                ),
-            }
-
+    def _record_state_history(self, project: str, task_id: str, began: datetime) -> dict:
+        """Capped: a card left in In Progress overnight would otherwise claim the
+        whole night. A capped entry says so, so the number is never silently
+        wrong."""
         ended = datetime.now(began.tzinfo) if began.tzinfo else datetime.now()
         minutes = max(int((ended - began).total_seconds() // 60), 0)
         capped = minutes > _MAX_RECONSTRUCTED_MINUTES
@@ -1103,12 +1159,139 @@ class TaskService:
             ),
         }
 
+    def _estimate_never_started(
+        self, project: str, task: Task, session_id: str | None,
+    ) -> dict:
+        """An ESTIMATE for a task closed without ever being started.
+
+        Approved by the user on 2026-09-15 over refusing the close: start-then-
+        done records under a minute, so refusing enforces the habit and recovers
+        nothing. The stretch runs from the LATEST defensible start to now:
+
+        - when the task was claimed;
+        - its first comment that is not the plan's copy of the request;
+        - when the closing session last finished a stretch on, or closed,
+          another task - so tasks closed one after another split the time
+          instead of each claiming the same stretch;
+        - when the closing session started;
+
+        never earlier than the task's creation, capped, marked manual, and
+        credited to the closing session so its next estimate starts after it.
+        The latest rather than the earliest: an estimate that errs short is
+        wrong in the direction nobody is billed for.
+
+        Nothing is recorded while the closing session has a clock running on
+        another task: that clock already holds this stretch, and a second entry
+        would count it twice - in a parent's roll-up, twice over.
+        """
+        evidence = self._task_repo.close_evidence(
+            project, task.id, session_id, _CLOSED_STATE_VALUES, PLAN_REQUEST_COMMENT_PREFIX,
+        )
+        if evidence.session_running_task_id is not None:
+            running = self._task_repo.get(project, evidence.session_running_task_id)
+            return {
+                "recorded": False,
+                "never_started": True,
+                "running_task_id": evidence.session_running_task_id,
+                "running_task_title": running.title if running else None,
+                "reason": (
+                    "closed without ever being started, while this session's clock "
+                    f"was running on task {evidence.session_running_task_id} - the "
+                    "time is on that task, so nothing was estimated here"
+                ),
+            }
+
+        candidates = tuple(
+            (moment, source)
+            for moment, source in (
+                (task.claimed_at, EstimateEvidence.CLAIM),
+                (evidence.first_work_comment_at, EstimateEvidence.FIRST_COMMENT),
+                (evidence.session_last_stop_at, EstimateEvidence.PREVIOUS_CLOSE),
+                (evidence.session_last_close_at, EstimateEvidence.PREVIOUS_CLOSE),
+                (evidence.session_started_at, EstimateEvidence.SESSION_START),
+            )
+            if moment is not None
+        )
+        if not candidates:
+            return {
+                "recorded": False,
+                "never_started": True,
+                "reason": (
+                    "closed with no time tracked: this task was never in "
+                    "in_progress, and there is no claim, comment or session to "
+                    "estimate a stretch from. Use memory_task_start before working "
+                    "a task, or set estimated_minutes if the work happened elsewhere."
+                ),
+            }
+
+        began, source = max(candidates, key=lambda candidate: candidate[0])
+        if task.created_at is not None and began < task.created_at:
+            began, source = task.created_at, EstimateEvidence.TASK_CREATED
+        return self._record_estimate(project, task.id, session_id, began, evidence.now, source)
+
+    def _record_estimate(
+        self,
+        project: str,
+        task_id: str,
+        session_id: str | None,
+        began: datetime,
+        ended: datetime,
+        source: EstimateEvidence,
+    ) -> dict:
+        minutes = max(int((ended - began).total_seconds() // 60), 0)
+        capped = minutes > _MAX_RECONSTRUCTED_MINUTES
+        if capped:
+            minutes = _MAX_RECONSTRUCTED_MINUTES
+            began = ended - timedelta(minutes=minutes)
+        if minutes <= 0:
+            return {
+                "recorded": False,
+                "never_started": True,
+                "from": source.value,
+                "reason": (
+                    f"closed without ever being started, under a minute after the "
+                    f"latest evidence of work ({source.value})"
+                ),
+            }
+
+        self._task_repo.add_manual_entry(
+            project, str(uuid.uuid4()), task_id, began, ended, session_id=session_id,
+        )
+        capped_note = f"; capped at {_MAX_RECONSTRUCTED_MINUTES} minutes" if capped else ""
+        return {
+            "recorded": True,
+            "never_started": True,
+            "estimated": True,
+            "minutes": minutes,
+            "from": source.value,
+            "capped": capped,
+            "note": (
+                "ESTIMATE: this task was never started, so no clock ran. The stretch "
+                f"runs from the latest evidence of work ({source.value}) to the close "
+                f"and is marked manual{capped_note}"
+            ),
+        }
+
     @staticmethod
     def _with_time_note(detail: TaskDetail, recovered: dict | None) -> TaskDetail:
         """Attach the close-time bookkeeping to what the caller gets back."""
         if recovered is not None:
             detail.time_note = recovered
         return detail
+
+    def close_time_note(self, project: str, task_id: str) -> dict | None:
+        """The time note the task's latest close recorded, or None.
+
+        For a caller that closed through `update_routed`, whose return has no
+        room for it. Read back from provenance, where the close wrote it, so it
+        says exactly what was decided rather than a guess from the entries.
+        """
+        self._require(project, task_id)
+        note: dict | None = None
+        for entry in self._provenance_repo.for_memory(project, task_id):
+            if _is_close(entry.operation, entry.details or {}):
+                note = (entry.details or {}).get("time_recovered")
+        return note
 
     def _stop_running(self, project: str, task_id: str) -> list[TaskTimeEntry]:
         """Close EVERY open entry, so a task can never be left clocking.
@@ -1120,13 +1303,20 @@ class TaskService:
 
     # ---------- close ----------
 
-    def done(self, project: str, task_id: str, note: str | None = None) -> TaskDetail:
+    def done(
+        self, project: str, task_id: str, note: str | None = None,
+        session_id: str | None = None,
+    ) -> TaskDetail:
+        """Close a task. `session_id` is the memory session closing it - what an
+        estimate for a never-started task is split by."""
         task = self._require(project, task_id)
         closed = self._stop_running(project, task_id)
         # Closing a task that was never clocked used to succeed in silence, and
-        # the card went to Done reading zero minutes. Recover the stretch if the
-        # state history evidences one, and say either way on the response.
-        recovered = None if closed else self._reconstruct_time(project, task_id)
+        # the card went to Done reading zero minutes. Recover or estimate the
+        # stretch, and say either way on the response. Re-closing a closed task
+        # is not a close and estimates nothing.
+        is_closing = not closed and task.state not in _CLOSED_STATES
+        recovered = self._reconstruct_time(project, task, session_id) if is_closing else None
         self._task_repo.mark_done(project, task_id, TaskState.DONE.value)
         # A finished task is nobody's work any more: drop the claim rather than
         # letting it sit held until the lease runs out.
@@ -1134,7 +1324,8 @@ class TaskService:
         self._record(
             project, task_id, "task_done",
             {"state_from": task.state.value, "note": bool(note),
-             "clock_stopped": bool(closed), "time_recovered": recovered},
+             "clock_stopped": bool(closed), "time_recovered": recovered,
+             "session_id": session_id},
         )
         self._enqueue(project, task_id, "state", {"state": TaskState.DONE.value})
         if note and note.strip():

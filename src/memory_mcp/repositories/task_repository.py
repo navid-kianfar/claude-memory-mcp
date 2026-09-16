@@ -6,6 +6,7 @@ they are not a MemoryCategory, so they never reach the git-committed
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 
 from memory_mcp.db.connection import connect
@@ -112,6 +113,30 @@ def _row_to_entry(row) -> TaskTimeEntry:
         manual=bool(row[4]) if row[4] is not None else False,
         session_id=row[5] if len(row) > 5 else None,
     )
+
+
+# The provenance operations that close a task. `task_update` only counts when its
+# details say the state changed INTO a closed state.
+_DONE_OPERATION = "task_done"
+_UPDATE_OPERATION = "task_update"
+
+
+@dataclass(frozen=True)
+class CloseEvidence:
+    """What the store knows about when work on a never-clocked task could have
+    begun, read in one statement at the moment it is closed.
+
+    Every field but `now` may be None: no session was named, the session never
+    closed anything, the task has no comment of its own. `now` is the DB clock,
+    so the stretch is measured on the same clock every stored timestamp uses.
+    """
+
+    now: datetime
+    first_work_comment_at: datetime | None
+    session_started_at: datetime | None
+    session_last_stop_at: datetime | None
+    session_last_close_at: datetime | None
+    session_running_task_id: str | None
 
 
 class TaskRepository:
@@ -560,6 +585,7 @@ class TaskRepository:
 
     def add_manual_entry(
         self, project: str, entry_id: str, task_id: str, begin_at, end_at,
+        session_id: str | None = None,
     ) -> TaskTimeEntry:
         """Record a CLOSED stretch with explicit bounds, marked `manual`.
 
@@ -568,12 +594,16 @@ class TaskRepository:
         honest label: this stretch was derived from the state history, not
         measured by the clock, and the flag is what lets anyone reading the
         table tell the two apart.
+
+        `session_id` names the session an ESTIMATED stretch was credited to, so
+        that session's next estimate starts after this one instead of overlapping
+        it. A stretch recovered from state history names none.
         """
         with connect(project) as conn:
             conn.execute(
                 "INSERT INTO task_time_entries (id, task_id, begin_at, end_at, manual, session_id) "
-                "VALUES (?, ?, ?, ?, TRUE, NULL)",
-                [entry_id, task_id, begin_at, end_at],
+                "VALUES (?, ?, ?, ?, TRUE, ?)",
+                [entry_id, task_id, begin_at, end_at, session_id],
             )
             row = conn.execute(
                 f"SELECT {TIME_ENTRY_COLUMNS} FROM task_time_entries WHERE id = ?",
@@ -642,6 +672,68 @@ class TaskRepository:
             ).fetchall()
         return [r[0] for r in rows]
 
+    def close_evidence(
+        self,
+        project: str,
+        task_id: str,
+        session_id: str | None,
+        closed_states: Sequence[str],
+        skip_comment_prefix: str,
+    ) -> CloseEvidence:
+        """The evidence an estimate for a never-clocked task is built from.
+
+        One statement rather than one read per source, and it reaches into
+        `sessions` and `provenance` because both live in this project's file: the
+        alternative was four round trips on every close. With no `session_id`
+        every session field comes back None - `= NULL` matches nothing.
+
+        - the task's first comment that is not the one `skip_comment_prefix`
+          starts (memory_task_plan's verbatim copy of the request);
+        - when the session started;
+        - the latest end of a stretch the session clocked on ANOTHER task;
+        - the latest close of ANOTHER task the session recorded in provenance;
+        - a task other than this one the session still has a clock running on.
+        """
+        closed_state_values = list(closed_states)
+        with connect(project) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    current_timestamp::TIMESTAMP,
+                    (SELECT min(c.created_at) FROM task_comments c
+                      WHERE c.task_id = ? AND NOT starts_with(c.body, ?)),
+                    (SELECT s.started_at FROM sessions s WHERE s.id = ?),
+                    (SELECT max(e.end_at) FROM task_time_entries e
+                      WHERE e.session_id = ? AND e.task_id <> ? AND e.end_at IS NOT NULL),
+                    (SELECT max(p.created_at) FROM provenance p
+                      WHERE p.memory_id <> ?
+                        AND json_extract_string(p.details, '$.session_id') = ?
+                        AND (p.operation = ?
+                             OR (p.operation = ?
+                                 AND list_contains(?, json_extract_string(p.details, '$.state_to'))
+                                 AND json_extract_string(p.details, '$.state_from')
+                                     IS DISTINCT FROM json_extract_string(p.details, '$.state_to')))),
+                    (SELECT min(e.task_id) FROM task_time_entries e
+                      WHERE e.session_id = ? AND e.task_id <> ? AND e.end_at IS NULL)
+                """,
+                [
+                    task_id, skip_comment_prefix,
+                    session_id,
+                    session_id, task_id,
+                    task_id, session_id, _DONE_OPERATION, _UPDATE_OPERATION,
+                    closed_state_values,
+                    session_id, task_id,
+                ],
+            ).fetchone()
+        return CloseEvidence(
+            now=row[0],
+            first_work_comment_at=row[1],
+            session_started_at=row[2],
+            session_last_stop_at=row[3],
+            session_last_close_at=row[4],
+            session_running_task_id=row[5],
+        )
+
     def expired_claims(self, project: str, grace_minutes: int = 0) -> list[Task]:
         """Tasks still marked as held by a session whose lease ran out more than
         `grace_minutes` ago.
@@ -689,14 +781,19 @@ class TaskRepository:
         created within the last `window_seconds`; None when there is none.
 
         Exact equality on purpose: a near-miss is a different task, and
-        silently folding it into an existing one would lose a requirement.
+        silently folding it into an existing one would lose a requirement. The
+        description is compared trimmed at its ends, the way the title already
+        is, so a re-sent call that picked up a trailing newline still matches;
+        `description` must be passed trimmed. DuckDB's one-argument trim() strips
+        spaces only, so the whitespace set is spelled out.
         """
         with connect(project) as conn:
             row = conn.execute(
                 f"""
                 SELECT {TASK_COLUMNS} FROM tasks
                 WHERE title = ?
-                  AND description IS NOT DISTINCT FROM ?
+                  AND trim(description, chr(32) || chr(9) || chr(10) || chr(13))
+                      IS NOT DISTINCT FROM ?
                   AND parent_id IS NOT DISTINCT FROM ?
                   AND archived_at IS NULL
                   AND created_at >= (current_timestamp - INTERVAL (?) SECOND)::TIMESTAMP
@@ -709,10 +806,18 @@ class TaskRepository:
 
     def record_plan(
         self, project: str, plan_id: str, request_hash: str, task_ids: Sequence[str],
+        retain_seconds: int,
     ) -> None:
-        """Remember which tasks one plan created, in plan order."""
+        """Remember which tasks one plan created, in plan order, and forget every
+        plan older than `retain_seconds` - past the retry window a record can
+        never match, so keeping it only grows the table."""
         ordered_ids = list(task_ids)
         with connect(project) as conn:
+            conn.execute(
+                "DELETE FROM task_plans "
+                "WHERE created_at < (current_timestamp - INTERVAL (?) SECOND)::TIMESTAMP",
+                [retain_seconds],
+            )
             conn.execute(
                 "INSERT INTO task_plans (id, request_hash, task_ids) VALUES (?, ?, ?)",
                 [plan_id, request_hash, ordered_ids],
@@ -1113,6 +1218,185 @@ OUTBOX_PENDING_SQL = (
     "FROM task_outbox ORDER BY epoch_us(created_at) ASC, rowid ASC LIMIT ?"
 )
 
+#: The outbox op that sends a task's closed, unsent time entries.
+TIME_OP = "time"
+
+#: How many tasks one catch-up pass queues per project. Far above anything seen
+#: (seven entries over two projects when it was written); the NOT EXISTS below
+#: means a pass that hits it leaves the rest for the next one, never a duplicate.
+UNSENT_TIME_TASK_LIMIT = 1000
+
+# One `time` op for every task that has closed, unsent work, a card on the board
+# and no `time` op already waiting - as ONE statement, so the check and the
+# insert cannot be split by a clock stopping in between and there is no query
+# per task. It only queues: `TaskBridge._flush_time` still reads the entries
+# and marks each one as it lands, which is what keeps an entry from being sent
+# twice. A task with no remote card is skipped rather than queued, because
+# flushing its op would CREATE the card as a side effect of reporting time.
+QUEUE_UNSENT_TIME_SQL = """
+    INSERT INTO task_outbox (id, task_id, op, payload)
+    SELECT CAST(uuid() AS VARCHAR), unsent.task_id, ?, '{}'
+    FROM (
+        SELECT DISTINCT e.task_id
+        FROM task_time_entries e
+        JOIN tasks t ON t.id = e.task_id
+        WHERE e.end_at IS NOT NULL
+          AND e.mirrored_at IS NULL
+          AND EXISTS (
+              SELECT 1 FROM task_sync s
+              WHERE s.task_id = e.task_id AND s.remote_task_id IS NOT NULL
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM task_outbox o
+              WHERE o.task_id = e.task_id AND o.op = ?
+          )
+        ORDER BY e.task_id
+        LIMIT ?
+    ) AS unsent
+    RETURNING task_id
+"""
+
+
+#: How many closed local stretches one time import may compare against. Far past
+#: any real card set; reaching it RAISES rather than matching against a partial
+#: read, because a stretch missing from the read is one imported a second time.
+TIME_MATCH_ENTRY_LIMIT = 20000
+
+# Per card on one board: the local task it maps to, and the milliseconds of that
+# task's CLOSED work the board should already hold - what was mirrored out plus
+# what was imported, both of which carry mirrored_at. Milliseconds truncated per
+# stretch, because that is the precision the platform keeps a stretch at; the
+# bridge rounds the sum the way the board rounds its own total.
+SYNCED_TIME_TOTALS_SQL = """
+    SELECT s.remote_task_id, s.task_id,
+           COALESCE(sum(epoch_ms(e.end_at) - epoch_ms(e.begin_at)), 0)
+    FROM task_sync s
+    LEFT JOIN task_time_entries e
+           ON e.task_id = s.task_id
+          AND e.end_at IS NOT NULL
+          AND e.mirrored_at IS NOT NULL
+    WHERE s.link_id = ? AND list_contains(?, s.remote_task_id)
+    GROUP BY s.remote_task_id, s.task_id
+    ORDER BY s.remote_task_id
+    LIMIT ?
+"""
+
+LOCAL_CLOSED_ENTRIES_SQL = """
+    SELECT id, task_id, begin_at, end_at, remote_id
+    FROM task_time_entries
+    WHERE list_contains(?, task_id) AND end_at IS NOT NULL
+    ORDER BY task_id, begin_at
+    LIMIT ?
+"""
+
+# Numbered parameters: DuckDB binds the FROM clause before the select list, so
+# positional `?` markers would be matched to the wrong values.
+#
+# The NOT EXISTS is the idempotency guard at the last possible moment: even a
+# plan built from a stale read cannot record a remote stretch twice.
+INSERT_IMPORTED_TIME_SQL = """
+    INSERT INTO task_time_entries
+        (id, task_id, begin_at, end_at, manual, mirrored_at, remote_id)
+    SELECT incoming.id, incoming.task_id, incoming.begin_at, incoming.end_at,
+           incoming.manual, $1, incoming.remote_id
+    FROM (
+        SELECT unnest($2::VARCHAR[]) AS id,
+               unnest($3::VARCHAR[]) AS task_id,
+               unnest($4::TIMESTAMP[]) AS begin_at,
+               unnest($5::TIMESTAMP[]) AS end_at,
+               unnest($6::BOOLEAN[]) AS manual,
+               unnest($7::VARCHAR[]) AS remote_id
+    ) AS incoming
+    WHERE NOT EXISTS (
+        SELECT 1 FROM task_time_entries existing
+        WHERE existing.remote_id = incoming.remote_id
+    )
+    RETURNING id
+"""
+
+# A stretch of ours the board was seen holding gets the board's id, and counts
+# as sent: it is on the board, so a flush that sent it again would double it.
+# COALESCE keeps the instant a flush already recorded.
+STAMP_MATCHED_TIME_SQL = """
+    UPDATE task_time_entries
+    SET remote_id = matched.remote_id,
+        mirrored_at = COALESCE(task_time_entries.mirrored_at, $1)
+    FROM (
+        SELECT unnest($2::VARCHAR[]) AS id, unnest($3::VARCHAR[]) AS remote_id
+    ) AS matched
+    WHERE task_time_entries.id = matched.id
+      AND task_time_entries.remote_id IS NULL
+"""
+
+
+@dataclass(frozen=True)
+class SyncedTimeTotal:
+    """A card on one board, the local task it is, and the closed work (in
+    milliseconds) of that task the board should already hold."""
+
+    remote_task_id: str
+    task_id: str
+    mirrored_milliseconds: int
+
+
+@dataclass(frozen=True)
+class LocalTimeEntry:
+    """A closed local stretch, as a time import matches the board's against it."""
+
+    id: str
+    task_id: str
+    begin_at: datetime
+    end_at: datetime
+    remote_id: str | None
+
+
+@dataclass(frozen=True)
+class ImportedTimeEntry:
+    """A stretch from the board to record here, in the store's naive local clock."""
+
+    task_id: str
+    remote_id: str
+    begin_at: datetime
+    end_at: datetime
+    manual: bool
+
+
+@dataclass(frozen=True)
+class RemoteTimeMatch:
+    """A local stretch the board holds too, and the board's id for it."""
+
+    entry_id: str
+    remote_id: str
+
+
+def _insert_imported_time(conn, imported: Sequence[ImportedTimeEntry], now: datetime) -> int:
+    """Insert the board's stretches in one statement; how many were new."""
+    import uuid
+
+    if not imported:
+        return 0
+    rows = conn.execute(INSERT_IMPORTED_TIME_SQL, [
+        now,
+        [str(uuid.uuid4()) for _ in imported],
+        [entry.task_id for entry in imported],
+        [entry.begin_at for entry in imported],
+        [entry.end_at for entry in imported],
+        [entry.manual for entry in imported],
+        [entry.remote_id for entry in imported],
+    ]).fetchall()
+    return len(rows)
+
+
+def _stamp_matched_time(conn, matched: Sequence[RemoteTimeMatch], now: datetime) -> None:
+    """Give our stretches the board holds its ids, in one statement."""
+    if not matched:
+        return
+    conn.execute(STAMP_MATCHED_TIME_SQL, [
+        now,
+        [match.entry_id for match in matched],
+        [match.remote_id for match in matched],
+    ])
+
 
 class OutboxRepository:
     """The bridge's durable half: what changed locally and has not been mirrored.
@@ -1278,6 +1562,22 @@ class OutboxRepository:
             return []
         return [{"id": r[0], "begin_at": r[1], "end_at": r[2]} for r in rows]
 
+    def queue_unsent_time(self, project: str) -> tuple[str, ...]:
+        """Queue a `time` op for every task whose closed time was never sent.
+
+        For entries no flush will ever look at: `_flush_time` runs only when a
+        `time` op for that task drains, and entries closed before every closing
+        path queued one have none. Returns the task ids queued, one per task.
+
+        Unlike `enqueue` this RAISES: it is not inside anyone's local edit, and
+        a catch-up that fails silently is the failure it exists to repair.
+        """
+        with connect(project) as conn:
+            rows = conn.execute(
+                QUEUE_UNSENT_TIME_SQL, [TIME_OP, TIME_OP, UNSENT_TIME_TASK_LIMIT],
+            ).fetchall()
+        return tuple(row[0] for row in rows)
+
     def mark_time_mirrored(self, project: str, entry_id: str) -> None:
         from datetime import datetime, timezone
 
@@ -1286,6 +1586,76 @@ class OutboxRepository:
                 "UPDATE task_time_entries SET mirrored_at = ? WHERE id = ?",
                 [datetime.now(timezone.utc), entry_id],
             )
+
+    # ---------- time read back from the board ----------
+
+    def synced_time_totals(
+        self, project: str, link_id: int, remote_task_ids: Sequence[str],
+    ) -> tuple[SyncedTimeTotal, ...]:
+        """For each of these cards that maps to a local task on this link, the
+        closed work the board should already hold. A card with no local task is
+        left out - there is nowhere to put its time."""
+        if not remote_task_ids:
+            return ()
+        wanted = list(remote_task_ids)
+        with connect(project) as conn:
+            rows = conn.execute(
+                SYNCED_TIME_TOTALS_SQL, [link_id, wanted, len(wanted)],
+            ).fetchall()
+        return tuple(
+            SyncedTimeTotal(remote_task_id=row[0], task_id=row[1], mirrored_milliseconds=row[2])
+            for row in rows
+        )
+
+    def closed_entries_for(
+        self, project: str, task_ids: Sequence[str],
+    ) -> tuple[LocalTimeEntry, ...]:
+        """Every closed stretch of these tasks, mirrored or not, oldest first.
+
+        Raises when there are more than TIME_MATCH_ENTRY_LIMIT: matching the
+        board against part of the local record would import the rest again.
+        """
+        if not task_ids:
+            return ()
+        wanted = list(task_ids)
+        with connect(project) as conn:
+            rows = conn.execute(
+                LOCAL_CLOSED_ENTRIES_SQL, [wanted, TIME_MATCH_ENTRY_LIMIT + 1],
+            ).fetchall()
+        if len(rows) > TIME_MATCH_ENTRY_LIMIT:
+            raise RuntimeError(
+                f"more than {TIME_MATCH_ENTRY_LIMIT} closed time entries to match "
+                f"in {project} - refusing to import against a partial read"
+            )
+        return tuple(
+            LocalTimeEntry(id=row[0], task_id=row[1], begin_at=row[2], end_at=row[3], remote_id=row[4])
+            for row in rows
+        )
+
+    def record_remote_time(
+        self,
+        project: str,
+        imported: Sequence[ImportedTimeEntry],
+        matched: Sequence[RemoteTimeMatch],
+    ) -> int:
+        """Record the board's stretches here and stamp ours it was seen holding.
+
+        One transaction, two set-based statements. Every imported row carries
+        `mirrored_at`, so no flush or catch-up ever sends it back. Returns how
+        many stretches were actually inserted - fewer than passed when another
+        import got there first.
+        """
+        from datetime import timezone
+
+        from memory_mcp.db.connection import transaction
+
+        if not imported and not matched:
+            return 0
+        now = datetime.now(timezone.utc)
+        with transaction(project) as conn:
+            inserted = _insert_imported_time(conn, imported, now)
+            _stamp_matched_time(conn, matched, now)
+        return inserted
 
     # ---------- the local task -> remote task map ----------
 

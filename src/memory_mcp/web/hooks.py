@@ -350,8 +350,11 @@ async def _hook_gate(request):
             return {"allow": True, "reason": "outside the project root"}
         if not get_project_links(slug):
             return {"allow": True, "reason": "project is not bound to a board"}
+        # Sub-tasks included. Without them a started sub-task left the gate shut,
+        # and the way through was to start its PARENT - whose clock then held
+        # the sub-task's work, the misattribution the clock exists to avoid.
         open_tasks = container.task_service.list_tasks(
-            slug, TaskFilter(state=TaskState.IN_PROGRESS), limit=1,
+            slug, TaskFilter(state=TaskState.IN_PROGRESS, include_subtasks=True), limit=1,
         ).tasks
         if open_tasks:
             return {

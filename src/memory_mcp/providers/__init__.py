@@ -13,6 +13,7 @@ from memory_mcp.providers.base import (
     ProviderError,
     ProviderAuthError,
     RemoteTask,
+    RemoteTimeEntry,
     SpaceRef,
     TaskProvider,
     TransientProviderError,
@@ -45,6 +46,7 @@ __all__ = [
     "ProviderAuthError",
     "TransientProviderError",
     "RemoteTask",
+    "RemoteTimeEntry",
     "SpaceRef",
     "TaskProvider",
 ]

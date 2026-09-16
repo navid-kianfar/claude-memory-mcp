@@ -7,6 +7,8 @@ the shared vocabulary, so a fake at this level tests the translation and nothing
 else.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from memory_mcp.asoode_client import AsoodeError
@@ -170,6 +172,8 @@ class FakeAsoodeClient:
         return {"id": lid, "title": title, "color": color}
 
     def task_detail(self, task_id):
+        if task_id not in self.tasks:
+            raise AsoodeError(f"no task {task_id}", status=404)
         return self.tasks[task_id]
 
     def add_task_label(self, task_id, label_id):
@@ -215,9 +219,36 @@ class FakeAsoodeClient:
         self.lists_archived.append(list_id)
 
     def spend_time(self, task_id, begin, end=None):
+        """Records the call, and keeps the stretch the way asoode does: its own
+        id, instants to the millisecond in `Z` form, and the card's total."""
         if task_id not in self.tasks:
             raise AsoodeError(f"no task {task_id}")
         self.spent.append((task_id, begin, end))
+        task = self.tasks[task_id]
+        begin_at = _asoode_instant(begin)
+        end_at = _asoode_instant(end) if end else None
+        task.setdefault("timeSpents", []).append({
+            "id": self._next("ts"), "begin": begin_at, "end": end_at,
+            "manual": True, "taskId": task_id,
+        })
+        task["timeSpent"] = _asoode_total(task["timeSpents"])
+
+
+def _asoode_instant(value: str) -> str:
+    """An ISO instant as asoode hands it back: UTC, milliseconds, `Z`."""
+    parsed = datetime.fromisoformat(value)
+    return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _asoode_total(items: list[dict]) -> int:
+    """work-packages.service.ts: closed stretches, rounded to whole minutes."""
+    closed = [item for item in items if item["end"]]
+    spans = (
+        datetime.fromisoformat(item["end"]) - datetime.fromisoformat(item["begin"])
+        for item in closed
+    )
+    milliseconds = sum(span // timedelta(milliseconds=1) for span in spans)
+    return (milliseconds + 30_000) // 60_000
 
 
 class TestAsoodeConformance(ProviderConformance):
@@ -344,6 +375,11 @@ class TestAsoodeSpecificTranslation:
         assert len(_CAPABILITIES.states) == 9
         assert _CAPABILITIES.supports_time_tracking is True, (
             "asoode has POST /tasks/:id/spend-time - time must be mirrored, not dropped"
+        )
+
+    def test_time_can_be_read_back(self):
+        assert _CAPABILITIES.supports_time_readback is True, (
+            "POST /tasks/:id/detail returns timeSpents - imported cards must bring their time"
         )
 
     def test_asoode_errors_are_provider_errors(self):
@@ -569,3 +605,80 @@ class TestInstantsAreSentAsUTC:
         assert sent_begin.endswith("Z")
         assert sent_begin == begin.astimezone().astimezone(timezone.utc).isoformat(
         ).replace("+00:00", "Z")
+
+
+class TestTimeReadBack:
+    """`timeSpents` in the shape the live board returned on 2026-09-15."""
+
+    @pytest.fixture
+    def provider(self):
+        return AsoodeProvider(FakeAsoodeClient())
+
+    @pytest.fixture
+    def card(self, provider):
+        space = provider.create_space("S")
+        board = provider.create_container("B", space_id=space.id)
+        return provider.create_task(board.id, None, "Timed card")
+
+    def _live_item(self, **overrides):
+        item = {
+            "id": "772eb825-f14f-4421-a9e2-48880d4d7b5e",
+            "createdAt": "2026-09-15T15:39:42.375Z",
+            "updatedAt": "2026-09-15T15:39:42.375Z",
+            "member": {"id": "u1", "firstName": "A", "lastName": "Person"},
+            "begin": "2026-09-15T15:13:32.070Z",
+            "end": "2026-09-15T15:39:41.527Z",
+            "manual": True,
+            "userId": "u1",
+            "packageId": "wp1",
+            "projectId": "p1",
+            "taskId": "t1",
+            "subProjectId": "sp1",
+            "diff": 26,
+        }
+        item.update(overrides)
+        return item
+
+    def test_a_live_shaped_stretch_becomes_an_aware_entry(self, provider, card):
+        provider.client.tasks[card.id]["timeSpents"] = [self._live_item()]
+
+        (entry,) = provider.time_entries(card.id)
+
+        assert entry.id == "772eb825-f14f-4421-a9e2-48880d4d7b5e"
+        assert entry.begin == datetime(2026, 9, 15, 15, 13, 32, 70000, tzinfo=timezone.utc)
+        assert entry.end == datetime(2026, 9, 15, 15, 39, 41, 527000, tzinfo=timezone.utc)
+        assert entry.manual is True
+
+    def test_a_running_stretch_is_left_out(self, provider, card):
+        provider.client.tasks[card.id]["timeSpents"] = [
+            self._live_item(), self._live_item(id="open", end=None),
+        ]
+        assert [e.id for e in provider.time_entries(card.id)] == [
+            "772eb825-f14f-4421-a9e2-48880d4d7b5e"
+        ]
+
+    def test_an_unreadable_instant_is_an_error_not_a_guess(self, provider, card):
+        provider.client.tasks[card.id]["timeSpents"] = [self._live_item(begin="yesterday")]
+        with pytest.raises(ProviderError):
+            provider.time_entries(card.id)
+
+    def test_a_stretch_without_an_id_is_an_error(self, provider, card):
+        provider.client.tasks[card.id]["timeSpents"] = [self._live_item(id=None)]
+        with pytest.raises(ProviderError):
+            provider.time_entries(card.id)
+
+    def test_the_board_fetch_carries_each_cards_total(self, provider, card):
+        board_id = provider.client.tasks[card.id]["boardId"]
+        provider.client.tasks[card.id]["timeSpent"] = 26
+
+        fetched = provider.fetch_container(board_id, with_tasks=True)
+
+        assert fetched.tasks[0].minutes_spent == 26
+
+    def test_a_board_row_without_a_total_says_unknown_not_zero(self, provider, card):
+        board_id = provider.client.tasks[card.id]["boardId"]
+
+        fetched = provider.fetch_container(board_id, with_tasks=True)
+
+        assert fetched.tasks[0].minutes_spent is None
+

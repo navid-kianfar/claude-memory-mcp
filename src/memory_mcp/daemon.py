@@ -110,6 +110,13 @@ def build_app() -> Starlette:
         except Exception as e:  # noqa: BLE001 - never block the daemon starting
             log.warning("outbox sweeper did not start: %s", e)
 
+        # Time logged on the boards before imports brought time in, caught up
+        # once per link. The imports after every mirror keep it current after.
+        try:
+            container.start_time_backfill()
+        except Exception as e:  # noqa: BLE001 - never block the daemon starting
+            log.warning("remote time backfill did not start: %s", e)
+
         async with mcp_app.lifespan(app):
             yield
 

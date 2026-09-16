@@ -558,8 +558,9 @@ class TaskDetail(BaseModel):
     #: anyone's totals. Decided with the user on 2026-09-05.
     minutes_spent_total: int = 0
     running: bool = False
-    # Set only when a task was closed with no clock ever running: either the
-    # stretch recovered from the state history, or the reason none could be.
+    # Set only when a task was closed with no clock ever running: the stretch
+    # recovered from the state history, an ESTIMATE for a task never started
+    # (`from` names its evidence), or the reason none could be.
     # Present so the agent SEES that a task went to Done at zero minutes,
     # instead of the close succeeding in silence, which is how 39% of done
     # tasks ended up with no time at all.

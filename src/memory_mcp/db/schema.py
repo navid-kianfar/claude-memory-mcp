@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -93,7 +93,11 @@ _TASK_DDL = (
         -- Which memory session clocked on (v13). NULL for a clock started from
         -- the UI or a caller with no session. This is what lets a session end
         -- stop exactly the clocks it started and no other session's.
-        session_id VARCHAR
+        session_id VARCHAR,
+        -- The platform's own id for this stretch (v17): set on a stretch
+        -- imported from the board, and on one of ours once the board has been
+        -- seen holding it. It is what makes re-importing a card add nothing.
+        remote_id VARCHAR
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks (state)",
@@ -821,6 +825,29 @@ def migrate_v15_to_v16(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (16)")
 
 
+def migrate_v16_to_v17(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v16 -> v17: a time entry remembers the platform's id for it.
+
+    Importing a card's time needs an identity for each stretch, or every
+    re-import of the board would add the same hours again. The platform's entry
+    id is that identity. Nullable, and NULL on every existing row: a stretch
+    clocked here has no remote id until the board is seen holding it.
+    Added here AND to the fresh-create DDL, so the two shapes cannot drift.
+
+    Stamped only once the column is really there - the v13 rule: a table marked
+    v17 without it would fail every time-entry import with nothing to repair it.
+    """
+    conn.execute("ALTER TABLE task_time_entries ADD COLUMN IF NOT EXISTS remote_id VARCHAR")
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info('task_time_entries')").fetchall()
+    }
+    if "remote_id" not in columns:
+        raise RuntimeError(
+            "schema v17: could not add task_time_entries.remote_id - not stamping"
+        )
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (17)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -891,6 +918,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 16:
         migrate_v15_to_v16(conn)
         version = 16
+    if version < 17:
+        migrate_v16_to_v17(conn)
+        version = 17
     return version
 
 

@@ -20,7 +20,7 @@ from memory_mcp.context import (
     load_active_project, resolve_project, set_active_project,
     remember_memory_session,
 )
-from memory_mcp.enforcement import rules_digest
+from memory_mcp.enforcement import never_started_warning, rules_digest
 from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.exceptions import MemoryMCPError, MemoryNotFoundError
 from memory_mcp.utils.decomposition import decomposition_hint
@@ -241,13 +241,15 @@ def _close_time_report(slug: str, task_id: str) -> dict:
     """
     try:
         detail = container.task_service.detail(slug, task_id)
+        time_note = container.task_service.close_time_note(slug, task_id)
     except Exception:  # noqa: BLE001 - a report must never fail the close
         return {}
     report: dict = {"minutes_spent": detail.minutes_spent}
+    if time_note is not None:
+        report["time_note"] = time_note
     if detail.time_entries and detail.time_entries[-1].manual:
-        report["recovered"] = (
-            "no clock was running; this stretch was recovered from the state "
-            "history and marked manual"
+        report["recovered"] = (time_note or {}).get("note") or (
+            "no clock was running; this stretch was recovered and marked manual"
         )
     elif not detail.minutes_spent:
         report["warning"] = (
@@ -255,6 +257,18 @@ def _close_time_report(slug: str, task_id: str) -> dict:
             "a task so the stretch is clocked and mirrored to the board."
         )
     return report
+
+
+def _lead_with_clock_warning(answer: dict, title: str, time_note: dict | None) -> dict:
+    """Put `clock_warning` FIRST in a close reply when the task was never started.
+
+    First and top-level on purpose: the same reason nested in `time_note` was
+    read past on 2026-09-11 while four more tasks were closed the same way.
+    """
+    warning = never_started_warning(title, time_note)
+    if warning is None:
+        return answer
+    return {"clock_warning": warning, **answer}
 
 
 def _safe(fn):
@@ -1711,6 +1725,7 @@ def memory_task_update(
     project: str | None = None,
     path: str | None = None,
     target: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Change a task. Only the fields you pass are touched.
 
@@ -1736,6 +1751,11 @@ def memory_task_update(
     because no board move exists and a second card would be created. A path
     matching no board leaves the task where it is. The answer's `routing` says
     what was decided.
+
+    Closing a task that was never started records an ESTIMATE, marked manual,
+    from the latest evidence of work - see memory_task_done. `session_id` is the
+    one memory_session_start returned; pass it when several sessions share one
+    connection (a dispatched agent does), or the close is credited to the lead.
     """
     def _run():
         slug = _resolve(project)
@@ -1756,7 +1776,8 @@ def memory_task_update(
             path=path,
             target=target,
         )
-        task, changed, routing = container.task_service.update_routed(req)
+        session = session_id or current_memory_session()
+        task, changed, routing = container.task_service.update_routed(req, session)
         answer = {
             "status": "ok",
             "task": task.model_dump(mode="json"),
@@ -1768,7 +1789,10 @@ def memory_task_update(
         # reports the clock exactly as memory_task_done does. A card going to
         # Done at zero minutes is the thing that must not pass unremarked.
         if "state" in changed and task.state in _CLOSED_TASK_STATES:
-            answer["time"] = _close_time_report(slug, task.id)
+            time_report = _close_time_report(slug, task.id)
+            answer["time"] = time_report
+            time_note = time_report.get("time_note")
+            answer = _lead_with_clock_warning(answer, task.title, time_note)
         if "description" in changed:
             # Only on a description edit, and only when the task has no
             # sub-tasks yet - a parent's long overview is not a problem.
@@ -1861,16 +1885,27 @@ def memory_task_stop(task_id: str, project: str | None = None) -> dict:
 @mcp.tool()
 def memory_task_done(
     task_id: str, note: str | None = None, project: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Mark a task done: stops the clock, releases the claim, stamps done_at,
     and mirrors all three to the board.
 
     An optional note is stored as a comment on the task - what was actually
     done, or what is left over - and mirrors like any comment.
+
+    A task closed without ever being started had no clock. Its time is then an
+    ESTIMATE, marked manual and capped: from the latest of its claim, its first
+    comment, this session's previous close and this session's start, and
+    `time_note.from` names which. `session_id` is the one memory_session_start
+    returned; pass it when several sessions share one connection (a dispatched
+    agent does), or the close is credited to the lead's session.
     """
     def _run():
         slug = _resolve(project)
-        answer = container.task_service.done(slug, task_id, note).model_dump(mode="json")
+        session = session_id or current_memory_session()
+        detail = container.task_service.done(slug, task_id, note, session)
+        dumped = detail.model_dump(mode="json")
+        answer = _lead_with_clock_warning(dumped, detail.task.title, detail.time_note)
         return _with_mirror(answer, slug)
     return _safe(_run)
 

@@ -34,6 +34,7 @@ from memory_mcp.db.connection import transaction
 from memory_mcp.exceptions import MemoryMCPError
 from memory_mcp.utils.decomposition import decomposition_hint
 from memory_mcp.models import CreateTaskRequest, Task, TaskSource
+from memory_mcp.services.task_service import PLAN_REQUEST_COMMENT_PREFIX
 
 # A plan is for a request with several deliverables. One task is not a plan - it
 # is memory_task_add - and thirty is not a plan either, it is noise.
@@ -241,12 +242,12 @@ class TaskPlanner:
                     # not drift is what was actually asked for.
                     self._tasks.comment(
                         project, task.id, kind="note",
-                        body=f"Decomposed from this request:\n\n{text}",
+                        body=f"{PLAN_REQUEST_COMMENT_PREFIX}\n\n{text}",
                     )
                     created.append(task)
                 # In the same transaction as the tasks: a record of a plan that
                 # rolled back would answer a retry with tasks that do not exist.
-                self._tasks.record_plan(project, fingerprint, ids)
+                self._tasks.record_plan(project, fingerprint, ids, PLAN_RETRY_WINDOW_SECONDS)
         except Exception as e:  # noqa: BLE001
             # Say what happened to the plan, not just what threw. "which tasks
             # got created" now has an answer, and the answer is none.

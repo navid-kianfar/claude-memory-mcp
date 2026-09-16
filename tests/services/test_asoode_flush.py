@@ -561,3 +561,144 @@ class TestTheWriterRecordsItsOwnWrites:
         tasks.create(CreateTaskRequest(project=project, title="X"))
         bridge.flush(project)
         assert bridge.echo.is_echo({"r-somebody-else"}) is False
+
+
+class TestUnsentTimeIsCaughtUp:
+    """Seven closed entries were found with `mirrored_at IS NULL` and no `time` op
+    queued. `_flush_time` only runs when such an op drains, so those cards would
+    have shown less time than was worked, for good."""
+
+    def _carded_task(self, tasks, bridge, project, title="Carded"):
+        """A task whose card exists on the board, with nothing left queued."""
+        task = tasks.create(CreateTaskRequest(project=project, title=title))
+        bridge.flush(project)
+        return task
+
+    def _closed_entry(self, project, task_id, minutes=30):
+        """A closed stretch written the way pre-fix closing paths left it: with no op queued."""
+        from datetime import datetime, timedelta, timezone
+        import uuid
+
+        end = datetime.now(timezone.utc)
+        begin = end - timedelta(minutes=minutes)
+        entry_id = str(uuid.uuid4())
+        return container.task_repo.add_manual_entry(project, entry_id, task_id, begin, end)
+
+    def _time_ops(self, outbox, project):
+        return [r["task_id"] for r in outbox.pending(project) if r["op"] == "time"]
+
+    def test_an_orphaned_closed_entry_is_queued_exactly_once(self, project):
+        tasks, bridge, outbox = _stack(project, _provider())
+        task = self._carded_task(tasks, bridge, project)
+        self._closed_entry(project, task.id)
+
+        first = bridge.queue_unsent_time(project)
+        second = bridge.queue_unsent_time(project)
+
+        assert first == (task.id,)
+        assert second == (), "an op already waiting is not queued again"
+        assert self._time_ops(outbox, project) == [task.id]
+
+    def test_the_queued_op_sends_the_entry_once_and_nothing_is_requeued(self, project):
+        client = _provider()
+        tasks, bridge, outbox = _stack(project, client)
+        task = self._carded_task(tasks, bridge, project)
+        self._closed_entry(project, task.id)
+
+        bridge.queue_unsent_time(project)
+        bridge.flush(project)
+        requeued = bridge.queue_unsent_time(project)
+        bridge.flush(project)
+
+        assert [log[0] for log in client.time_logs] == ["r1"]
+        assert requeued == ()
+        assert outbox.unmirrored_time(project, task.id) == []
+
+    def test_several_orphaned_entries_on_one_task_make_one_op_and_all_are_sent(self, project):
+        client = _provider()
+        tasks, bridge, _ = _stack(project, client)
+        task = self._carded_task(tasks, bridge, project)
+        self._closed_entry(project, task.id, minutes=30)
+        self._closed_entry(project, task.id, minutes=90)
+
+        queued = bridge.queue_unsent_time(project)
+        bridge.flush(project)
+
+        assert queued == (task.id,)
+        assert len(client.time_logs) == 2
+
+    def test_every_orphaned_task_in_the_project_is_queued_in_one_pass(self, project):
+        tasks, bridge, _ = _stack(project, _provider())
+        first = self._carded_task(tasks, bridge, project, title="One")
+        second = self._carded_task(tasks, bridge, project, title="Two")
+        self._closed_entry(project, first.id)
+        self._closed_entry(project, second.id)
+
+        queued = bridge.queue_unsent_time(project)
+
+        assert sorted(queued) == sorted((first.id, second.id))
+
+    def test_a_task_without_a_remote_card_is_left_alone(self, project):
+        """Flushing a `time` op would CREATE the card just to report time."""
+        tasks, bridge, outbox = _stack(project, _provider())
+        task = tasks.create(CreateTaskRequest(project=project, title="Local only"))
+        self._closed_entry(project, task.id)
+
+        queued = bridge.queue_unsent_time(project)
+
+        assert queued == ()
+        assert self._time_ops(outbox, project) == []
+
+    def test_an_open_entry_is_not_queued(self, project):
+        tasks, bridge, outbox = _stack(project, _provider())
+        task = self._carded_task(tasks, bridge, project)
+        container.task_repo.start_entry(project, "running-entry", task.id)
+
+        assert bridge.queue_unsent_time(project) == ()
+        assert self._time_ops(outbox, project) == []
+
+    def test_an_unlinked_project_queues_nothing(self, project):
+        from memory_mcp.db.registry import get_project_links, delete_project_link
+
+        tasks, bridge, _ = _stack(project, _provider())
+        task = self._carded_task(tasks, bridge, project)
+        self._closed_entry(project, task.id)
+        for link in get_project_links(project):
+            delete_project_link(link["id"])
+
+        assert bridge.queue_unsent_time(project) == ()
+
+    def test_the_container_queues_across_linked_projects(self, project):
+        tasks, bridge, _ = _stack(project, _provider())
+        task = self._carded_task(tasks, bridge, project)
+        self._closed_entry(project, task.id)
+
+        assert container.queue_unsent_time() == {project: 1}
+        assert container.queue_unsent_time() == {}
+
+    def test_the_sweeper_queues_unsent_time_before_its_first_sweep(self, monkeypatch):
+        import threading
+
+        calls: list[str] = []
+        swept = threading.Event()
+
+        def queue_unsent_time():
+            calls.append("time")
+            return {}
+
+        def sweep():
+            calls.append("sweep")
+            swept.set()
+            return []
+
+        monkeypatch.setattr(container, "queue_unsent_time", queue_unsent_time)
+        monkeypatch.setattr(container, "sweep_outboxes", sweep)
+        monkeypatch.setattr(container, "_sweeper", None)
+        container.start_outbox_sweeper(interval=3600)
+        try:
+            assert swept.wait(5), "the sweeper never ran"
+        finally:
+            container.stop_outbox_sweeper()
+            container._sweeper.join(5)
+
+        assert calls == ["time", "sweep"], "once, and before the sweep that drains it"

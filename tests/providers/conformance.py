@@ -308,6 +308,36 @@ class ProviderConformance(SpaceConformance):
         end = datetime.now(timezone.utc)
         provider.log_time(task.id, end - timedelta(minutes=30), end)
 
+    def test_logged_time_reads_back_when_declared(self, provider, container):
+        """What was logged comes back as the same stretch, with the board's own
+        id, aware instants, and the card's total on the container fetch."""
+        from datetime import datetime, timedelta, timezone
+
+        caps = provider.capabilities
+        if not (caps.supports_time_tracking and caps.supports_time_readback):
+            pytest.skip("provider cannot read time back")
+        task = provider.create_task(
+            container.id, self._group(provider, container), "Timed")
+        end = datetime(2026, 9, 15, 15, 39, 41, 527999, tzinfo=timezone.utc)
+        begin = end - timedelta(minutes=26)
+        provider.log_time(task.id, begin, end)
+
+        entries = provider.time_entries(task.id)
+        fetched = provider.fetch_container(container.id, with_tasks=True)
+
+        assert len(entries) == 1
+        assert entries[0].id
+        assert abs(entries[0].begin - begin) < timedelta(milliseconds=1)
+        assert abs(entries[0].end - end) < timedelta(milliseconds=1)
+        card = next(t for t in fetched.tasks if t.id == task.id)
+        assert card.minutes_spent == 26
+
+    def test_reading_time_of_an_unknown_task_raises(self, provider):
+        if not provider.capabilities.supports_time_readback:
+            pytest.skip("provider cannot read time back")
+        with pytest.raises(ProviderError):
+            provider.time_entries("no-such-task")
+
     def test_logging_time_on_an_unknown_task_raises(self, provider):
         from datetime import datetime, timezone
 

@@ -5,6 +5,7 @@ server layer can pull the composed graph without knowing construction details.
 """
 
 import atexit
+import logging
 import threading
 import time
 
@@ -26,6 +27,8 @@ from memory_mcp.services import (
 OUTBOX_SWEEP_SECONDS = 60.0
 #: How long a short-lived process waits for its own mirrors before exiting.
 MIRROR_EXIT_GRACE_SECONDS = 30.0
+
+logger = logging.getLogger(__name__)
 
 
 class Container:
@@ -54,6 +57,7 @@ class Container:
         self._flush_threads: dict[str, threading.Thread] = {}
         self._sweeper: threading.Thread | None = None
         self._sweeper_stop = threading.Event()
+        self._time_backfill: threading.Thread | None = None
 
         # Services
         self.rules_service = RulesService(self.memory_repo, self.rules_cache)
@@ -214,13 +218,44 @@ class Container:
                 continue
         return nudged
 
+    def queue_unsent_time(self) -> dict[str, int]:
+        """Queue a `time` op wherever closed time was never sent. Per project, how many tasks.
+
+        Run ONCE per daemon start, before the first sweep, not on every sweep.
+        A `time` op the flusher abandons after MAX_OUTBOX_ATTEMPTS leaves its
+        entries unsent with nothing queued - exactly what this looks for - so
+        running it every minute would turn the attempt cap into a retry loop
+        against a card that keeps refusing. Once per start bounds that, and a
+        start is also when new mirror code first runs.
+        """
+        from memory_mcp.db.registry import linked_slugs
+
+        queued: dict[str, int] = {}
+        slugs = linked_slugs()
+        for slug in slugs:
+            try:
+                task_ids = self.task_bridge.queue_unsent_time(slug)
+            except Exception:  # noqa: BLE001 - one unreadable project must not hide the others' time
+                logger.exception("could not queue unsent time for %s", slug)
+                continue
+            if task_ids:
+                queued[slug] = len(task_ids)
+        return queued
+
     def start_outbox_sweeper(self, interval: float = OUTBOX_SWEEP_SECONDS) -> None:
-        """Sweep once now and then every `interval` seconds, until stopped."""
+        """Queue unsent time, then sweep now and every `interval` seconds, until stopped."""
         if self._sweeper is not None and self._sweeper.is_alive():
             return
         self._sweeper_stop.clear()
 
         def _loop():
+            # On the sweeper's thread rather than in start-up: it opens every
+            # linked project's database, and the daemon must not wait on that.
+            # Before the first sweep, so what it queues is drained by that sweep.
+            try:
+                self.queue_unsent_time()
+            except Exception:  # noqa: BLE001 - no registry; the sweep still has to run
+                logger.exception("could not queue unsent time")
             while not self._sweeper_stop.is_set():
                 try:
                     self.sweep_outboxes()
@@ -233,6 +268,49 @@ class Container:
 
     def stop_outbox_sweeper(self) -> None:
         self._sweeper_stop.set()
+
+    def backfill_remote_time(self) -> dict[str, int]:
+        """Catch up the time logged on every linked board's cards. Per project,
+        how many stretches came in.
+
+        Once per link, not per start: the bridge marks a link caught up and
+        skips it after that, so a restart costs one registry read per link.
+        """
+        from memory_mcp.db.registry import linked_slugs
+
+        imported: dict[str, int] = {}
+        for slug in linked_slugs():
+            try:
+                result = self.task_bridge.backfill_remote_time(slug)
+            except Exception:  # noqa: BLE001 - one unreadable project must not hide the others' time
+                logger.exception("could not backfill remote time for %s", slug)
+                continue
+            if result["failed"]:
+                logger.warning("remote time backfill for %s: %s", slug, result["failed"])
+            if result["entries"]:
+                imported[slug] = result["entries"]
+        if imported:
+            logger.info("remote time backfilled: %s", imported)
+        return imported
+
+    def start_time_backfill(self) -> None:
+        """Run `backfill_remote_time` once, on its own thread.
+
+        Its own thread rather than the sweeper's: the first catch-up reads one
+        card at a time across every board - minutes, on a machine with a long
+        history - and the sweeper must keep draining outboxes meanwhile.
+        """
+        if self._time_backfill is not None and self._time_backfill.is_alive():
+            return
+
+        def _run():
+            try:
+                self.backfill_remote_time()
+            except Exception:  # noqa: BLE001 - no registry; nothing to backfill, and the daemon runs on
+                logger.exception("remote time backfill did not run")
+
+        self._time_backfill = threading.Thread(target=_run, name="time-backfill", daemon=True)
+        self._time_backfill.start()
 
     def wait_for_mirrors(self, timeout: float = MIRROR_EXIT_GRACE_SECONDS) -> None:
         """Give in-flight flush threads a chance to finish. For a short-lived

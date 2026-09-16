@@ -31,7 +31,7 @@ The four translations that earn the adapter:
 
 import contextlib
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 
 from memory_mcp.asoode_client import (
     ORDINAL_TO_STATE,
@@ -49,6 +49,7 @@ from memory_mcp.providers.base import (
     ContainerRef,
     Group,
     RemoteTask,
+    RemoteTimeEntry,
     SpaceRef,
 )
 
@@ -62,6 +63,8 @@ _CAPABILITIES = Capabilities(
     supports_independent_state=True,
     # POST /tasks/:id/spend-time {begin, end}
     supports_time_tracking=True,
+    # POST /tasks/:id/detail -> timeSpents, each stretch with its own id.
+    supports_time_readback=True,
     supports_archive=True,
     supports_change_feed=True,
     supports_labels=True,
@@ -607,6 +610,22 @@ class AsoodeProvider:
             _utc_iso(end) if end else None,
         )
 
+    def time_entries(self, task_id: str) -> tuple[RemoteTimeEntry, ...]:
+        """Every closed stretch on a card, from `POST /tasks/:id/detail`.
+
+        One detail read per card, because the board fetch cannot stand in for
+        it: work-packages.service.ts folds CLOSED stretches into the card's
+        `timeSpent` total and fills `timeSpents` with the open ones only.
+        Verified against the live board on 2026-09-15 - 7 of 20 cards carried a
+        total there, none carried an entry - while the detail of the same card
+        returned its stretch as `{id, begin, end, manual, userId, taskId, diff,
+        member, ...}` with `begin`/`end` as ISO instants ending in `Z`.
+        """
+        detail = self.client.task_detail(task_id)
+        items = detail.get("timeSpents") or ()
+        entries = (_to_time_entry(item) for item in items)
+        return tuple(entry for entry in entries if entry is not None)
+
     # ---------- translation ----------
 
     def _first_group(self, container_id: str) -> str:
@@ -640,6 +659,7 @@ class AsoodeProvider:
                         description=html_to_markdown(task.get("description")),
                         group_id=board_list.get("id"),
                         external_ref=task.get("externalRef"),
+                        minutes_spent=_minutes(task.get("timeSpent")),
                     ))
         return Container(
             id=board["id"],
@@ -655,6 +675,47 @@ class AsoodeProvider:
             ),
             tasks=tuple(tasks),
         )
+
+
+def _minutes(value) -> int | None:
+    """asoode's `timeSpent` total, or None when the row did not carry one."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _to_time_entry(item: dict) -> RemoteTimeEntry | None:
+    """One `timeSpents` item, or None for a stretch that is still running."""
+    if not item.get("end"):
+        return None
+    entry_id = item.get("id")
+    if not entry_id:
+        raise AsoodeError("asoode returned a time entry without an id")
+    return RemoteTimeEntry(
+        id=entry_id,
+        begin=_parse_instant(item.get("begin")),
+        end=_parse_instant(item.get("end")),
+        manual=bool(item.get("manual")),
+    )
+
+
+def _parse_instant(value) -> datetime:
+    """An instant from asoode, timezone-aware.
+
+    asoode answers in UTC with a `Z`. A value with no offset at all is read as
+    UTC too, because that is what asoode stores - the inverse of `_utc_iso`.
+    An unreadable one raises: guessing a clock would put the stretch on the
+    wrong day, and nothing downstream could tell.
+    """
+    if not isinstance(value, str) or not value:
+        raise AsoodeError(f"asoode returned an unreadable instant: {value!r}")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise AsoodeError(f"asoode returned an unreadable instant: {value!r}") from error
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _match_member(members: list[dict], text: str | None) -> str | None:

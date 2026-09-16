@@ -110,6 +110,25 @@ class TestTheGateDecision:
         assert answer["allow"] is True
         assert "Real work" in answer["reason"]
 
+    def test_a_started_sub_task_opens_the_gate(self, project, monkeypatch):
+        """Starting the sub-task being worked must be enough. When it was not,
+        the way through was to start the parent, whose clock then held the
+        sub-task's work."""
+        _bind(project)
+        monkeypatch.setattr(
+            "memory_mcp.context.detect_project_from_cwd", lambda cwd: project,
+        )
+        parent = container.task_service.create(
+            CreateTaskRequest(project=project, title="The feature")
+        )
+        child = container.task_service.create(
+            CreateTaskRequest(project=project, title="Its first part", parent_id=parent.id)
+        )
+        container.task_service.start(project, child.id)
+        answer = _gate("/anywhere")
+        assert answer["allow"] is True
+        assert answer["task_id"] == child.id
+
     def test_finishing_the_task_closes_it_again(self, project, monkeypatch):
         _bind(project)
         monkeypatch.setattr(

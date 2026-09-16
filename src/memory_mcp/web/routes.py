@@ -1152,10 +1152,12 @@ def _task_update(params, body, query):
             "minutes_spent": detail.minutes_spent,
             "minutes_spent_total": detail.minutes_spent_total,
         }
-        if detail.time_entries and detail.time_entries[-1].manual:
-            answer["time"]["recovered"] = (
-                "no clock was running; recovered from the state history"
-            )
+        time_note = container.task_service.close_time_note(params["slug"], task.id) or {}
+        if time_note.get("recorded"):
+            # Recovered from the state history or estimated from other evidence -
+            # the note says which, so the UI never calls an estimate a record.
+            answer["time"]["recovered"] = time_note.get("note")
+            answer["time"]["from"] = time_note.get("from")
         elif not detail.minutes_spent:
             answer["time"]["warning"] = (
                 "closed with NO time tracked - start the task before working it"

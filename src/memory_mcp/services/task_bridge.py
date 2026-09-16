@@ -50,11 +50,15 @@ import logging
 import os
 import posixpath
 import threading
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from memory_mcp.asoode import get_endpoints
 from memory_mcp.exceptions import MemoryMCPError
 from memory_mcp.providers import (
-    Container, ProviderError, TaskProvider, TransientProviderError,
+    Container, ProviderAuthError, ProviderError, RemoteTimeEntry, TaskProvider,
+    TransientProviderError,
 )
 from memory_mcp.services.echo_log import EchoLog
 from memory_mcp.db.registry import (
@@ -71,6 +75,9 @@ from memory_mcp.db.registry import (
 )
 from memory_mcp.models import (
     CreateTaskRequest, TaskFilter, TaskSource, TaskState, UpdateTaskRequest,
+)
+from memory_mcp.repositories.task_repository import (
+    ImportedTimeEntry, LocalTimeEntry, RemoteTimeMatch, SyncedTimeTotal,
 )
 
 # How many batches one flush call will drain before handing back. Bounded so a
@@ -244,6 +251,123 @@ def _same_board(link: dict, entry: dict) -> bool:
     return not ours or not theirs or ours == theirs
 
 
+# ---------- time read back from the board ----------
+
+#: How many cards one import reads the logged time of. Each is a network call
+#: and an import runs after every mirror, so it is capped; a board with more
+#: cards behind is finished by the imports that follow, because a card whose
+#: time has caught up is never read again.
+TIME_READS_PER_IMPORT = 50
+
+#: The same cap for the once-per-link catch-up, which runs on its own thread.
+#: A board past it is not marked caught up, so the next daemon start continues.
+TIME_READS_PER_BACKFILL = 1000
+
+#: Registry setting, per link, recording that its cards' time was caught up.
+TIME_BACKFILL_SETTING_PREFIX = "time_backfill_done:link:"
+
+#: A stretch we sent and read back is the same stretch within this. The board
+#: keeps milliseconds and the local clock microseconds; a real second stretch
+#: that starts and ends within a second of another does not exist.
+SAME_STRETCH_TOLERANCE = timedelta(seconds=1)
+
+_MILLISECONDS_PER_MINUTE = 60_000
+
+
+@dataclass(frozen=True)
+class TimeImportPlan:
+    """What one time import writes: the board's stretches that are new here, and
+    ours the board turned out to hold already."""
+
+    imported: tuple[ImportedTimeEntry, ...]
+    matched: tuple[RemoteTimeMatch, ...]
+
+
+def _local_clock(instant: datetime) -> datetime:
+    """An aware instant in the store's clock: naive, machine-local - the inverse
+    of what the provider does on the way out."""
+    return instant.astimezone().replace(tzinfo=None)
+
+
+def _is_behind(reported_minutes: int | None, mirrored_milliseconds: int) -> bool:
+    """Whether a card reports more time than this side knows the board holds.
+
+    Rounded half-up to whole minutes, the way the board rounds its own total,
+    so a card whose every stretch is already here is never read again. A card
+    that reports no total at all has to be read to find out.
+    """
+    if reported_minutes is None:
+        return True
+    half_minute = _MILLISECONDS_PER_MINUTE // 2
+    known_minutes = (mirrored_milliseconds + half_minute) // _MILLISECONDS_PER_MINUTE
+    return reported_minutes > known_minutes
+
+
+def _same_stretch(
+    candidates: Sequence[LocalTimeEntry], begin: datetime, end: datetime,
+) -> LocalTimeEntry | None:
+    """The local stretch with these bounds, within SAME_STRETCH_TOLERANCE."""
+    return next(
+        (
+            entry for entry in candidates
+            if abs(entry.begin_at - begin) <= SAME_STRETCH_TOLERANCE
+            and abs(entry.end_at - end) <= SAME_STRETCH_TOLERANCE
+        ),
+        None,
+    )
+
+
+def plan_time_import(
+    remote_by_task: Mapping[str, Sequence[RemoteTimeEntry]],
+    local: Sequence[LocalTimeEntry],
+) -> TimeImportPlan:
+    """Decide which of the board's stretches to record here.
+
+    Keyed by LOCAL task id. Two identities, in order of trust:
+
+    1. The board's entry id, once we hold it. A stretch imported before, or one
+       of ours already matched, is skipped - that is what makes a re-import add
+       nothing.
+    2. The bounds, for a stretch of ours that went OUT: the board gave it an id
+       we never learned, because the send route does not return one. Matched
+       one to one, so two identical stretches on the board stay two.
+
+    Anything else is new here, and is imported.
+    """
+    known_remote_ids = frozenset(entry.remote_id for entry in local if entry.remote_id)
+    unclaimed: dict[str, list[LocalTimeEntry]] = {}
+    for entry in local:
+        if entry.remote_id is None:
+            unclaimed.setdefault(entry.task_id, []).append(entry)
+
+    arriving = tuple(
+        (task_id, remote)
+        for task_id, entries in remote_by_task.items()
+        for remote in entries
+        if remote.id not in known_remote_ids
+    )
+    imported: list[ImportedTimeEntry] = []
+    matched: list[RemoteTimeMatch] = []
+    seen: set[str] = set()
+    for task_id, remote in arriving:
+        if remote.id in seen:
+            continue
+        seen.add(remote.id)
+        begin = _local_clock(remote.begin)
+        end = _local_clock(remote.end)
+        candidates = unclaimed.get(task_id, [])
+        twin = _same_stretch(candidates, begin, end)
+        if twin is not None:
+            candidates.remove(twin)
+            matched.append(RemoteTimeMatch(entry_id=twin.id, remote_id=remote.id))
+            continue
+        imported.append(ImportedTimeEntry(
+            task_id=task_id, remote_id=remote.id,
+            begin_at=begin, end_at=end, manual=remote.manual,
+        ))
+    return TimeImportPlan(imported=tuple(imported), matched=tuple(matched))
+
+
 class TaskBridge:
     def __init__(
         self, project_service, task_service, provider: TaskProvider | None = None,
@@ -260,6 +384,10 @@ class TaskBridge:
         # DuckDB fails that with "Failed to delete all rows from index". The
         # lock belongs HERE, where every flush passes, not at one call site.
         self._flush_locks: dict[str, threading.Lock] = {}
+        # One time import per project at a time, around its local read and
+        # write only - never around the network, so a long catch-up does not
+        # hold every reconcile of the project behind it.
+        self._time_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         # What we have just written to the remote, so the socket can ignore the
         # broadcast of our own change. asoode does no actor exclusion and drops
@@ -269,6 +397,10 @@ class TaskBridge:
     def _flush_lock(self, slug: str) -> threading.Lock:
         with self._locks_guard:
             return self._flush_locks.setdefault(slug, threading.Lock())
+
+    def _time_lock(self, slug: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._time_locks.setdefault(slug, threading.Lock())
 
     @property
     def provider(self) -> TaskProvider:
@@ -1332,7 +1464,11 @@ class TaskBridge:
         with contextlib.suppress(Exception):
             self.refresh_state_map(slug, link, container)
         with self._tasks.suppress_mirroring():
-            return self._import_rows(slug, link, container, limit, update_existing)
+            result = self._import_rows(slug, link, container, limit, update_existing)
+            # After the rows, so a card created by this import already maps to
+            # its local task and brings its time in on the same pass.
+            result["time"] = self._import_time(slug, link, container, TIME_READS_PER_IMPORT)
+            return result
 
     def _import_rows(self, slug, link, container, limit, update_existing=True) -> dict:
         created, updated, skipped = [], [], 0
@@ -1464,14 +1600,129 @@ class TaskBridge:
         links = get_project_links(slug)
         if not links:
             return {"slug": slug, "imported": 0, "reason": "not linked"}
-        imported, failed = 0, []
+        imported, time_imported, failed = 0, 0, []
         for link in links:
             try:
                 result = self.import_board(slug, link, update_existing=False)
                 imported += result["counts"]["created"]
+                time_imported += result["time"]["entries"]
             except ProviderError as e:
                 failed.append({"board": link.get("label"), "error": str(e)})
-        return {"slug": slug, "imported": imported, "failed": failed}
+        return {
+            "slug": slug, "imported": imported, "time_imported": time_imported,
+            "failed": failed,
+        }
+
+    def _import_time(
+        self, slug: str, link: dict, container: Container, max_reads: int,
+    ) -> dict:
+        """Bring the time logged on this board's cards in as local stretches.
+
+        Safe in reconcile mode too, which never overwrites: a stretch is
+        APPENDED, and one that is already here - imported before, or ours sent
+        out - is recognised and left alone (`plan_time_import`). Each imported
+        stretch carries `mirrored_at`, so nothing ever sends it back; it is
+        written through the outbox repository, which queues no op.
+
+        Reads only the cards that report more time than this side knows the
+        board holds, at most `max_reads` of them, one network call each - the
+        board fetch carries each card's total but not its stretches. The board
+        is read BEFORE the local stretches: any stretch of ours on the board was
+        closed here first, so the local read is guaranteed to contain it.
+        """
+        provider = self.provider_for(link)
+        if self._outbox is None or not provider.capabilities.supports_time_readback:
+            return {"entries": 0, "cards_read": 0, "remaining": 0, "failed": []}
+        behind = self._cards_behind_on_time(slug, link, container)
+        to_read = behind[:max_reads]
+        remote_by_task, failed = self._read_time(provider, to_read)
+        with self._time_lock(slug):
+            local = self._outbox.closed_entries_for(slug, tuple(remote_by_task))
+            plan = plan_time_import(remote_by_task, local)
+            recorded = self._outbox.record_remote_time(slug, plan.imported, plan.matched)
+        if recorded or plan.matched:
+            logger.info(
+                "time import %s/%s: %d stretch(es) imported, %d of ours matched",
+                slug, link.get("label"), recorded, len(plan.matched),
+            )
+        return {
+            "entries": recorded,
+            "cards_read": len(remote_by_task),
+            "remaining": len(behind) - len(to_read),
+            "failed": failed,
+        }
+
+    def _cards_behind_on_time(
+        self, slug: str, link: dict, container: Container,
+    ) -> tuple[SyncedTimeTotal, ...]:
+        """The board's cards, mapped to a local task, that report more time than
+        this side knows the board holds."""
+        reported = {
+            task.id: task.minutes_spent
+            for task in container.tasks
+            if task.minutes_spent != 0
+        }
+        totals = self._outbox.synced_time_totals(slug, link["id"], tuple(reported))
+        return tuple(
+            total for total in totals
+            if _is_behind(reported[total.remote_task_id], total.mirrored_milliseconds)
+        )
+
+    @staticmethod
+    def _read_time(
+        provider: TaskProvider, cards: Sequence[SyncedTimeTotal],
+    ) -> tuple[dict[str, tuple[RemoteTimeEntry, ...]], list[dict]]:
+        """Each card's stretches, keyed by LOCAL task id, and the cards that failed.
+
+        A card that cannot be read is reported and skipped: the rest of the
+        board's time is still worth having, and the card is still behind, so
+        the next import reads it again. A refused credential is not a card's
+        problem - it stops the read.
+        """
+        remote_by_task: dict[str, tuple[RemoteTimeEntry, ...]] = {}
+        failed: list[dict] = []
+        for card in cards:
+            try:
+                remote_by_task[card.task_id] = provider.time_entries(card.remote_task_id)
+            except ProviderAuthError:
+                raise
+            except ProviderError as e:
+                logger.warning("could not read time of card %s: %s", card.remote_task_id, e)
+                failed.append({"card": card.remote_task_id, "error": str(e)})
+        return remote_by_task, failed
+
+    def backfill_remote_time(self, slug: str) -> dict:
+        """Catch up the time of cards imported before time was, once per link.
+
+        A board is only read here while its link is not yet marked caught up;
+        after that the import that follows every mirror keeps it current. A
+        link is marked only when every card behind was read without failure,
+        so a truncated or failed catch-up is resumed by the next call.
+        """
+        entries, failed = 0, []
+        for link in get_project_links(slug):
+            setting = f"{TIME_BACKFILL_SETTING_PREFIX}{link['id']}"
+            if get_setting(setting):
+                continue
+            provider = self.provider_for(link)
+            if not provider.capabilities.supports_time_readback:
+                continue
+            try:
+                container = provider.fetch_container(
+                    link["remote_work_package_id"], with_tasks=True,
+                )
+                with self._tasks.suppress_mirroring():
+                    result = self._import_time(slug, link, container, TIME_READS_PER_BACKFILL)
+            except ProviderError as e:
+                failed.append({"board": link.get("label"), "error": str(e)})
+                continue
+            entries += result["entries"]
+            failed.extend(result["failed"])
+            if result["remaining"] or result["failed"]:
+                continue
+            caught_up_at = datetime.now(timezone.utc).isoformat()
+            set_setting(setting, caught_up_at)
+        return {"slug": slug, "entries": entries, "failed": failed}
 
     def import_all(self, slug: str) -> dict:
         """Pull every linked board into the local store."""
@@ -1560,6 +1811,25 @@ class TaskBridge:
             provider.log_time(remote_id, entry["begin_at"], entry["end_at"])
             self._outbox.mark_time_mirrored(slug, entry["id"])
         return True
+
+    def queue_unsent_time(self, slug: str) -> tuple[str, ...]:
+        """Queue the closed time entries that nothing is going to send.
+
+        Queued, not sent from here: the flusher then goes through `_flush_time`,
+        whose mark-one-at-a-time rule is what keeps a partial failure from
+        reporting the same stretch twice. Returns the task ids queued.
+        """
+        if self._outbox is None:
+            return ()
+        if not get_project_links(slug):
+            return ()
+        queued = self._outbox.queue_unsent_time(slug)
+        if queued:
+            logger.info(
+                "queued unsent time for %d task(s) in %s: %s",
+                len(queued), slug, ", ".join(queued),
+            )
+        return queued
 
     def _backfill_offer(self, slug: str, backfill: bool) -> dict:
         """What linking would move, and optionally move it.

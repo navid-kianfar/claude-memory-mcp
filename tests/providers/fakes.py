@@ -8,6 +8,8 @@ provider that behaves like a real one rather than one that behaves like the
 mock's author expected.
 """
 
+from datetime import timedelta, timezone
+
 from memory_mcp.providers import (
     Capabilities,
     Container,
@@ -15,6 +17,7 @@ from memory_mcp.providers import (
     Group,
     ProviderError,
     RemoteTask,
+    RemoteTimeEntry,
     SpaceRef,
 )
 
@@ -25,6 +28,27 @@ STATES = (
 
 DEFAULT_GROUPS = (("l-backlog", "Backlog"), ("l-todo", "To Do"),
                   ("l-doing", "In Progress"), ("l-done", "Done"))
+
+_MILLISECOND = timedelta(milliseconds=1)
+
+
+def board_instant(value):
+    """What a board keeps of an instant it is sent: UTC, to the millisecond.
+
+    A naive value is read as machine-local, exactly as asoode's adapter sends
+    it - so a round trip through the fake crosses the same clock boundary a
+    round trip through asoode does.
+    """
+    aware = value.astimezone(timezone.utc)
+    return aware.replace(microsecond=aware.microsecond // 1000 * 1000)
+
+
+def board_minutes(entries) -> int:
+    """A card's total the way asoode computes it: closed stretches, in
+    milliseconds, rounded half-up to whole minutes."""
+    total = sum((entry.end - entry.begin) // _MILLISECOND for entry in entries)
+    return (total + 30_000) // 60_000
+
 
 
 class FakeProvider:
@@ -45,6 +69,7 @@ class FakeProvider:
         self.moves: list[tuple[str, str]] = []
         self.comments: list[tuple[str, str]] = []
         self.time_logs: list[tuple[str, object, object]] = []
+        self.time_reads: list[str] = []
         self.attachments_sent: list[tuple[str, str, bytes, str | None]] = []
         self.archived: list[tuple[str, bool]] = []
         self.groups_archived: list[str] = []
@@ -76,6 +101,7 @@ class FakeProvider:
                 "group": task.get("group_id", groups[0][0]),
                 "title": task["title"], "description": task.get("description", ""),
                 "state": task.get("state", "todo"), "ref": task.get("external_ref"),
+                "time": list(task.get("time", ())),
             }
         return ContainerRef(id=container_id, title=title, external_ref=external_ref,
                             space_id=space_id)
@@ -113,6 +139,7 @@ class FakeProvider:
         return Capabilities(
             supports_external_ref=True, supports_comments=True, supports_groups=True,
             supports_independent_state=True, supports_time_tracking=True,
+            supports_time_readback=True,
             supports_attachments=True, supports_archive=True,
             supports_change_feed=True, supports_labels=True,
             supports_fields=True, supports_assignees=True, supports_subtasks=True,
@@ -164,7 +191,8 @@ class FakeProvider:
             tasks = tuple(
                 RemoteTask(id=t["id"], title=t["title"], state=t["state"],
                            description=t["description"], group_id=t["group"],
-                           external_ref=t["ref"])
+                           external_ref=t["ref"],
+                           minutes_spent=board_minutes(t.get("time", ())))
                 for t in self._tasks.values() if t["container"] == container_id
             )
         return Container(id=c["id"], title=c["title"], external_ref=c["ref"],
@@ -238,8 +266,19 @@ class FakeProvider:
         return gid
 
     def log_time(self, task_id, begin, end=None):
-        self._require_task(task_id)
+        task = self._require_task(task_id)
         self.time_logs.append((task_id, begin, end))
+        if end is None:
+            return
+        task.setdefault("time", []).append(RemoteTimeEntry(
+            id=self._next("ts"), begin=board_instant(begin), end=board_instant(end),
+            manual=True,
+        ))
+
+    def time_entries(self, task_id):
+        task = self._require_task(task_id)
+        self.time_reads.append(task_id)
+        return tuple(task.get("time", ()))
 
     def attach(self, task_id, filename, content, content_type=None):
         self._require_task(task_id)

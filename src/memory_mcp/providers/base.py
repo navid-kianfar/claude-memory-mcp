@@ -36,6 +36,7 @@ never on the one serving a tool call.
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 
@@ -88,6 +89,11 @@ class Capabilities:
     #: Time spent can be logged against a remote task. When False the flusher
     #: keeps the local entries and sends nothing, rather than losing them.
     supports_time_tracking: bool = False
+    #: The stretches logged against a remote task can be READ back one by one
+    #: (`time_entries`), each with its own id. Separate from writing: a
+    #: platform may accept time and only ever report a total. Without it the
+    #: import brings in no time rather than inventing entries from a total.
+    supports_time_readback: bool = False
     #: A task can be archived - taken off the board without being deleted.
     #: When False the flusher keeps the local archive and sends nothing,
     #: rather than failing a local operation on a remote shortcoming.
@@ -171,6 +177,27 @@ class RemoteTask:
     description: str = ""
     group_id: str | None = None
     external_ref: str | None = None
+    #: Whole minutes of work the platform reports for the task, when a container
+    #: fetch carries the total. None means the fetch did not say - which is not
+    #: the same as zero, so a caller must then read the entries to find out.
+    minutes_spent: int | None = None
+
+
+@dataclass(frozen=True)
+class RemoteTimeEntry:
+    """One CLOSED stretch of work as the platform holds it.
+
+    `begin` and `end` are timezone-AWARE instants: the provider resolves its
+    platform's clock at this boundary, so shared code never has to guess
+    whether a naive value meant UTC or the machine's local time. An open
+    stretch is never returned - it has no duration yet.
+    """
+
+    id: str
+    begin: datetime
+    end: datetime
+    #: The platform's own "typed in by hand" flag, carried as it came.
+    manual: bool = False
 
 
 @dataclass(frozen=True)
@@ -394,3 +421,12 @@ class TaskProvider(Protocol):
         entries, because an open one has no duration to report and would have to
         be corrected later.
         """
+
+    def time_entries(self, task_id: str) -> tuple[RemoteTimeEntry, ...]:
+        """Every closed stretch of work logged against a remote task, by anyone.
+
+        Only called when `supports_time_readback`. Open stretches are left out.
+        Raises ProviderError for a task the platform does not have, like every
+        other per-task call.
+        """
+        return ()

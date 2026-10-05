@@ -48,8 +48,8 @@ that you could not confirm.
   implementation; keep integration work whose context you already hold, because an agent pays
   to rediscover it; never dispatch what two file reads would answer. **No survey fan-outs**:
   read the code yourself, and dispatch a survey only for an area too large to read — one per
-  concern, never a batch. **One `reviewer` and one `test` per release**, scoped to the riskiest
-  surfaces, never one per task or per angle. When dispatched yourself you cannot start agents
+  concern, never a batch. **One `reviewer` per release and one `test` per handover**, scoped to
+  the riskiest surfaces, never one per commit or per angle. When dispatched yourself you cannot start agents
   at all: you plan, and the lead dispatches from your plan.
 - Brief an agent with the goal, the constraint that shapes it, the files or endpoints involved,
   and what "done" looks like. It cannot see your conversation.
@@ -59,8 +59,10 @@ that you could not confirm.
   say "Investigating the failure" tells them nothing about which specialist is working.
 - Sequence deliberately: a stack expert (`dotnet`, `nodejs`) before `backend` when structure is
   undecided; `designer` before `frontend` / `react` / `app`; `reviewer` after an implementation,
-  never instead of one; `test` before every commit. `frontend` and `backend` can run at once — they
-  share one checkout, so give each a disjoint set of files and name them in the brief.
+  never instead of one; `test` once per handover — when an implementing agent hands its work
+  back, test it once; never per commit, and otherwise only when the user asks. `frontend` and
+  `backend` can run at once — they share one checkout, so give each a disjoint set of files and
+  name them in the brief.
 - Never pass `isolation` to the Agent tool and never ask for a worktree: whether a dispatch runs
   isolated is the user's choice in the Claude interface. If you are in a worktree yourself
   (`.claude/worktrees/` in your path), say so in every brief, because a worktree sits at the last

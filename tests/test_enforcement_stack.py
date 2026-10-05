@@ -114,12 +114,12 @@ class TestTheMeasuredText:
             "specialists implement. Available: app, backend, designer, devops, docs, "
             "dotnet, frontend, go, kotlin, nodejs, python, react, reviewer, rust, "
             "test. Dispatch the stack's own expert over generic backend/frontend; "
-            "designer before UI; test before a commit. Name the agent type in each "
+            "designer before UI; test once per handover. Name the agent type in each "
             "dispatch description."
         )
         assert _line() == expected
         assert _line(repo) == expected  # a repo with no marker at all
-        assert len(expected) == 373
+        assert len(expected) == 375
 
     def test_state_2_one_stack(self, roster, repo):
         _files(repo, {"pyproject.toml": PYPROJECT})
@@ -129,11 +129,11 @@ class TestTheMeasuredText:
         assert line == (
             "[Agent team] You are the technical lead: you plan, brief and integrate; "
             "specialists implement. This repo: .=python - dispatch those, never "
-            "generic backend/frontend. Also: designer (before UI), test (before a "
-            "commit), reviewer, devops, docs. Name the agent type in each dispatch "
+            "generic backend/frontend. Also: designer (before UI), test (once per "
+            "handover), reviewer, devops, docs. Name the agent type in each dispatch "
             "description."
         )
-        assert len(line) == 290
+        assert len(line) == 292
 
     def test_state_3_this_repos_own_shape(self, roster, repo):
         _files(repo, {"pyproject.toml": PYPROJECT, **VITE_REACT})
@@ -141,7 +141,7 @@ class TestTheMeasuredText:
         line = _line(repo)
 
         assert "This repo: .=python; frontend/=react - dispatch those" in line
-        assert len(line) == 307
+        assert len(line) == 309
 
     def test_state_3_three_hits_and_overflow(self, roster, repo):
         _files(repo, {
@@ -159,7 +159,7 @@ class TestTheMeasuredText:
             "This repo: .=python; apps/api/=nodejs; apps/web/=react "
             "(+2 more, see session intro) - dispatch those"
         ) in line
-        assert len(line) == 354
+        assert len(line) == 356
 
     def test_the_counts_the_brief_quotes_are_what_ships(self, roster, repo):
         """The escalated line, both variants, at the lengths DECISIONS measured."""
@@ -250,7 +250,7 @@ class TestTheStackLine:
 
         line = _line(repo)
 
-        assert "Also: test (before a commit)." in line
+        assert "Also: test (once per handover)." in line
         assert "designer" not in line
 
 

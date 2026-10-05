@@ -86,7 +86,7 @@ its identity, craft and hand-offs; an expert file `extends:` a role and adds the
 | `backend` | `_base` | xhigh | APIs, services, data models, schema, migrations |
 | `frontend` | `_base` | xhigh | UI implementation to the designer's spec, verified in the browser |
 | `designer` | `_base` | max | Tokens, component specs, flows, visual review — before any UI is built |
-| `test` | `_base` | max | Verifying other agents' work on the running product; the gate before a commit |
+| `test` | `_base` | max | Verifying other agents' work on the running product; once per handover (an implementing agent hands its work back), never per commit |
 | `reviewer` | `_base` | max | Independent review; **no Edit/Write** (`disallowedTools`); preloads `code-review`, `security-review` |
 | `devops` | `_base` | xhigh | CI, builds, deploys, containers, monitoring; stops before anything irreversible |
 | `docs` | `_base` | high | READMEs, API docs, changelogs for readers outside the session |

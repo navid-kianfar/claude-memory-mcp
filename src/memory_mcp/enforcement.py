@@ -209,7 +209,7 @@ _LINE_BUDGET = 390
 
 #: The roles that are not about a stack, in the order the lead meets them.
 _ALSO_ROLES = ("designer", "test", "reviewer", "devops", "docs")
-_ALSO_LABELS = {"designer": "designer (before UI)", "test": "test (before a commit)"}
+_ALSO_LABELS = {"designer": "designer (before UI)", "test": "test (once per handover)"}
 
 #: Paths under these segments, and any `*.md`, are not source: the lead writing
 #: its own notes, the memory snapshot or the docs is not implementing a task.
@@ -261,8 +261,11 @@ _DIVISION_OF_WORK = (
     "reviews and tests as a single agent - a second reviewer prompts too.",
     "  - Sequence: a stack expert before `backend` when the structure is undecided; "
     "`designer` before `frontend`/`react`/`app`; `reviewer` after an "
-    "implementation, never instead of one; `test` before every commit, against the "
-    "RUNNING instance (daemon, UI, board) - the repo's suite proves the code, the "
+    "implementation, never instead of one; `test` ONCE PER HANDOVER: when an "
+    "implementing agent finishes and hands its work back to you, dispatch `test` "
+    "once for that work - never per commit or per bug, however many commits it "
+    "took, and otherwise only when the user asks. It runs against the RUNNING "
+    "instance (daemon, UI, board) - the repo's suite proves the code, the "
     "test agent proves the product.",
     "  - Agents run at once only when their file sets are disjoint: name each "
     "agent's files in its brief. They share this one checkout. NEVER pass "
@@ -275,8 +278,8 @@ _DIVISION_OF_WORK = (
     "under-specified brief buys a second dispatch.",
     "  - NO SURVEY FAN-OUTS by default: read the code yourself. A survey dispatch is "
     "for an area genuinely too large to read, one per concern, never a batch. ONE "
-    "`reviewer` and ONE `test` per release, scoped to the riskiest surfaces - never "
-    "one per task, never one per angle.",
+    "`reviewer` per release and ONE `test` per handover, scoped to the riskiest "
+    "surfaces - never one per commit, never one per angle.",
     "  - An agent reporting a cross-boundary risk is reporting it to YOU. Decide "
     "whether the other side changes and brief that agent; never let one agent "
     "reshape another's contract.",
@@ -391,7 +394,7 @@ def _roster_line(names: list[str]) -> str:
         line = (
             f"{_LEAD_SENTENCE} Available: {', '.join(shown)}{more}. Dispatch the "
             "stack's own expert over generic backend/frontend; designer before UI; "
-            f"test before a commit. {_NAME_SENTENCE}"
+            f"test once per handover. {_NAME_SENTENCE}"
         )
         if len(line) <= _LINE_BUDGET or len(shown) <= 1:
             return line

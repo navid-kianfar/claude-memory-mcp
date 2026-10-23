@@ -50,6 +50,14 @@ IDENT=(
 )
 MEMORY_MCP_BIN="${MEMORY_MCP_BIN:-$HOME/.claude-memory-mcp/runtime/bin/memory-mcp}"
 
+# A daemon that is down makes every call below fail silently, and silence reads
+# exactly like "nothing to report" - a session then works for hours storing
+# nothing. Say so once, at the start, where it can still be acted on.
+if ! curl -s -o /dev/null --max-time 3 "${AUTH[@]}" "${BASE}/api/health" 2>/dev/null; then
+  echo "[Memory MCP] The memory daemon is not answering at ${BASE}, so its tools are unavailable and nothing this session learns will be stored. Tell the user before recording rules or decisions; restart it with: launchctl kickstart -k gui/\$(id -u)/com.claude-memory-mcp.daemon"
+  exit 0
+fi
+
 # Claim this folder for the project its committed .claude-memory/manifest.json
 # names, then pull that snapshot into the central store. Runs BEFORE
 # auto-register: claiming re-binds a moved or renamed folder to its existing

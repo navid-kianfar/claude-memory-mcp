@@ -18,6 +18,15 @@
     {
       "provider": "asoode",
       "base_url": "https://api.asoode.com",
+      "remote_project_id": "fcf24bbd-ea89-41c8-b2f2-17442987c63a",
+      "remote_work_package_id": "386b554e-9053-4b60-bd67-145b301de057",
+      "label": "Claude Memory MCP",
+      "is_default": true,
+      "match_paths": []
+    },
+    {
+      "provider": "asoode",
+      "base_url": "https://api.asoode.com",
       "remote_project_id": "d00a21df-d78c-4d1f-8423-23591136cef8",
       "remote_work_package_id": "a67ab907-496e-411b-be40-5b227d58857e",
       "label": "Claude Memory MCP",
@@ -25,5 +34,5 @@
       "match_paths": []
     }
   ],
-  "exported_at": "2026-09-16T18:54:36.969802+00:00"
+  "exported_at": "2026-10-19T07:15:45.786662+00:00"
 }

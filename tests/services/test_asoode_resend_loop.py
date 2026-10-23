@@ -185,8 +185,8 @@ class TestTheOutboxProvesItsWritesLand:
         ids = [outbox.enqueue(project, f"t{i}", "state", {}) for i in range(3)]
         with connect(project) as conn:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_id ON task_outbox(id)")
-            conn.execute("DELETE FROM schema_version WHERE version = 18")
-            assert schema_mod.run_migrations(conn) == 18
+            conn.execute("DELETE FROM schema_version WHERE version >= 18")
+            assert schema_mod.run_migrations(conn) == schema_mod.CURRENT_SCHEMA_VERSION
             indexes = conn.execute(
                 "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'task_outbox'"
             ).fetchall()

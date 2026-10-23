@@ -18,7 +18,7 @@ import sys
 
 USAGE = (
     "Usage: memory-mcp "
-    "[stdio|serve|rules|sync|merge-snapshot|setup|update|user|bind|asoode|provider]"
+    "[stdio|serve|rules|sync|merge-snapshot|setup|update|user|bind|asoode|provider|repair]"
 )
 
 
@@ -72,6 +72,9 @@ def main() -> None:
     elif cmd == "provider":
         from memory_mcp.provider_cli import main as provider_main
         provider_main(args[1:])
+    elif cmd == "repair":
+        from memory_mcp.repair_cli import main as repair_main
+        sys.exit(repair_main(args[1:]))
     elif cmd in ("-h", "--help", "help"):
         print(USAGE)
     else:

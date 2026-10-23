@@ -540,6 +540,7 @@ class TestAnExistingDatabaseUpgradesIntoIt:
             conn.execute("DELETE FROM schema_version WHERE version >= 16")
             conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (15)")
         # The next open is a first open in this process, so it migrates.
+        connection_module.release_project_database(project)
         connection_module._initialized_dbs.clear()
 
         first = planner.plan(project, REQUEST, ITEMS)

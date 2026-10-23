@@ -716,6 +716,20 @@ def _sync_import(params, body, query):
     return {"status": "ok", **result}
 
 
+
+def _repair(params, body, query):
+    """Probe this project's database for stale key indexes and rebuild them.
+
+    Runs here, in the process that holds the file, because the rebuild is a
+    write and DuckDB allows one writer per file. The probe itself runs on a
+    copy in child processes: a stale index kills whatever process trips it.
+    """
+    from memory_mcp.db.repair import repair_project
+
+    slug = params["slug"]
+    container.project_service.get(slug)
+    return repair_project(slug, check_only=bool(body.get("check_only")))
+
 def _tpl(template) -> dict:
     return template.model_dump(mode="json")
 
@@ -1486,6 +1500,7 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/import-claude-md", _api(_import_claude_md), methods=["POST"]),
         Route("/api/projects/{slug}/sync-export", _api(_sync_export), methods=["GET"]),
         Route("/api/projects/{slug}/sync-import", _api(_sync_import), methods=["POST"]),
+        Route("/api/projects/{slug}/repair", _api(_repair, admin=True), methods=["POST"]),
         Route("/api/projects/{slug}/link-folder", _api(_link_folder), methods=["POST"]),
         Route("/api/projects/{slug}/bind", _api(_bind_backend), methods=["POST"]),
         Route("/api/projects/{slug}/apply-template", _api(_apply_template), methods=["POST"]),

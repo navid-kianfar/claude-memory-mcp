@@ -7,7 +7,9 @@ import duckdb
 
 from memory_mcp.config import settings
 from memory_mcp.constants import PORTABLE_DB_NAME
-from memory_mcp.db.connection import get_connection, invalidate_path_cache
+from memory_mcp.db.connection import (
+    get_connection, invalidate_path_cache, release_database,
+)
 from memory_mcp.db.schema import create_hnsw_index, create_schema, install_vss
 from memory_mcp.exceptions import ProjectNotFoundError
 from memory_mcp.repositories import ProjectRepository
@@ -93,6 +95,9 @@ class PortableService:
             }
 
         if current_db.exists():
+            # Checkpoints the WAL into the file and drops this process's handle,
+            # so the copy is complete and nothing keeps writing the old file.
+            release_database(current_db)
             shutil.copy2(str(current_db), str(target_db))
             backup_path = settings.backups_dir / f"{project}_pre-portable.duckdb"
             shutil.move(str(current_db), str(backup_path))

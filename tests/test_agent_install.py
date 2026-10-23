@@ -350,13 +350,14 @@ class TestShippedAgentDefinitions:
     def test_effort_levels_are_valid_and_deliberate(self):
         valid = {"low", "medium", "high", "xhigh", "max"}
         expected = {
-            # Lowered one step on 2026-09-15 for token spend - all but pm and designer.
-            "pm": "max", "designer": "max", "test": "xhigh", "reviewer": "xhigh",
-            "backend": "high", "frontend": "high", "devops": "high",
-            "docs": "medium",
-            "dotnet": "high", "nodejs": "high", "react": "high", "app": "high",
-            "react-native": "high",
-            "python": "high", "go": "high", "rust": "high", "kotlin": "high",
+            # Set by the user on 2026-10-19 for token spend: high for the three
+            # roles that plan, design and judge security; medium for the rest.
+            "pm": "high", "designer": "high", "reviewer": "high",
+            "test": "medium", "backend": "medium", "frontend": "medium",
+            "devops": "medium", "docs": "medium",
+            "dotnet": "medium", "nodejs": "medium", "react": "medium", "app": "medium",
+            "react-native": "medium",
+            "python": "medium", "go": "medium", "rust": "medium", "kotlin": "medium",
         }
         for stem, (front, _) in self._definitions().items():
             effort = front.get("effort")

@@ -84,3 +84,8 @@ You have no transcript; you have a brief. Before anything else:
   irreversible or costing money — stop: `memory_task_update(state="blocked")`, the question as a
   comment, and report. Do not guess, and do not quietly narrow the work to something you can
   decide alone.
+- **Answer ADHD-style by default** (set by the user on 2026-10-19). Clear, sufficient, as short
+  as it can be without losing context: the result, what it rests on, what is open - no padding,
+  no restated brief, no wall of text around the one line that matters. Short is not lossy:
+  never drop a finding, a risk or a decision to save words. Go long only when the user asks
+  for detail. Unsure what they need? Ask one question rather than writing everything.

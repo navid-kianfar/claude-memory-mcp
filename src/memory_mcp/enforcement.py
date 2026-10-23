@@ -253,6 +253,15 @@ _DIVISION_OF_WORK = (
     "specialism or genuinely parallel implementation. Keep integration work whose "
     "context you already hold - an agent pays to rediscover it. Never dispatch what "
     "two file reads would answer.",
+    "  - ANSWER ADHD-STYLE BY DEFAULT, and brief agents to: clear, sufficient, as "
+    "short as possible without losing context - never drop a finding or a risk to "
+    "save words. Long only when the user asks for detail.",
+    "  - EFFORT: every coding agent runs at `medium` by default (pm, designer and "
+    "reviewer at `high`). Raise ONE dispatch's effort with the Agent tool's `effort` "
+    "only when that work needs more reasoning than its default gives - a subtle "
+    "concurrency bug, a migration that must not lose data - and say why in the "
+    "brief. Never raise it by habit; effort is the largest lever on what an agent "
+    "costs.",
     "  - ONLY YOU DISPATCH, AND AT MOST TWO AGENTS OF A KIND AT ONCE. No installed "
     "agent has the Agent tool, so none can fan out - a reviewer splitting itself "
     "into 'angles' is how one review became eleven agents. A third agent of a kind "

@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 19
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -100,12 +100,7 @@ _TASK_DDL = (
         remote_id VARCHAR
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks (state)",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks (source)",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_triage ON tasks (triage)",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks (parent_id)",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_claimed ON tasks (claimed_by)",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks (created_at)",
+    # No secondary indexes on `tasks` (dropped in v19). See migrate_v18_to_v19.
     "CREATE INDEX IF NOT EXISTS idx_task_comments_task ON task_comments (task_id)",
     """
     CREATE TABLE IF NOT EXISTS task_attachments (
@@ -909,6 +904,33 @@ def migrate_v17_to_v18(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (18)")
 
 
+# The secondary indexes `tasks` carried until v19. Dropped, not replaced.
+_TASK_SECONDARY_INDEXES = (
+    "idx_tasks_state", "idx_tasks_source", "idx_tasks_triage",
+    "idx_tasks_parent", "idx_tasks_claimed", "idx_tasks_created",
+)
+
+
+def migrate_v18_to_v19(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v18 -> v19: drop the secondary indexes on `tasks`.
+
+    DuckDB runs an UPDATE that touches an indexed column as a DELETE plus an
+    INSERT of the row, and that path is the one that aborts the whole process
+    ("Failed to append to PRIMARY_tasks_0: duplicate key") on a row whose
+    primary-key entry has gone stale. state, claimed_by and parent_id were all
+    indexed, so nearly every task write - start, claim, release, done - took it.
+    Unindexed, those are updates in place. The indexes bought nothing back: a
+    project holds hundreds of tasks, and DuckDB answers these filters with a
+    scan and zone maps whether an ART index exists or not.
+
+    Only a write to `labels` (a list column) still goes delete+insert, and
+    `memory-mcp repair` rebuilds a table whose key index has gone stale.
+    """
+    for name in _TASK_SECONDARY_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (19)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -985,6 +1007,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 18:
         migrate_v17_to_v18(conn)
         version = 18
+    if version < 19:
+        migrate_v18_to_v19(conn)
+        version = 19
     return version
 
 

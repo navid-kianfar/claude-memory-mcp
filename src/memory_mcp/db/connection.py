@@ -1,8 +1,28 @@
-"""Connection-per-operation pattern. No caching, no locks, no conflicts.
+"""Connection-per-operation, over ONE long-lived database per file.
 
-DuckDB connection open is <1ms, so there's zero performance penalty.
-Each operation opens a connection, does work, closes immediately.
-This eliminates ALL lock conflicts between projects, instances, and processes.
+Every operation still gets a connection of its own and closes it when done, so
+no connection is ever shared between threads. What changed (v0.11.9) is where
+that connection comes from: a CURSOR of a database handle this process opens
+once per file and keeps, instead of a fresh `duckdb.connect(path)` each time.
+
+Why that is not cosmetic: `duckdb.connect(path)` + `close()` per operation
+opened and tore down the whole database instance whenever no other connection
+happened to be open. A second thread opening the same file while the first was
+tearing it down raced DuckDB's instance cache. The daemon died of exactly that
+26 times in a week (every macOS crash report: SIGSEGV inside `duckdb.connect`
+on one thread while another thread was inside DuckDB - an asoode flush thread
+against a tool worker), and the torn writes left stale PRIMARY KEY index entries
+behind. A row with a stale entry then aborts the process on its next
+delete+insert UPDATE ("INTERNAL Error: Failed to append to PRIMARY_tasks_0:
+duplicate key"), launchd restarts it, the next write aborts it again - 57 times.
+Reproduced outside the daemon: three sparse threads on per-op connect raise
+"Unique file handle conflict ... already attached"; the same load on cursors of
+one handle never does.
+
+A cursor is a full connection of its own to the same instance, safe to use on
+its own thread, and closing it never closes the database. The instance lives
+until `release_database` / `close_all_databases` - called where a database file
+is moved (portable mode) and at process exit.
 
 The one exception is `transaction(slug)`: a block that must be all-or-nothing
 publishes an ambient connection that every `connect(slug)` inside it joins, so
@@ -10,6 +30,7 @@ the connection-per-operation repositories take part in one transaction without
 a single signature change. See that function for why it is shaped this way.
 """
 
+import atexit
 import contextvars
 import threading
 from contextlib import contextmanager, suppress
@@ -75,16 +96,117 @@ def _resolve_db_path(slug: str) -> Path:
 
 
 def invalidate_path_cache(slug: str | None = None) -> None:
-    """Drop cached DB paths. Call after a project's db_path changes (portable ops)."""
+    """Drop cached DB paths. Call after a project's db_path changes (portable ops).
+
+    Also closes the handle on the path being forgotten - the project now lives
+    in another file, and a handle left on the old one would pin it open. With
+    no slug, every handle is closed.
+    """
     with _path_cache_lock:
         if slug is None:
             _path_cache.clear()
+            stale = None
         else:
-            _path_cache.pop(slug, None)
+            stale = _path_cache.pop(slug, None)
+    if slug is None:
+        close_all_databases()
+    elif stale is not None:
+        release_database(stale)
+
+
+# The open database per file, keyed by its resolved path. Guarded by
+# `_databases_lock`, which is held for every open, close and `cursor()` call on
+# a handle - the handle object itself is shared, only its cursors are not.
+_databases: dict[str, duckdb.DuckDBPyConnection] = {}
+_HNSW_PERSISTENCE = "SET hnsw_enable_experimental_persistence = true"
+_databases_lock = threading.Lock()
+
+
+def _database(db_path: Path) -> duckdb.DuckDBPyConnection:
+    """The process's handle on `db_path`, opened (and migrated) on first use."""
+    key = str(db_path)
+    with _databases_lock:
+        db = _databases.get(key)
+        if db is None:
+            _ensure_initialized(db_path)
+            db = duckdb.connect(key)
+            # INSTALL/LOAD once per database, here under the lock - NEVER per
+            # operation. Two threads running `LOAD vss` on one instance at the
+            # same moment segfault inside DuckDB: that is the crash in every
+            # macOS report (always inside `connect()`, where install_vss ran on
+            # every operation), reproduced in tests/test_db_lifecycle.py.
+            with suppress(Exception):
+                install_vss(db)
+            # Also once per database: `disabled_optimizers` is a GLOBAL setting.
+            # Set on every operation, it rewrote the instance's config while
+            # other threads were planning queries - the second segfault path,
+            # reproduced by tests/test_db_lifecycle.py's service-level stress.
+            try:
+                _disable_unsafe_optimizers(db)
+            except Exception:
+                db.close()
+                raise
+            _databases[key] = db
+        return db
+
+
+def _cursor(db_path: Path) -> duckdb.DuckDBPyConnection:
+    db = _database(db_path)
+    with _databases_lock:
+        try:
+            return db.cursor()
+        except duckdb.ConnectionException:
+            # Closed under us by a release on another thread; open it again.
+            _databases.pop(str(db_path), None)
+    return _cursor(db_path)
+
+
+def release_database(path: str | Path) -> bool:
+    """Close this process's handle on a database file. True if one was open.
+
+    For a file about to be copied, moved or replaced: closing the last handle
+    checkpoints the WAL into the file, so a copy taken after this is complete.
+    Cursors still open elsewhere keep the instance alive until they close; the
+    next operation opens the file afresh.
+    """
+    key = str(Path(path))
+    with _databases_lock:
+        db = _databases.pop(key, None)
+        if db is None:
+            return False
+        with suppress(Exception):
+            db.close()
+    return True
+
+
+def release_project_database(slug: str) -> bool:
+    """`release_database` for a project's current file."""
+    with _path_cache_lock:
+        cached = _path_cache.get(slug)
+    return release_database(cached or _compute_db_path(slug))
+
+
+def close_all_databases() -> int:
+    """Close every handle this process holds. Called at exit, and by tests."""
+    with _databases_lock:
+        handles = list(_databases.values())
+        _databases.clear()
+        for db in handles:
+            with suppress(Exception):
+                db.close()
+    return len(handles)
+
+
+atexit.register(close_all_databases)
 
 
 def _ensure_initialized(db_path: Path) -> None:
-    """Initialize DB schema if needed (only once per path per process)."""
+    """Initialize DB schema if needed (only once per path per process).
+
+    Called with `_databases_lock` held, before this process has a handle on the
+    file, so the short-lived connection here is never a second instance racing
+    a live one.
+    """
     path_str = str(db_path)
     if path_str in _initialized_dbs:
         return
@@ -157,10 +279,9 @@ def get_connection(slug: str) -> duckdb.DuckDBPyConnection:
     be a new bug. Only `connect` joins.
     """
     db_path = _resolve_db_path(slug)
-    _ensure_initialized(db_path)
 
     try:
-        conn = duckdb.connect(str(db_path))
+        conn = _cursor(db_path)
     except duckdb.IOException as e:
         # DuckDB is single-writer per file across processes, so this is almost
         # always the daemon rather than real disk trouble. Its own message names
@@ -172,12 +293,9 @@ def get_connection(slug: str) -> duckdb.DuckDBPyConnection:
             raise
         raise duckdb.IOException(f"{db_path.name}: {hint}") from e
     try:
-        _disable_unsafe_optimizers(conn)
-    except Exception:
-        conn.close()
-        raise
-    try:
-        install_vss(conn)
+        # Per connection: this setting is session-scoped. The extension itself
+        # was loaded once, when the handle opened - see _database.
+        conn.execute(_HNSW_PERSISTENCE)
     except Exception:
         pass
     return conn

@@ -120,11 +120,11 @@ by the installer, see above).
 
 - **`model`** — every agent here pins `claude-opus-5` by its full id rather than the `opus`
   alias, so a new Opus cannot silently change how the team behaves.
-- **`effort`** — `low` | `medium` | `high` | `xhigh` | `max`. `max` for pm and designer;
-  `xhigh` for test and reviewer; `high` for every stack expert, backend, frontend and devops;
-  `medium` for docs, which runs often and writes prose rather than reasoning deeply (and for
-  the `_base` default). Every level but pm's and designer's was lowered one step on
-  2026-09-15, because the agents' token spend was too high.
+- **`effort`** — `low` | `medium` | `high` | `xhigh` | `max`. `high` for pm, designer and
+  reviewer, the three roles that plan, design and judge security; `medium` for everything
+  else - every stack expert, backend, frontend, devops, test and docs (and the `_base`
+  default). Set by the user on 2026-10-19 because the agents' token spend was too high;
+  do not raise a level without the user.
 - **One reviewer, never a fan-out** — at most one `reviewer` runs at a time (the dispatch gate
   asks before a second; other kinds allow two), and `reviewer` is denied `Workflow` as well as
   `Agent`, so it reviews and tests as a single agent.

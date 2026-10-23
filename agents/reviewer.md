@@ -2,7 +2,7 @@
 name: reviewer
 description: "Independent review of code it did not write: security, regressions, edge cases. Reports findings, never fixes them."
 extends: _code
-effort: xhigh
+effort: high
 color: red
 disallowedTools: Edit, Write, NotebookEdit, Workflow
 skills: [code-review, security-review]

@@ -82,23 +82,23 @@ its identity, craft and hand-offs; an expert file `extends:` a role and adds the
 
 | Agent | Extends | Effort | Owns |
 |---|---|---|---|
-| `pm` | `_base` | max | Planning in isolated context; the main session is normally the lead |
-| `backend` | `_base` | xhigh | APIs, services, data models, schema, migrations |
-| `frontend` | `_base` | xhigh | UI implementation to the designer's spec, verified in the browser |
-| `designer` | `_base` | max | Tokens, component specs, flows, visual review — before any UI is built |
-| `test` | `_base` | max | Verifying other agents' work on the running product; once per handover (an implementing agent hands its work back), never per commit |
-| `reviewer` | `_base` | max | Independent review; **no Edit/Write** (`disallowedTools`); preloads `code-review`, `security-review` |
-| `devops` | `_base` | xhigh | CI, builds, deploys, containers, monitoring; stops before anything irreversible |
-| `docs` | `_base` | high | READMEs, API docs, changelogs for readers outside the session |
-| `dotnet` | `backend` | xhigh | .NET layout, DI and services — consulted before backend |
-| `nodejs` | `backend` | xhigh | Node layout: always NestJS / Next.js / pnpm — consulted before backend |
-| `react` | `frontend` | xhigh | pnpm + Vite + Tailwind + shadcn, every shadcn component wrapped once |
-| `app` | `frontend` | xhigh | Kotlin Multiplatform mobile, Android and iOS pixel-identical |
-| `react-native` | `frontend` | xhigh | Repos already on React Native: Expo or bare, native modules, simulator and emulator verification — never new mobile work |
-| `python` | `backend` | xhigh | FastAPI + Pydantic v2, uv, ruff, mypy strict, SQLAlchemy 2.0 |
-| `go` | `backend` | xhigh | stdlib `net/http`, `cmd/`+`internal/`, sqlc over an ORM |
-| `rust` | `backend` | xhigh | tokio + axum, thiserror/anyhow, sqlx compile-time-checked queries |
-| `kotlin` | `backend` | xhigh | **Server-side** Kotlin: Ktor, coroutines, Exposed/jOOQ + Flyway |
+| `pm` | `_base` | high | Planning in isolated context; the main session is normally the lead |
+| `backend` | `_base` | medium | APIs, services, data models, schema, migrations |
+| `frontend` | `_base` | medium | UI implementation to the designer's spec, verified in the browser |
+| `designer` | `_base` | high | Tokens, component specs, flows, visual review — before any UI is built |
+| `test` | `_base` | medium | Verifying other agents' work on the running product; once per handover (an implementing agent hands its work back), never per commit |
+| `reviewer` | `_base` | high | Independent review; **no Edit/Write** (`disallowedTools`); preloads `code-review`, `security-review` |
+| `devops` | `_base` | medium | CI, builds, deploys, containers, monitoring; stops before anything irreversible |
+| `docs` | `_base` | medium | READMEs, API docs, changelogs for readers outside the session |
+| `dotnet` | `backend` | medium | .NET layout, DI and services — consulted before backend |
+| `nodejs` | `backend` | medium | Node layout: always NestJS / Next.js / pnpm — consulted before backend |
+| `react` | `frontend` | medium | pnpm + Vite + Tailwind + shadcn, every shadcn component wrapped once |
+| `app` | `frontend` | medium | Kotlin Multiplatform mobile, Android and iOS pixel-identical |
+| `react-native` | `frontend` | medium | Repos already on React Native: Expo or bare, native modules, simulator and emulator verification — never new mobile work |
+| `python` | `backend` | medium | FastAPI + Pydantic v2, uv, ruff, mypy strict, SQLAlchemy 2.0 |
+| `go` | `backend` | medium | stdlib `net/http`, `cmd/`+`internal/`, sqlc over an ORM |
+| `rust` | `backend` | medium | tokio + axum, thiserror/anyhow, sqlx compile-time-checked queries |
+| `kotlin` | `backend` | medium | **Server-side** Kotlin: Ktor, coroutines, Exposed/jOOQ + Flyway |
 
 No definition declares `isolation` — the column that used to sit here said `worktree` for ten of them
 and is gone on purpose (2026-09-13). Parallel agents share the one checkout.

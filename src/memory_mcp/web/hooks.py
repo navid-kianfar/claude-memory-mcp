@@ -166,6 +166,33 @@ def _hook_authorized(request) -> bool:
     return _request_user_obj(request) is not None
 
 
+
+def _beside_projects(folder: Path) -> bool:
+    """True for a new folder in a directory that already holds registered projects.
+
+    A repository is the obvious project, but a project often starts as a bare
+    folder - `kalagh-instagram` on 2026-10-17 was not a git repo yet, was never
+    registered, and an hour of the user's rules went nowhere. Its siblings were
+    projects, which is the signal: ~/Desktop/DEV/acme/* is a workspace, and a
+    new folder in it is a new project.
+
+    Never the home directory, a filesystem root, or a folder that CONTAINS a
+    registered project (a workspace itself is not a project).
+    """
+    try:
+        folder = folder.resolve()
+        if folder == Path.home().resolve() or folder.parent == folder:
+            return False
+        paths = [
+            Path(p.project_path).resolve()
+            for p in container.project_repo.list_all() if p.project_path
+        ]
+    except Exception:  # noqa: BLE001 - a hint, never a reason to fail the hook
+        return False
+    if any(folder == p or folder in p.parents for p in paths):
+        return False
+    return any(p.parent == folder.parent for p in paths)
+
 async def _hook_auto_register(request):
     """Auto-register the working directory as a project (used by the hook).
 
@@ -202,8 +229,10 @@ async def _hook_auto_register(request):
             # Registering it would create a duplicate project whose path points
             # into .claude/worktrees/ and disappears when the worktree is removed.
             return ""
-        if not (folder / ".git").is_dir():
-            return ""  # only auto-register actual repositories
+        if not (folder / ".git").is_dir() and not _beside_projects(folder):
+            # Neither a repository nor a new folder in a directory that already
+            # holds projects. The intro tells the session it is unregistered.
+            return ""
         slug = slugify(folder.name)
         if not slug or container.project_repo.get(slug) is not None:
             return ""  # no name, or the slug is already taken by another project
@@ -256,6 +285,33 @@ async def _hook_claim(request):
     return JSONResponse(result)
 
 
+
+def _unregistered_intro(cwd: str) -> str:
+    """One line at session start for a folder that is not a memory project.
+
+    Silence here used to be total, and silence is indistinguishable from "the
+    memory is working": a session would take the user's rules, store none of
+    them, and fall back to Claude Code's own memory files. One line per
+    session, never per turn, so an unrelated folder costs almost nothing.
+    """
+    if not cwd:
+        return ""
+    folder = Path(cwd)
+    if not folder.is_dir() or is_linked_worktree(folder):
+        return ""
+    try:
+        if folder.resolve() == Path.home().resolve():
+            return ""
+    except OSError:
+        return ""
+    return (
+        f"[Memory MCP] This folder ({folder.name}) is NOT a memory project, so "
+        "nothing this session learns - rules, decisions, tasks - is being stored. "
+        "If the user is working on a project here, ask whether to register it, "
+        f"then call memory_init_project(slug, project_path='{cwd}') and "
+        "memory_session_start before recording anything."
+    )
+
 async def _hook_rules(request):
     """Plain-text rules block for Claude Code hooks (cwd -> project -> rules).
 
@@ -277,7 +333,7 @@ async def _hook_rules(request):
         slug = detect_project_from_cwd(cwd)
         _seen(identity, slug)
         if not slug:
-            return ""
+            return _unregistered_intro(cwd) if mode == "intro" else ""
         # `cwd` makes the team text name this repo's own specialists; the
         # session id lets the per-turn line read this session's dispatch and
         # edit ledgers and escalate by name. Both reads are wrapped inside

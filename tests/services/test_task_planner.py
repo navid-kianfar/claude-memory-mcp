@@ -6,6 +6,7 @@ that can be enforced structurally are enforced here - a plan of one is not a
 plan, and a description is not optional.
 """
 
+import duckdb
 import pytest
 
 from memory_mcp.container import container
@@ -218,6 +219,21 @@ class FailsOnTask:
         return getattr(self._inner, name)
 
 
+class FailsOnRecord:
+    """The real task service, but recording the plan - the last write inside
+    the plan's transaction, after every task exists - blows up."""
+
+    def __init__(self, inner, error: Exception | None = None):
+        self._inner = inner
+        self._error = error or RuntimeError("purge hit a stale index")
+
+    def record_plan(self, *args, **kwargs):
+        raise self._error
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def count(project: str, table: str) -> int:
     with connect(project) as conn:
         return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
@@ -275,6 +291,32 @@ class TestAPlanIsAllOrNothing:
         service._fail_on = 0
         assert planner.plan(project, REQUEST, ITEMS)["count"] == 3
         assert count(project, "tasks") == 3, "re-running resumed, it did not duplicate"
+
+    def test_a_failed_plan_record_leaves_nothing_behind(self, project, monkeypatch):
+        """OBSERVED 2026-10-29: record_plan's purge of old plans hit a stale index
+        after every task of the plan had been created. Nothing may survive it."""
+        nudges = []
+        monkeypatch.setattr(container.task_service, "_mirror", nudges.append)
+        service = FailsOnRecord(container.task_service)
+        with pytest.raises(PlanError) as exc:
+            TaskPlanner(service).plan(project, REQUEST, ITEMS)
+        for table in ("tasks", "task_comments", "task_outbox", "task_plans"):
+            assert count(project, table) == 0, table
+        assert nudges == [], "nothing may be mirrored for tasks that do not exist"
+        message = str(exc.value)
+        assert "ROLLED BACK" in message and "recording the plan" in message, message
+        assert "task 3 of 3" not in message, "the tasks were not what failed"
+
+    def test_a_fatal_plan_record_rolls_back_too(self, project):
+        """The 2026-10-29 shape exactly: an InternalException from the purge."""
+        service = FailsOnRecord(
+            container.task_service,
+            duckdb.InternalException("Failed to delete all rows from index"),
+        )
+        with pytest.raises(PlanError):
+            TaskPlanner(service).plan(project, REQUEST, ITEMS)
+        assert count(project, "tasks") == 0
+        assert count(project, "task_comments") == 0
 
     def test_positions_are_still_distinct_inside_the_transaction(self, project):
         """next_position reads uncommitted siblings on the shared connection. On a

@@ -474,9 +474,8 @@ def test_v14_db_with_rows_gains_the_inbox_and_the_hash_index(tmp_path):
 
         assert "attachment_inbox" in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
         assert "idx_task_attach_hash" in _indexes(conn, "task_attachments")
-        assert {"idx_attach_inbox_id", "idx_attach_inbox_session"} <= _indexes(
-            conn, "attachment_inbox"
-        )
+        # v20: the inbox is a queue-like table and carries no index.
+        assert _indexes(conn, "attachment_inbox") == set()
         # Nothing that was there changed.
         assert conn.execute("SELECT id, title FROM tasks").fetchall() == [("t1", "keep me")]
         assert conn.execute(
@@ -561,7 +560,8 @@ def test_v15_db_with_rows_gains_the_plan_record(tmp_path):
         assert run_migrations(conn) == CURRENT_SCHEMA_VERSION >= 16
 
         assert "task_plans" in {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
-        assert "idx_task_plans_hash" in _indexes(conn, "task_plans")
+        # v20: the retry table carries no index.
+        assert _indexes(conn, "task_plans") == set()
         assert conn.execute("SELECT id, title FROM tasks").fetchall() == [
             ("t1", "planned earlier")
         ]

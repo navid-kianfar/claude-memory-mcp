@@ -7,7 +7,9 @@ Each @mcp.tool() is a minimal wrapper:
 4. Return a dict response (or error)
 """
 
+import logging
 import os
+import sys
 
 from fastmcp import FastMCP
 
@@ -20,6 +22,7 @@ from memory_mcp.context import (
     load_active_project, resolve_project, set_active_project,
     remember_memory_session,
 )
+from memory_mcp.db.connection import is_fatal
 from memory_mcp.enforcement import never_started_warning, rules_digest
 from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.exceptions import MemoryMCPError, MemoryNotFoundError
@@ -271,17 +274,58 @@ def _lead_with_clock_warning(answer: dict, title: str, time_note: dict | None) -
     return {"clock_warning": warning, **answer}
 
 
-def _safe(fn):
-    """Wrap a tool body with uniform error handling."""
+# Tools a fatal database error may re-run. Only what is safe to run twice: reads,
+# and memory_task_plan (one transaction, rolled back whole, and deduplicated).
+# A body of several autocommitted writes - memory_task_comment is add_comment,
+# then _record, then _enqueue - may have committed half of itself before the
+# failure, and running it again would write that half twice.
+_RETRY_ON_FATAL = frozenset({
+    "memory_task_plan",
+    "memory_asoode_links", "memory_asoode_status", "memory_task_attachments",
+    "memory_version", "memory_list_projects", "memory_project_info",
+    "memory_search", "memory_recall", "memory_list", "memory_provenance",
+    "memory_get_rules", "memory_list_templates", "memory_pending_list",
+    "memory_digest_list", "memory_digest_get", "memory_task_list",
+    "memory_task_get", "memory_model_info",
+})
+
+_REPAIRED = (
+    " - the database was invalidated and has been reopened and repaired; "
+    "nothing of this call is known to have been kept, check before retrying it"
+)
+
+
+def _safe(fn, _retried: bool = False, _tool: str | None = None):
+    """Wrap a tool body with uniform error handling.
+
+    A fatal DuckDB error (the database was invalidated) has already been healed
+    by the connection layer when it reaches here - the file reopened, its stale
+    tables rebuilt. A tool in _RETRY_ON_FATAL is then retried ONCE; any other
+    gets an error that says the database was repaired, because it may have
+    committed part of its work and only the caller can tell.
+    """
+    # The tool function is the caller: every tool ends `return _safe(_run)`.
+    tool = _tool or sys._getframe(1).f_code.co_name
     try:
         return fn()
-    except MemoryMCPError as e:
-        return {"error": str(e), "type": type(e).__name__}
-    except ValueError as e:
-        return {"error": str(e), "type": "ValueError"}
     except Exception as e:  # noqa: BLE001
-        # Includes RemoteError from the gateway path.
-        return {"error": str(e), "type": type(e).__name__}
+        if not is_fatal(e):
+            return _error(e)
+        if _retried or tool not in _RETRY_ON_FATAL:
+            answer = _error(e)
+            answer["error"] += _REPAIRED
+            return answer
+        logging.getLogger(__name__).critical(
+            "memory-mcp: retrying %s once after a fatal database error: %s", tool, e,
+        )
+        return _safe(fn, _retried=True, _tool=tool)
+
+
+def _error(e: Exception) -> dict:
+    # Includes RemoteError from the gateway path.
+    kind = "ValueError" if isinstance(e, ValueError) and not isinstance(
+        e, MemoryMCPError) else type(e).__name__
+    return {"error": str(e), "type": kind}
 
 
 # ---------- Version ----------

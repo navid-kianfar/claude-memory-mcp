@@ -1,11 +1,11 @@
-"""`memory-mcp repair` - find and rebuild tables whose key index has gone stale.
+"""`memory-mcp repair` - find and rebuild tables whose indexes have gone stale.
 
   memory-mcp repair                 -> every registered project
   memory-mcp repair <slug> [...]    -> just these
   memory-mcp repair --check         -> report only, rebuild nothing
 
-A stale PRIMARY KEY index entry aborts the whole process on the next UPDATE of
-that row, so the daemon cannot notice its own; see memory_mcp.db.repair. The
+A stale index entry - primary key, UNIQUE or secondary - aborts the process or
+invalidates the database on the next write of that row; see memory_mcp.db.repair. The
 work runs in the daemon when one is listening (it holds the files, and DuckDB
 allows one writer per file), and in this process when none is.
 
@@ -54,7 +54,10 @@ def main(argv=None) -> int:
             print(json.dumps(result))
         else:
             line = f"{slug}: {status}"
-            stale = [f["table"] for f in result.get("stale") or []]
+            stale = [
+                f["table"] + (f" [{', '.join(f['indexes'])}]" if f.get("indexes") else "")
+                for f in result.get("stale") or []
+            ]
             if stale:
                 line += f" (stale: {', '.join(stale)})"
             if result.get("error"):

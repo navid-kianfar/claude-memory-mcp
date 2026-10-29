@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -130,8 +130,8 @@ _TASK_DDL = (
     # to a task. The bytes live in the same content-addressed store as
     # task_attachments, so binding costs no second copy.
     #
-    # No PRIMARY KEY, for the task_outbox reason below: plain indexes, and every
-    # read addresses a row by id or by (claude_session_id, sha256).
+    # No PRIMARY KEY and, since v20, no index, for the task_outbox reason below:
+    # a parked inbox read by id or by (claude_session_id, sha256) is a scan.
     """
     CREATE TABLE IF NOT EXISTS attachment_inbox (
         -- The pending_id the session is told to bind with.
@@ -155,9 +155,6 @@ _TASK_DDL = (
         notified_at       TIMESTAMP
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_attach_inbox_id ON attachment_inbox (id)",
-    "CREATE INDEX IF NOT EXISTS idx_attach_inbox_session "
-    "ON attachment_inbox (claude_session_id, sha256)",
     "CREATE INDEX IF NOT EXISTS idx_task_time_task ON task_time_entries (task_id)",
     # A task deleted here must not come back from the board (v13). The remote
     # card is archived by the flusher, but until that lands - and forever, if
@@ -180,8 +177,9 @@ _TASK_DDL = (
     # every task in one plan shares the transaction's created_at, and positions
     # restart under each parent.
     #
-    # No PRIMARY KEY, for the task_outbox reason: plain index, and every read
-    # addresses rows by request_hash.
+    # No PRIMARY KEY and, since v20, NO INDEX: a 30-minute retry table holds a
+    # handful of rows, a scan is enough, and its index was the one that took a
+    # database down on 2026-10-29 - see migrate_v19_to_v20.
     """
     CREATE TABLE IF NOT EXISTS task_plans (
         id           VARCHAR NOT NULL,
@@ -190,7 +188,6 @@ _TASK_DDL = (
         created_at   TIMESTAMP DEFAULT current_timestamp
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_task_plans_hash ON task_plans (request_hash)",
 )
 
 
@@ -789,9 +786,8 @@ def migrate_v13_to_v14(conn: duckdb.DuckDBPyConnection) -> None:
 
 
 #: What v15 must leave behind before it may stamp itself.
-_V15_INDEXES = frozenset({
-    "idx_task_attach_hash", "idx_attach_inbox_id", "idx_attach_inbox_session",
-})
+#: The inbox's own two indexes were here too until v20 dropped them.
+_V15_INDEXES = frozenset({"idx_task_attach_hash"})
 
 
 def migrate_v14_to_v15(conn: duckdb.DuckDBPyConnection) -> None:
@@ -802,7 +798,7 @@ def migrate_v14_to_v15(conn: duckdb.DuckDBPyConnection) -> None:
     `create_task_tables`, the same helper a fresh database uses, so the two shapes
     cannot drift.
 
-    Stamped only once the table and all three indexes are really there - the v14
+    Stamped only once the table and the hash index are really there - the v14
     rule. `create_task_tables` swallows a failed CREATE, and a database marked v15
     without its inbox would fail every hook scan with nothing left to repair it.
     """
@@ -834,7 +830,7 @@ def migrate_v15_to_v16(conn: duckdb.DuckDBPyConnection) -> None:
     Created through `create_task_tables`, the helper a fresh database uses, so
     the two shapes cannot drift.
 
-    Stamped only once the table and its index are really there - the v14 rule:
+    Stamped only once the table is really there - the v14 rule:
     `create_task_tables` swallows a failed CREATE, and a database marked v16
     without the table would fail every plan with nothing left to repair it.
     """
@@ -847,11 +843,6 @@ def migrate_v15_to_v16(conn: duckdb.DuckDBPyConnection) -> None:
     }
     if "task_plans" not in tables:
         raise RuntimeError("schema v16: could not create task_plans - not stamping")
-    indexes = {
-        row[0] for row in conn.execute("SELECT index_name FROM duckdb_indexes()").fetchall()
-    }
-    if "idx_task_plans_hash" not in indexes:
-        raise RuntimeError("schema v16: could not create idx_task_plans_hash - not stamping")
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (16)")
 
 
@@ -929,6 +920,29 @@ def migrate_v18_to_v19(conn: duckdb.DuckDBPyConnection) -> None:
     for name in _TASK_SECONDARY_INDEXES:
         conn.execute(f"DROP INDEX IF EXISTS {name}")
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (19)")
+
+
+# Indexes on queue-like and short-lived tables, dropped by v20. Not replaced.
+_V20_DROPPED_INDEXES = (
+    "idx_task_plans_hash", "idx_attach_inbox_id", "idx_attach_inbox_session",
+)
+
+
+def migrate_v19_to_v20(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v19 -> v20: no index on a queue-like or short-lived table.
+
+    On 2026-10-29 `TaskRepository.record_plan`'s purge (`DELETE FROM task_plans
+    WHERE created_at < ...`) failed with "Failed to delete all rows from index.
+    Only deleted 0 out of 1 rows" on idx_task_plans_hash, DuckDB invalidated the
+    database, and every call on that project failed until the daemon restarted.
+    task_plans is a 30-minute retry table and attachment_inbox a parked inbox:
+    both hold a handful of rows, a scan answers every read, and an index is one
+    more structure that can disagree with its rows - the task_outbox v18
+    reasoning. Dropping an index is metadata only; no row moves.
+    """
+    for name in _V20_DROPPED_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (20)")
 
 
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
@@ -1010,6 +1024,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 19:
         migrate_v18_to_v19(conn)
         version = 19
+    if version < 20:
+        migrate_v19_to_v20(conn)
+        version = 20
     return version
 
 

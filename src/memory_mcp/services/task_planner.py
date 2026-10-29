@@ -207,6 +207,7 @@ class TaskPlanner:
     ) -> tuple[tuple[Task, ...], tuple[dict | None, ...]]:
         created, ids, routings = [], [], []
         index = -1
+        phase = "tasks"
         try:
             # ONE transaction for the whole plan. A half-applied plan is worse
             # than no plan at all: the queue reads as a considered decomposition
@@ -247,16 +248,25 @@ class TaskPlanner:
                     created.append(task)
                 # In the same transaction as the tasks: a record of a plan that
                 # rolled back would answer a retry with tasks that do not exist.
+                # And the other way round - the record failing (its purge hit a
+                # stale index on 2026-10-29) takes every task down with it.
+                phase = "record"
                 self._tasks.record_plan(project, fingerprint, ids, PLAN_RETRY_WINDOW_SECONDS)
+                phase = "commit"
         except Exception as e:  # noqa: BLE001
             # Say what happened to the plan, not just what threw. "which tasks
             # got created" now has an answer, and the answer is none.
-            where = (
-                f"task {index + 1} of {len(items)} "
-                f"({(items[index].get('title') or '').strip()!r})"
-                if 0 <= index < len(items)
-                else "opening the transaction"
-            )
+            if phase == "record":
+                where = "recording the plan, after all its tasks"
+            elif phase == "commit":
+                where = "committing the plan"
+            elif 0 <= index < len(items):
+                where = (
+                    f"task {index + 1} of {len(items)} "
+                    f"({(items[index].get('title') or '').strip()!r})"
+                )
+            else:
+                where = "opening the transaction"
             raise PlanError(
                 f"the plan was ROLLED BACK and no tasks were created - failed on "
                 f"{where}: {type(e).__name__}: {e}"

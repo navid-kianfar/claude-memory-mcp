@@ -266,8 +266,31 @@ class Container:
         self._sweeper = threading.Thread(target=_loop, name="outbox-sweeper", daemon=True)
         self._sweeper.start()
 
-    def stop_outbox_sweeper(self) -> None:
+    def stop_outbox_sweeper(self, timeout: float = 0.0) -> None:
         self._sweeper_stop.set()
+        sweeper = self._sweeper
+        if timeout > 0 and sweeper is not None and sweeper.is_alive():
+            sweeper.join(timeout)
+
+    def quiesce(self, timeout: float = 7.0) -> None:
+        """Stop the background threads that write project databases, within one
+        deadline, before the daemon closes its handles.
+
+        Closing a handle under a thread that is inside DuckDB wedged the exit,
+        and launchd then SIGKILLed a process with an uncheckpointed WAL - the
+        input the stale-index bug needs (see db/connection.py). Bounded, and
+        with `shutdown_databases` (4s) inside launchd's 20s SIGTERM-to-SIGKILL
+        grace (the plist sets no ExitTimeOut): a hung
+        network call must not hold the shutdown hostage; whatever is still
+        running at the deadline is left to `shutdown_databases`, which never
+        closes a handle under a running query.
+        """
+        deadline = time.monotonic() + timeout
+        self.stop_outbox_sweeper(timeout=max(0.0, deadline - time.monotonic()))
+        self.wait_for_mirrors(timeout=max(0.0, deadline - time.monotonic()))
+        backfill = self._time_backfill
+        if backfill is not None and backfill.is_alive():
+            backfill.join(max(0.0, deadline - time.monotonic()))
 
     def backfill_remote_time(self) -> dict[str, int]:
         """Catch up the time logged on every linked board's cards. Per project,

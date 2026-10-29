@@ -8,6 +8,7 @@ Running everything in a single process means one owner of every DuckDB file
 instead of on every client spawn.
 """
 
+import asyncio
 import contextlib
 import logging
 
@@ -117,15 +118,35 @@ def build_app() -> Starlette:
         except Exception as e:  # noqa: BLE001 - never block the daemon starting
             log.warning("remote time backfill did not start: %s", e)
 
+        # After a death or an invalidated database, look for stale indexes in
+        # every project before they take the next write down.
+        try:
+            from memory_mcp.db.repair import start_startup_check
+
+            start_startup_check()
+        except Exception as e:  # noqa: BLE001 - never block the daemon starting
+            log.warning("startup repair check did not start: %s", e)
+
         async with mcp_app.lifespan(app):
             yield
 
         with contextlib.suppress(Exception):
-            container.stop_outbox_sweeper()
-        with contextlib.suppress(Exception):
             await subscriber.stop()
         with contextlib.suppress(Exception):
             await poller.stop()
+        # Writers stopped, THEN the handles checkpointed and closed - never the
+        # other way round (db/connection.py `_quiesce_and_close`). Off the event
+        # loop: both block.
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(container.quiesce)
+        with contextlib.suppress(Exception):
+            from memory_mcp.db.connection import shutdown_databases
+
+            await asyncio.to_thread(shutdown_databases)
+        with contextlib.suppress(Exception):
+            from memory_mcp.db.repair import mark_clean_shutdown
+
+            mark_clean_shutdown()
 
     return Starlette(routes=routes, lifespan=lifespan)
 
@@ -152,6 +173,16 @@ def serve() -> None:
         print("  users/tokens) before exposing the daemon to a network.")
         print("  " + "!" * 52)
     print("=" * 56)
+    # uvicorn configures only its own loggers; without a handler here every
+    # memory_mcp record below WARNING fell to logging.lastResort and was lost -
+    # the startup check's per-project "ok" lines among them.
+    app_log = logging.getLogger("memory_mcp")
+    if not app_log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s: %(message)s"))
+        app_log.addHandler(handler)
+        app_log.setLevel(logging.INFO)
+        app_log.propagate = False
     uvicorn.run(build_app(), host=host, port=port, log_level="info")
 
 

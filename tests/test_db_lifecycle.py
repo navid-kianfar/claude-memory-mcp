@@ -125,7 +125,7 @@ class TestSchemaV19:
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version (version) VALUES (18)")
         assert get_schema_version(conn) == 18
-        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION == 19
+        assert run_migrations(conn) == CURRENT_SCHEMA_VERSION >= 19
         left = conn.execute(
             "SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_tasks_state'"
         ).fetchone()[0]

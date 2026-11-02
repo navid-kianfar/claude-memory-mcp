@@ -147,6 +147,5 @@ class TestRegistration:
     def test_registry_order(self):
         import memory_mcp.harnesses as registry
 
-        assert [a.name for a in registry.ADAPTERS] == [
-            "claude", "zcode", "opencode",
-        ]
+        names = [a.name for a in registry.ADAPTERS]
+        assert names.index("claude") < names.index("zcode") < names.index("opencode")

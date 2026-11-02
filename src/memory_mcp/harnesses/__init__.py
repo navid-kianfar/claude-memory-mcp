@@ -14,10 +14,13 @@ from memory_mcp.harnesses.base import (
     selected,
 )
 from memory_mcp.harnesses.claude import ClaudeHarness
+from memory_mcp.harnesses.codex import CodexHarness
 from memory_mcp.harnesses.opencode import OpenCodeHarness
 from memory_mcp.harnesses.zcode import ZCodeHarness
 
-ADAPTERS: list[Harness] = [ClaudeHarness(), ZCodeHarness(), OpenCodeHarness()]
+ADAPTERS: list[Harness] = [
+    ClaudeHarness(), ZCodeHarness(), OpenCodeHarness(), CodexHarness(),
+]
 
 __all__ = [
     "ADAPTERS",

@@ -65,7 +65,7 @@ class TestTheRegistry:
 
     def test_selected_all_ignores_detection(self, monkeypatch):
         self._undetect_all(monkeypatch)
-        assert selected("all") == ["claude", "zcode"]
+        assert selected("all") == [a.name for a in registry.ADAPTERS]
 
     def test_unknown_name_fails_loudly(self):
         with pytest.raises(ValueError, match="unknown harness"):

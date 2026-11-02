@@ -178,4 +178,4 @@ class TestAgents:
 class TestRegistration:
     def test_zcode_is_registered_after_claude(self):
         names = [a.name for a in registry.ADAPTERS]
-        assert names == ["claude", "zcode"]
+        assert names.index("claude") < names.index("zcode")

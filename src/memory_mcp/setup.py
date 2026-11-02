@@ -313,23 +313,59 @@ def _retire_legacy_merge_driver() -> None:
 
 # ---------- lean update ----------
 
+#: The paths the installer builds from. The auto-update hook's dirty-tree
+#: guard watches the same set; a snapshot export (.agent-memory) or an edited
+#: doc must never reload the daemon.
+_INSTALL_PATHS = ("src", "agents", "frontend/src")
+
+
+def install_is_current() -> bool:
+    """True when the installed runtime already matches this source tree.
+
+    Compares the recorded install:commit to HEAD, plus a dirty check over the
+    built paths. A daemon reload drops nothing any more (the MCP transport is
+    stateless since v0.18.0) but it is still a restart - and a rebuild that
+    would produce the same bytes is a restart for nothing, fired on every Stop
+    hook turn whose only change was a snapshot export.
+    """
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR),
+            capture_output=True, text=True, timeout=10,
+        )
+        if head.returncode != 0:
+            return False
+        from memory_mcp.db.registry import get_setting
+
+        if get_setting("install:commit") != head.stdout.strip():
+            return False
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--", *_INSTALL_PATHS],
+            cwd=str(REPO_DIR), capture_output=True, text=True, timeout=10,
+        )
+        return dirty.returncode == 0 and not dirty.stdout.strip()
+    except Exception:  # noqa: BLE001 - unsure means rebuild, the safe direction
+        return False
+
+
 def run_update() -> None:
     """Rebuild the runtime from the current source and reload the daemon.
 
     Lighter than full setup (skips the model/VSS/hosts/MCP-config steps) - used
-    by the auto-update hook when the repo source changes. Hooks and agent
-    definitions ARE source, so the harness steps refresh here too - this is the
-    fix for the old gap where run_update skipped setup_hooks() and an edited
-    hook script reached a machine only on a full `memory-mcp-setup`. The MCP
-    registration is deliberately NOT re-run here: it never changes short of a
-    port change, and the Stop hook should not rewrite client config files
-    mid-session.
-
-    The merge driver is re-registered here as well, and it is the reason an
-    install that predates it does not need a full setup: the registration is one
-    idempotent `git config`, and a machine without it silently loses one side of
-    every snapshot conflict.
+    by the auto-update hook when the repo source changes. Skipped entirely when
+    the installed runtime already matches the source: rebuilding identical
+    bytes and reloading launchd bought nothing and cost every client a daemon
+    restart (harmless to MCP sessions since v0.18.0, still pointless). The
+    merge driver is re-registered either way - one idempotent `git config`,
+    and the legacy-name retirement rides on it.
     """
+    if install_is_current():
+        print("Install already matches the source - no rebuild, no restart.")
+        try:
+            setup_merge_driver()
+        except Exception as e:  # noqa: BLE001 - no git, or a locked config
+            print(f"    Warning: merge driver not registered: {e}")
+        return
     print("Updating the local installation...")
     setup_runtime()
     setup_launchd()

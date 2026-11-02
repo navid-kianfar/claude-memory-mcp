@@ -169,6 +169,12 @@ def build_app() -> Starlette:
         except Exception as e:  # noqa: BLE001 - never block the daemon starting
             log.warning("startup repair check did not start: %s", e)
 
+        # One diagnosable line per start: the -32600 "Session not found"
+        # class died with stateless mode, and this says so where the log
+        # readers are looking.
+        log.info("stateless MCP transport: clients do not need to "
+                 "reinitialize after a daemon restart")
+
         sampler = asyncio.create_task(_sample_memory())
 
         async with mcp_app.lifespan(app):
@@ -207,7 +213,9 @@ def serve() -> None:
     print("=" * 56)
     print("  Claude Memory MCP - daemon")
     print(f"  Mode         : {settings.mode}")
-    print(f"  MCP endpoint : http://{name}:{port}/mcp/")
+    print(f"  MCP endpoint : http://127.0.0.1:{port}/mcp  (stateless: a daemon")
+    print(f"                 restart cannot drop a client session)")
+    print(f"  hosts alias  : http://{name}:{port}/mcp")
     print(f"  Management UI: http://{name}:{port}/")
     print(f"  (bound to {host}:{port})")
     # Safety guardrail: a non-loopback bind with no auth (local mode) exposes

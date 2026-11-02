@@ -26,7 +26,7 @@ from memory_mcp.db.connection import is_fatal
 from memory_mcp.enforcement import never_started_warning, rules_digest
 from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.exceptions import MemoryMCPError, MemoryNotFoundError
-from memory_mcp.utils.decomposition import decomposition_hint
+from memory_mcp.utils.decomposition import decomposition_hint, format_hint
 from memory_mcp.models import (
     CreateTaskRequest, MemoryCategory, StoreMemoryRequest, UpdateMemoryRequest,
     SearchRequest, MemoryFilter, Pagination, RULE_CATEGORIES, TaskFilter,
@@ -1705,6 +1705,9 @@ def memory_task_add(
         )
         if hint:
             answer["hint"] = hint
+        flat = format_hint(task.description)
+        if flat:
+            answer["format_hint"] = flat
         return _with_mirror(answer, slug)
     return _safe(_run)
 
@@ -1857,6 +1860,9 @@ def memory_task_update(
             )
             if hint:
                 answer["hint"] = hint
+            flat = format_hint(task.description)
+            if flat:
+                answer["format_hint"] = flat
         return _with_mirror(answer, slug)
     return _safe(_run)
 

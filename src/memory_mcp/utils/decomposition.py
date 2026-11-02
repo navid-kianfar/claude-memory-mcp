@@ -82,3 +82,42 @@ def decomposition_hint(
         "cost of making one is near zero. Ignore this if it really is one "
         "deliverable explained thoroughly."
     )
+
+
+#: The markers that say a description already carries structure. A run-on
+#: paragraph has none of them and no newlines at all - the shape tg-portal's
+#: ZCode-created tasks arrived in (2026-11-03: five descriptions, zero
+#: newlines, 198-318 chars).
+_STRUCTURE_MARKERS = ("- ", "* ", "1. ", "**", "## ", "-**", "\n\n")
+
+FORMAT_HINT_MIN_CHARS = 200
+
+
+def format_hint(description: str | None) -> str | None:
+    """One sentence when a description is a wall of text, else None.
+
+    Advisory, like `decomposition_hint`: the write has already happened, and
+    the reply is where the agent learns it can rewrite with structure via
+    memory_task_update. The mirror converts markdown to HTML faithfully - a
+    one-line input becomes one flat paragraph on the board, which is exactly
+    what the user sees and complained about.
+    """
+    text = (description or "").strip()
+    if len(text) < FORMAT_HINT_MIN_CHARS:
+        return None
+    if "\n" not in text:
+        return (
+            "This description is one run-on line. Task text is MARKDOWN on the "
+            "board: bullet lists, blank lines between items, **bold** for the "
+            "thing that must not be missed, `code` for symbols. Rewrite it with "
+            "memory_task_update - structure is what makes a task readable to "
+            "the next agent and on the card."
+        )
+    if not any(marker in text for marker in _STRUCTURE_MARKERS):
+        return (
+            "This description has line breaks but no markdown structure. Task "
+            "text renders as markdown on the board: use bullet lists for the "
+            "parts, **bold** for what must not be missed, `code` for symbols - "
+            "memory_task_update to rewrite."
+        )
+    return None

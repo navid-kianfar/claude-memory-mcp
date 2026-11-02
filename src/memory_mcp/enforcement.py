@@ -1070,6 +1070,20 @@ def update_line() -> str:
     )
 
 
+#: Product-level, injected for EVERY project on EVERY harness (2026-11-03):
+#: tg-portal's ZCode-created task descriptions arrived as run-on paragraphs -
+#: zero newlines at 200-318 chars - and the board faithfully mirrored flat
+#: text. The pipeline converts markdown to HTML correctly; the defect was the
+#: input, and a per-project rule cannot carry the fix because most projects
+#: will never have one.
+_TASK_TEXT_LINE = (
+    "TASK TEXT IS MARKDOWN: task descriptions and comments use bullet lists, "
+    "short headings, **bold** for the thing that must not be missed, `code` "
+    "for symbols, and a blank line between items - never one run-on paragraph. "
+    "What you write renders on the board and is read by the next agent."
+)
+
+
 def format_rules_block(
     slug: str,
     mandatory: list,
@@ -1087,12 +1101,14 @@ def format_rules_block(
     team = agent_team_line(cwd=cwd, slug=slug, session_id=session_id)
     if not mandatory and not forbidden:
         # A bound project still gets its asoode line: the workflow must not
-        # depend on the project happening to have rules. Same for the team line.
+        # depend on the project happening to have rules. Same for the team
+        # line and the task-text line - all three are product-level.
         return "\n".join(
-            x for x in (asoode, team, update_line()) if x
+            x for x in (_TASK_TEXT_LINE, asoode, team, update_line()) if x
         )
     lines = [
         f"[Memory MCP] Binding rules for project '{slug}' — follow every one of these:",
+        _TASK_TEXT_LINE,
     ]
     if mandatory:
         lines.append("MANDATORY (must always do):")

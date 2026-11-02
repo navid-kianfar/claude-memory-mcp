@@ -6,7 +6,9 @@ long description trains the agent to write short ones, which is the opposite of
 what this project wants from a description.
 """
 
-from memory_mcp.utils.decomposition import MIN_CHARS, decomposition_hint
+from memory_mcp.utils.decomposition import (
+    MIN_CHARS, decomposition_hint, format_hint,
+)
 
 DIVIDED = (
     "The endpoint, the screen and the docs all have to change.\n\n"
@@ -63,3 +65,30 @@ class TestItStaysQuiet:
         assert decomposition_hint(None) is None
         assert decomposition_hint("") is None
         assert decomposition_hint("   ") is None
+
+class TestFormatHint:
+    """A run-on description is told what markdown is FOR, after the write.
+
+    tg-portal's ZCode-created task descriptions arrived as 200-318 character
+    single lines - the mirror converted them faithfully into one flat
+    paragraph on the board, which is what the user saw. The hint is advisory
+    (the write has happened); the rewrite path is memory_task_update.
+    """
+
+    def test_a_long_single_line_gets_the_hint(self):
+        text = "Masraf export crash, legacy status filters on dashboard, " * 5
+        hint = format_hint(text)
+        assert hint is not None
+        assert "run-on" in hint and "memory_task_update" in hint
+
+    def test_structured_markdown_stays_quiet(self):
+        assert format_hint("- one\n- two\n- three\n" * 40) is None
+
+    def test_short_descriptions_are_never_nagged(self):
+        assert format_hint("Masraf export crash, legacy filters, OTP reset") is None
+
+    def test_line_breaks_without_markdown_get_the_softer_hint(self):
+        text = "\n".join(f"point number {i} with some detail" for i in range(30))
+        hint = format_hint(text)
+        assert hint is not None
+        assert "line breaks" in hint

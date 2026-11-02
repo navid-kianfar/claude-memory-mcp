@@ -477,3 +477,13 @@ class TestNoNetworkOnTheHotPath:
         root = str(repo.resolve())
         walked = [p for p in scanned if os.path.realpath(p).startswith(root)]
         assert walked == [], f"the warm path walked the repo: {walked}"
+
+class TestTheTaskTextLine:
+    def test_present_with_and_without_project_rules(self):
+        """Product-level, every project, every harness - the tg-portal case
+        had NO project rules, and the line must not depend on them."""
+        from memory_mcp.enforcement import _TASK_TEXT_LINE, format_rules_block
+
+        assert "MARKDOWN" in _TASK_TEXT_LINE
+        block = format_rules_block("p-no-rules", [], [])
+        assert _TASK_TEXT_LINE in block

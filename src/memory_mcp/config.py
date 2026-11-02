@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -43,6 +44,12 @@ class Settings(BaseSettings):
     # rebuilt server never shares a directory with an older install.
     data_dir: Path = Path.home() / ".claude-memory-mcp"
     embedding_model: str = "all-MiniLM-L6-v2"
+    # "onnx" runs the same weights through ONNX Runtime (fastembed) and never
+    # loads PyTorch: importing sentence_transformers pulls torch (~300 MB RSS)
+    # into the process even when inference itself would not use it, so the ST
+    # backend is the fallback, not the default. Both return the same
+    # normalized 384-dim vectors; see memory_mcp/embeddings.py.
+    embedding_backend: str = "onnx"
     embedding_dim: int = 384
     max_connections: int = 5
     rules_cache_ttl: int = 60
@@ -80,10 +87,28 @@ class Settings(BaseSettings):
     asoode_api_url: str = ""
     asoode_socket_url: str = ""
 
+    # The idle-handle LRU (db/connection.close_idle_databases): a handle unused
+    # this long closes whatever the count, and beyond this many open handles
+    # the least-recently-used close first. ~6 MB resident per handle on a
+    # machine with 60+ projects made the unbounded set a 3 GB contributor.
+    db_max_open_handles: int = 8
+    db_idle_close_seconds: float = 900.0
+
     # Explicit path to the built frontend (frontend/dist). Leave empty to use
     # the repo-relative location; set MEMORY_MCP_UI_DIR for non-editable
     # installs (e.g. Homebrew) where the package is not next to the repo.
     ui_dir: str = ""
+
+    @field_validator("embedding_backend")
+    @classmethod
+    def _known_backend(cls, v: str) -> str:
+        value = (v or "").strip().lower()
+        if value not in ("onnx", "sentence-transformers"):
+            raise ValueError(
+                "embedding_backend must be 'onnx' or 'sentence-transformers', "
+                f"got {v!r}"
+            )
+        return value
 
     @property
     def server_mode(self) -> bool:

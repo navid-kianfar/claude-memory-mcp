@@ -137,6 +137,17 @@ _databases: dict[str, duckdb.DuckDBPyConnection] = {}
 _HNSW_PERSISTENCE = "SET hnsw_enable_experimental_persistence = true"
 _databases_lock = threading.Lock()
 
+# Monotonic last-use per open handle, for the idle LRU (`close_idle_databases`).
+# Guarded by `_databases_lock`; updated on open and on every cursor handed out,
+# which is every operation.
+_last_used: dict[str, float] = {}
+
+
+def open_database_count() -> int:
+    """How many project files this process currently holds a handle on."""
+    with _databases_lock:
+        return len(_databases)
+
 
 def _database(db_path: Path) -> duckdb.DuckDBPyConnection:
     """The process's handle on `db_path`, opened (and migrated) on first use."""
@@ -178,7 +189,77 @@ def _database(db_path: Path) -> duckdb.DuckDBPyConnection:
                     db.close()
                 raise
             _databases[key] = db
+        _last_used[key] = time.monotonic()
         return db
+
+
+def close_idle_databases(
+    max_handles: int | None = None, idle_seconds: float | None = None
+) -> int:
+    """Close handles nobody has used recently. Returns how many closed.
+
+    Two rules, both optional:
+    - idle: a handle unused for `idle_seconds` closes, whatever the count;
+    - cap: more than `max_handles` open => the least-recently-used close until
+      the count fits.
+
+    A machine with 60+ project files paid ~6 MB of resident memory per handle
+    for the v0.11.9 one-handle-per-file decision, forever. This bounds it from
+    the outbox sweeper's thread.
+
+    Safety is inherited, not reimplemented: victims must have zero live
+    cursors HERE (checked under the lock) and the close itself goes through
+    `_quiesce_and_close(leave_busy=True)`, so a cursor that raced in between
+    the snapshot and the close leaves the handle open rather than being torn
+    down under a running query - the wedge that produced the stale-index
+    disease. A handle mid-heal or with an ambient transaction is never a
+    candidate (its cursors are live).
+    """
+    if max_handles is None:
+        max_handles = settings.db_max_open_handles
+    if idle_seconds is None:
+        idle_seconds = settings.db_idle_close_seconds
+    now = time.monotonic()
+    with _databases_lock:
+        if not _databases:
+            return 0
+        # Candidates come from the OPEN handles, ordered by recency — never
+        # from `_last_used` alone, which can name a file this process no
+        # longer holds (a close elsewhere must always have cleaned it, but
+        # the cost of being wrong here is a cap that silently under-closes).
+        by_recency = sorted(
+            _databases, key=lambda key: _last_used.get(key, 0.0)
+        )
+        victims = [
+            key
+            for key in by_recency
+            if now - _last_used.get(key, 0.0) >= idle_seconds
+        ]
+        overflow = len(_databases) - max_handles
+        if overflow > 0:
+            for key in by_recency:
+                if overflow <= 0:
+                    break
+                if key in victims:
+                    continue
+                victims.append(key)
+                overflow -= 1
+        # Only cursors counted by `connect`/`transaction` are tracked in
+        # `_live`; a victim they hold open stays open via leave_busy below.
+        candidates = [
+            key
+            for key in victims
+            if key in _databases and _live.get(key, 0) == 0
+        ]
+        if not candidates:
+            return 0
+    closed = _quiesce_and_close(candidates, CLOSE_DRAIN_SECONDS, leave_busy=True)
+    if closed:
+        with _databases_lock:
+            for key in candidates:
+                if key not in _databases:
+                    _last_used.pop(key, None)
+    return closed
 
 
 def _checkpoint_after_replay(conn: duckdb.DuckDBPyConnection) -> None:
@@ -217,6 +298,7 @@ def _cursor(db_path: Path, tracked: bool = False) -> duckdb.DuckDBPyConnection:
                 # Counted in the same critical section that made it, so a
                 # drain can never miss a cursor that exists.
                 _live[key] = _live.get(key, 0) + 1
+            _last_used[key] = time.monotonic()
             return cursor
     return _cursor(db_path, tracked)
 
@@ -300,6 +382,7 @@ def _quiesce_and_close(
                                 db.execute("FORCE CHECKPOINT")
                     continue
                 db = _databases.pop(key, None)
+                _last_used.pop(key, None)
                 if db is None:
                     continue
                 if drained or not busy:

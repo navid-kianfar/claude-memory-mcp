@@ -16,6 +16,8 @@ dependencies = [
     "starlette>=0.37",
     "httpx>=0.27",
     "python-socketio[asyncio-client]>=5.16.4",
+    "psutil>=7.2.2",
+    "fastembed>=0.9.1",
 ]
 
 [project.optional-dependencies]

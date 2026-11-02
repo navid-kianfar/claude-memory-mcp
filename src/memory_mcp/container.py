@@ -261,6 +261,14 @@ class Container:
                     self.sweep_outboxes()
                 except Exception:  # noqa: BLE001
                     pass
+                # The same wake is when idle project handles close: one lock
+                # acquisition per project per minute, no thread of its own.
+                try:
+                    from memory_mcp.db.connection import close_idle_databases
+
+                    close_idle_databases()
+                except Exception:  # noqa: BLE001 - a close failure must not stop the sweep
+                    pass
                 self._sweeper_stop.wait(interval)
 
         self._sweeper = threading.Thread(target=_loop, name="outbox-sweeper", daemon=True)

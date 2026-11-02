@@ -57,6 +57,48 @@ def _all_links() -> list:
     return [dict(r) for r in rows]
 
 
+#: How often the daemon logs its own memory footprint. The 3 GB reports needed
+#: a trend line, not a one-off probe; this is the trend line.
+MEMORY_SAMPLE_SECONDS = 60.0
+
+
+async def _sample_memory() -> None:
+    """Log the process's RSS and open database count, forever, quietly.
+
+    The point is a baseline you can diff after a change: the same line before
+    and after the ONNX backend / the handle LRU is the whole argument that the
+    memory diet worked. Every read is guarded - a probe failure must never
+    reach the app.
+    """
+    import logging
+
+    sample_log = logging.getLogger("memory_mcp.memory")
+    while True:
+        try:
+            import psutil
+
+            rss_mb = round(psutil.Process().memory_info().rss / (1024 * 1024), 1)
+        except Exception:  # noqa: BLE001
+            rss_mb = None
+        try:
+            from memory_mcp.db.connection import open_database_count
+
+            handles = open_database_count()
+        except Exception:  # noqa: BLE001
+            handles = None
+        try:
+            from memory_mcp.embeddings import current_backend
+
+            backend = current_backend()
+        except Exception:  # noqa: BLE001
+            backend = None
+        if rss_mb is not None:
+            sample_log.info(
+                "rss=%sMB handles=%s backend=%s", rss_mb, handles, backend
+            )
+        await asyncio.sleep(MEMORY_SAMPLE_SECONDS)
+
+
 def build_app() -> Starlette:
     """Compose the UI routes and the MCP streamable-http app into one ASGI app.
 
@@ -127,8 +169,14 @@ def build_app() -> Starlette:
         except Exception as e:  # noqa: BLE001 - never block the daemon starting
             log.warning("startup repair check did not start: %s", e)
 
+        sampler = asyncio.create_task(_sample_memory())
+
         async with mcp_app.lifespan(app):
             yield
+
+        sampler.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sampler
 
         with contextlib.suppress(Exception):
             await subscriber.stop()

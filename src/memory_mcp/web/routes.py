@@ -318,7 +318,38 @@ async def _whoami(request):
 
 
 def _health(params, body, query):
-    return {"status": "ok", "version": __version__}
+    # RSS and open handles are what the memory diet (M1) is measured against:
+    # torch's runtime plus one DuckDB handle per project file ever touched were
+    # the two unbounded blocks. Read lazily and never let a probe failure break
+    # the health check itself.
+    rss_mb = None
+    try:
+        import psutil
+
+        rss_mb = round(psutil.Process().memory_info().rss / (1024 * 1024), 1)
+    except Exception:  # noqa: BLE001 - observability must not break health
+        pass
+    open_handles = None
+    try:
+        from memory_mcp.db.connection import open_database_count
+
+        open_handles = open_database_count()
+    except Exception:  # noqa: BLE001
+        pass
+    backend = None
+    try:
+        from memory_mcp.embeddings import current_backend
+
+        backend = current_backend()
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "status": "ok",
+        "version": __version__,
+        "rss_mb": rss_mb,
+        "open_db_handles": open_handles,
+        "embedding_backend": backend,
+    }
 
 
 def _meta(params, body, query):

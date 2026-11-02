@@ -52,13 +52,20 @@ class TestTheRegistry:
             # default. Both defaults are False, so True is always explicit.
             assert caps.hooks in (True, False)
 
+    @staticmethod
+    def _undetect_all(monkeypatch):
+        """Detection off everywhere - the machine this suite runs on has real
+        harness installs, and 'auto' must reflect detection, not the host."""
+        for adapter in registry.ADAPTERS:
+            monkeypatch.setattr(adapter, "detect", lambda: False)
+
     def test_selected_auto_uses_detection(self, monkeypatch):
-        monkeypatch.setattr(registry.get("claude"), "detect", lambda: False)
+        self._undetect_all(monkeypatch)
         assert selected("auto") == []
 
     def test_selected_all_ignores_detection(self, monkeypatch):
-        monkeypatch.setattr(registry.get("claude"), "detect", lambda: False)
-        assert selected("all") == ["claude"]
+        self._undetect_all(monkeypatch)
+        assert selected("all") == ["claude", "zcode"]
 
     def test_unknown_name_fails_loudly(self):
         with pytest.raises(ValueError, match="unknown harness"):

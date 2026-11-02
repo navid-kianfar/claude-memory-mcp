@@ -71,6 +71,14 @@ print("PAYLOAD=" + shlex.quote(json.dumps(body)))
 ' 2>/dev/null)"
 [ -z "$CWD" ] && exit 0
 
+
+# ZCode may not carry every field on stdin; it injects these as environment
+# variables instead (its docs list ${CLAUDE_PROJECT_DIR} / ${CLAUDE_SESSION_ID}
+# template variables as "also injected as environment variables"). An empty
+# stdin-derived value falls back to them; a real one wins.
+CWD="${CWD:-${CLAUDE_PROJECT_DIR:-${ZCODE_PROJECT_DIR:-}}}"
+SID="${SID:-${CLAUDE_SESSION_ID:-}}"
+
 BASE="${MEMORY_MCP_URL:-http://127.0.0.1:${MEMORY_MCP_DAEMON_PORT:-8765}}"
 AUTH=()
 [ -n "$MEMORY_MCP_TOKEN" ] && AUTH=(-H "Authorization: Bearer ${MEMORY_MCP_TOKEN}")

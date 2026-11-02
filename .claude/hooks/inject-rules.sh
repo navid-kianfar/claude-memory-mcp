@@ -45,6 +45,14 @@ print("ATTACH_BODY=" + shlex.quote(json.dumps(body)))
 # Default to the local daemon; MEMORY_MCP_URL points at a remote server and
 # MEMORY_MCP_TOKEN (if set) authenticates to it. With neither set this is the
 # original localhost request, byte-for-byte.
+
+# ZCode may not carry every field on stdin; it injects these as environment
+# variables instead (its docs list ${CLAUDE_PROJECT_DIR} / ${CLAUDE_SESSION_ID}
+# template variables as "also injected as environment variables"). An empty
+# stdin-derived value falls back to them; a real one wins.
+CWD="${CWD:-${CLAUDE_PROJECT_DIR:-${ZCODE_PROJECT_DIR:-}}}"
+SID="${SID:-${CLAUDE_SESSION_ID:-}}"
+
 BASE="${MEMORY_MCP_URL:-http://127.0.0.1:${MEMORY_MCP_DAEMON_PORT:-8765}}"
 AUTH=()
 [ -n "$MEMORY_MCP_TOKEN" ] && AUTH=(-H "Authorization: Bearer ${MEMORY_MCP_TOKEN}")

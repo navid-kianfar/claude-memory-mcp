@@ -15,12 +15,13 @@ import json
 import pytest
 
 from memory_mcp import setup as setup_mod
+from memory_mcp.harnesses import claude as claude_mod
 
 
 @pytest.fixture
 def settings_file(tmp_path, monkeypatch):
     path = tmp_path / "claude" / "settings.json"
-    monkeypatch.setattr(setup_mod, "claude_settings_path", lambda: path)
+    monkeypatch.setattr(claude_mod, "claude_settings_path", lambda: path)
     return path
 
 

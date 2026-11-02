@@ -1,26 +1,27 @@
 """Auto-setup for memory-mcp.
 
 Sets up the shared HTTP daemon model:
-  1. Directories (~/.memory-mcp/)
+  1. Directories (~/.claude-memory-mcp/)
   2. DuckDB VSS extension
   3. Embedding model download
-  4. Runtime install (a self-contained venv + UI under ~/.memory-mcp/)
+  4. Runtime install (a self-contained venv + UI under the data dir)
   5. launchd agent so the daemon runs and restarts automatically
-  6. /etc/hosts entry for the claude-memory-mcp hostname (prints a sudo command)
-  7. Claude Code MCP config -> points at the HTTP daemon
-  8. Claude Code hooks -> rule injection / session lifecycle
-  9. Agent definitions -> ~/.claude/agents/ (the standing agent team)
- 10. retire `agent: pm` -> the hook carries the lead brief instead
- 11. git merge driver -> reconciles two .claude-memory snapshot databases
+  6. /etc/hosts entry for the daemon hostname (prints a sudo command)
+  7. Per-harness wiring, via the adapters in memory_mcp.harnesses:
+     MCP config, hooks, agent definitions, client-quirk retirement
+  8. git merge driver -> reconciles two .agent-memory snapshot databases
 
-The runtime is installed under ~/.memory-mcp/ (not in the repo) so the launchd
+Steps 1-6 and 8 are machine-level and harness-neutral. Step 7 is what used to
+be this module's Claude-specific half; it now lives in harnesses/claude.py and
+is re-exported below, so every test and caller that imported these names from
+`memory_mcp.setup` keeps working unchanged.
+
+The runtime is installed under the data dir (not in the repo) so the launchd
 background agent can run it even when the repo lives in a macOS TCC-protected
 folder like ~/Desktop, ~/Documents, or ~/Downloads.
 """
 
-import json
-import re
-import os
+import argparse
 import plistlib
 import shutil
 import subprocess
@@ -29,14 +30,43 @@ from pathlib import Path
 
 from memory_mcp.config import settings
 from memory_mcp.constants import MERGE_DRIVER_NAME
+from memory_mcp.harnesses.base import REPO_DIR
+
+# Re-exports: the Claude wiring moved to harnesses/claude.py, but these names
+# have been importable from memory_mcp.setup since the first release, and the
+# suite (test_hook_install, test_agent_install, test_agent_team) pins them
+# here. A move must not be a rename for every caller at once.
+from memory_mcp.harnesses.claude import (  # noqa: F401
+    AGENTS_DIR,
+    AGENT_NAME_MARKER,
+    AgentCompositionError,
+    DEFAULT_SESSION_AGENT,
+    EXTENSION_MARKER,
+    HOOK_EVENTS,
+    HOOK_MATCHERS,
+    HOOKS_DIR,
+    REPO_DIR_KEY,
+    _add_hook,
+    _installed_agents_manifest,
+    _render_agent,
+    _union_tool_list,
+    _unquote,
+    _yaml_scalar,
+    claude_agents_dir,
+    claude_json_path,
+    claude_settings_path,
+    compose_agent,
+    installable_agent_text,
+    is_abstract_agent,
+    parse_agent,
+    retire_default_agent,
+    setup_agents,
+    setup_claude_mcp,
+    setup_hooks,
+)
+from memory_mcp.harnesses.claude import ClaudeHarness  # noqa: F401
 
 LAUNCHD_LABEL = "com.claude-memory-mcp.daemon"
-REPO_DIR = Path(__file__).resolve().parents[2]
-HOOKS_DIR = REPO_DIR / ".claude" / "hooks"
-# Agent definitions live at the repo root, NOT in .claude/agents/: a folder
-# there would scope the team to THIS repo, and the team has to follow the user
-# into every project. They install to ~/.claude/agents/ for that reason.
-AGENTS_DIR = REPO_DIR / "agents"
 
 
 def runtime_dir() -> Path:
@@ -47,49 +77,6 @@ def runtime_dir() -> Path:
 def runtime_ui_dir() -> Path:
     """Built frontend, copied here so the daemon serves it from a stable path."""
     return settings.data_dir / "ui"
-
-# One event may carry several scripts. Stop carries two: the session-end
-# bookkeeping, and the auto-update, which needs the end of a turn because
-# installing restarts the daemon and drops any in-flight MCP call.
-HOOK_EVENTS = {
-    "UserPromptSubmit": ["inject-rules.sh"],
-    "SessionStart": ["session-start.sh"],
-    "Stop": ["session-end.sh", "auto-update-install.sh"],
-    # The only hooks here that can REFUSE anything. The others print into the
-    # model's context and hope; a PreToolUse exit status decides whether the tool
-    # runs, which is what makes "put the work on the board first" an invariant
-    # instead of a rule that held about 70% of the time. Two scripts, because
-    # they watch different tools: one the edits, one the dispatches.
-    "PreToolUse": ["require-task.sh", "record-dispatch.sh"],
-    # Counts agents OUT, as record-dispatch.sh counts them in: the difference is
-    # how many are running, which the dispatch hook needs to ask before a third
-    # concurrent agent. Its own script because a matcher is per script, and
-    # `Agent|Task` on SubagentStop would be matched against the agent's TYPE.
-    "SubagentStop": ["record-subagent-stop.sh"],
-}
-
-#: Which tools each script fires for. Keyed by SCRIPT, not by event: the two
-#: PreToolUse scripts must not see each other's tools - require-task.sh on an
-#: Agent call would gate delegation, and record-dispatch.sh on an Edit would log
-#: every file as a dispatch. `_add_hook` already makes one group per command, so
-#: the installed settings.json simply gets two PreToolUse groups.
-#:
-#: A PreToolUse hook with no matcher at all would run on every Read and Grep: a
-#: needless round trip before each one, and a gate on exploration, which must
-#: always stay free.
-#:
-#: `Agent|Task`: the harness names the delegation tool `Agent` and parts of the
-#: documentation call it `Task`. Matching both costs nothing and means the ledger
-#: does not depend on which name this CLI build uses.
-HOOK_MATCHERS = {
-    "require-task.sh": "Edit|Write|NotebookEdit",
-    "record-dispatch.sh": "Agent|Task",
-}
-
-#: Where the source repo lives. The installed hooks run from
-#: ~/.claude-memory-mcp/hooks/, so they cannot infer it from their own path -
-#: they ask the daemon, which reads this.
-REPO_DIR_KEY = "install:repo_dir"
 
 
 def print_step(step: int, total: int, msg: str) -> None:
@@ -117,10 +104,11 @@ def setup_vss() -> None:
 # ---------- 3. model ----------
 
 def setup_embedding_model() -> None:
-    from sentence_transformers import SentenceTransformer
+    # The onnx backend never imports torch; whichever backend is configured,
+    # this step proves a vector comes out at the configured dimension.
+    from memory_mcp.embeddings import embed_text
 
-    model = SentenceTransformer(settings.embedding_model)
-    test = model.encode("test", normalize_embeddings=True)
+    test = embed_text("test")
     assert len(test) == settings.embedding_dim
 
 
@@ -212,452 +200,41 @@ def setup_hosts() -> None:
     print(f'      echo "127.0.0.1 {hostname}" | sudo tee -a /etc/hosts')
 
 
-# ---------- 7. Claude MCP config ----------
+# ---------- 7. per-harness wiring ----------
 
-def claude_json_path() -> Path:
-    return Path.home() / ".claude.json"
+def daemon_mcp_url() -> str:
+    return f"http://127.0.0.1:{settings.daemon_port}/mcp"
 
 
-def setup_claude_mcp(remote_url: str | None = None, token: str | None = None) -> None:
-    """Point Claude Code at the HTTP daemon (or a remote server) over HTTP.
+def run_harness_steps(remote_url: str | None = None, token: str | None = None) -> None:
+    """Run MCP/hooks/agents wiring for every selected harness, with reports.
 
-    With remote_url set (client mode), the entry points at the remote server and
-    carries a Bearer token header; otherwise it points at the local daemon,
-    exactly as before.
+    Each adapter is idempotent; a conflict it found is printed and LEFT for the
+    user - an installer that silently rewrites another server's entry is the
+    two-servers failure mode wearing an installer's uniform.
     """
-    path = claude_json_path()
-    config: dict = {}
-    if path.exists():
-        try:
-            config = json.loads(path.read_text())
-        except Exception:  # noqa: BLE001
-            print("    Warning: ~/.claude.json is not valid JSON - skipping MCP config.")
-            return
-    config.setdefault("mcpServers", {})
-    if remote_url:
-        url = f"{remote_url.rstrip('/')}/mcp"
-        entry: dict = {"type": "http", "url": url}
-        if token:
-            entry["headers"] = {"Authorization": f"Bearer {token}"}
-    else:
-        url = f"http://127.0.0.1:{settings.daemon_port}/mcp"
-        entry = {"type": "http", "url": url}
-    config["mcpServers"]["memory"] = entry
-    path.write_text(json.dumps(config, indent=2))
-    print(f"    MCP server 'memory' -> {url}")
+    import memory_mcp.harnesses as registry
 
-
-# ---------- 8. hooks ----------
-
-def claude_settings_path() -> Path:
-    return Path.home() / ".claude" / "settings.json"
-
-
-def _add_hook(
-    settings_obj: dict, event: str, command: str, matcher: str | None = None,
-) -> bool:
-    hooks = settings_obj.setdefault("hooks", {})
-    groups = hooks.setdefault(event, [])
-    for group in groups:
-        for hook in group.get("hooks", []):
-            if hook.get("command") == command:
-                # Already installed - but an older install may predate the
-                # matcher, and PreToolUse without one runs on every tool call.
-                if matcher and group.get("matcher") != matcher:
-                    group["matcher"] = matcher
-                    return True
-                return False
-    group: dict = {"hooks": [{"type": "command", "command": command}]}
-    if matcher:
-        group["matcher"] = matcher
-    groups.append(group)
-    return True
-
-
-def setup_hooks(remote_url: str | None = None, token: str | None = None) -> None:
-    """Install the rule-injection / session hooks into global Claude settings.
-
-    The hook scripts are copied to ~/.memory-mcp/hooks/ so the install does not
-    depend on the repo staying in place. In client mode (remote_url set) each
-    hook command is prefixed with `env MEMORY_MCP_URL=… MEMORY_MCP_TOKEN=…` so the
-    generic scripts talk to the remote server with auth.
-    """
-    import shlex
-
-    env_prefix = ""
-    if remote_url:
-        parts = ["env", f"MEMORY_MCP_URL={shlex.quote(remote_url.rstrip('/'))}"]
-        if token:
-            parts.append(f"MEMORY_MCP_TOKEN={shlex.quote(token)}")
-        env_prefix = " ".join(parts) + " "
-    path = claude_settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    settings_obj: dict = {}
-    if path.exists():
-        try:
-            settings_obj = json.loads(path.read_text())
-        except Exception:  # noqa: BLE001
-            print("    Warning: ~/.claude/settings.json invalid - skipping hooks.")
-            return
-
-    hooks_dest = settings.data_dir / "hooks"
-    hooks_dest.mkdir(parents=True, exist_ok=True)
-
-    # Drop any prior memory-mcp hook entries (e.g. stale repo-path ones from an
-    # earlier install) so re-running setup stays idempotent.
-    scripts = {name for names in HOOK_EVENTS.values() for name in names}
-    for event, groups in list(settings_obj.get("hooks", {}).items()):
-        kept_groups = []
-        for group in groups:
-            group["hooks"] = [
-                h for h in group.get("hooks", [])
-                if not any(h.get("command", "").endswith(s) for s in scripts)
-            ]
-            if group["hooks"]:
-                kept_groups.append(group)
-        settings_obj["hooks"][event] = kept_groups
-
-    added = 0
-    for event, script_names in HOOK_EVENTS.items():
-        for script in script_names:
-            src = HOOKS_DIR / script
-            if not src.exists():
-                continue
-            dst = hooks_dest / script
-            shutil.copy2(src, dst)
-            os.chmod(dst, 0o755)
-            command = (
-                f"{env_prefix}{shlex.quote(str(dst))}" if env_prefix else str(dst)
-            )
-            if _add_hook(
-                settings_obj, event, command, HOOK_MATCHERS.get(script),
-            ):
-                added += 1
-
-    # Record the source repo so the installed hooks can find it. They live in
-    # ~/.claude-memory-mcp/hooks/ and would otherwise resolve their own path and
-    # find no repository at all.
-    try:
-        from memory_mcp.db.registry import set_setting
-
-        set_setting(REPO_DIR_KEY, str(REPO_DIR))
-        # The commit this install was built from. The daemon compares it against
-        # GitHub to detect an update without touching the repo, which it cannot
-        # read when the repo lives in a TCC-protected folder.
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR),
-            capture_output=True, text=True, timeout=10,
-        )
-        if head.returncode == 0 and head.stdout.strip():
-            set_setting("install:commit", head.stdout.strip())
-    except Exception:  # noqa: BLE001 - hooks still work, updates just stay manual
-        print("    Warning: could not record the repo path for auto-update.")
-
-    path.write_text(json.dumps(settings_obj, indent=2))
-    print(f"    Hooks installed to {hooks_dest} ({added} added)")
-
-
-# ---------- 9. agent definitions ----------
-
-def claude_agents_dir() -> Path:
-    return Path.home() / ".claude" / "agents"
-
-
-def _installed_agents_manifest() -> Path:
-    """Which agent files THIS installer wrote, so it only ever removes its own."""
-    return settings.data_dir / "agents-installed.json"
-
-
-# ---------- agent composition: `extends:` ----------
-#
-# Claude Code has no inheritance between agent definitions, and the team needs
-# it: the task lifecycle, the memory contract and the token rules are the same
-# for every agent, and an expert (dotnet, nodejs, react, app) is "its base plus a
-# layer", not a second copy of the base prompt that drifts. So the installer
-# composes. A file may say `extends: <base>` in its frontmatter; the INSTALLED
-# file is the base's composed body with this file's body at the base's
-# {{EXTENSION}} marker (appended when there is none), under this file's
-# frontmatter merged over the base's. `extends` and `abstract` never reach
-# ~/.claude/agents/. A file with `abstract: true` (or a name starting with `_`)
-# is a base only and is not installed.
-
-EXTENSION_MARKER = "{{EXTENSION}}"
-#: Replaced at install with the INSTALLED agent's own `name`. A base prompt is
-#: shared by every agent that extends it, so it cannot spell out which agent it
-#: is; the leaf's name only exists once composition is finished. It matters
-#: because `memory_session_start(agent=...)` is what keeps a subagent from
-#: closing the lead's session, and an agent guessing its own type string - or
-#: leaving it out - does exactly that, silently.
-AGENT_NAME_MARKER = "{{AGENT_NAME}}"
-_FRONT_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
-_FRONT_ORDER = (
-    "name", "description", "model", "effort", "color", "isolation",
-    "tools", "disallowedTools", "skills",
-)
-_COMPOSE_ONLY_KEYS = ("extends", "abstract")
-
-#: The one frontmatter key a child ADDS to rather than replaces. Every other key
-#: is "nearest layer wins", which is right for a model or an effort level and
-#: wrong for a denial: `_base.md` denies `Agent` to every agent, and
-#: `reviewer.md` denies `Edit, Write, NotebookEdit` on top - replacing would
-#: silently hand the reviewer the Agent tool back. That is not hypothetical: on
-#: 2026-09-13 one reviewer spawned six "angle" reviewers and one of those spawned
-#: four more, because subagents could dispatch.
-_UNION_KEY = "disallowedTools"
-
-
-def _union_tool_list(*values: str | None) -> str:
-    """`Edit, Write` + `Agent` -> `Edit, Write, Agent`: order kept, no duplicates."""
-    seen: list[str] = []
-    for value in values:
-        for item in (value or "").split(","):
-            item = item.strip()
-            if item and item not in seen:
-                seen.append(item)
-    return ", ".join(seen)
-
-
-class AgentCompositionError(RuntimeError):
-    """An agent file extends something that cannot be resolved."""
-
-
-def _unquote(value: str) -> str:
-    """The value YAML would hand back, without its quotes.
-
-    A description containing a colon-space MUST be quoted in the file or a strict
-    YAML parser reads the second colon as a nested mapping. Those quotes are
-    syntax, not text: every consumer wants the string inside them.
-    """
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        return value[1:-1]
-    return value
-
-
-def _yaml_scalar(value: str) -> str:
-    """`value` as a frontmatter scalar, quoted only when YAML needs it.
-
-    The counterpart to `_unquote`: parsing drops the quotes, so rendering has to
-    put them back, or a composed file would ship the invalid YAML the quotes were
-    added to fix. A flow collection (`skills: [a, b]`) is left alone.
-    """
-    if not value or value[0] in "[{":
-        return value
-    if ": " in value or value.endswith(":"):
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    return value
-
-
-def parse_agent(text: str) -> tuple[dict, str] | None:
-    """(frontmatter, body) for an agent-shaped file, else None.
-
-    Values are unquoted - the string YAML would give you - so a caller never has
-    to know whether the file needed quoting. `skills: [a, b]` is passed through
-    untouched, exactly as Claude Code will read it.
-    """
-    match = _FRONT_RE.match(text)
-    if not match:
-        return None
-    front: dict = {}
-    for line in match.group(1).splitlines():
-        if not line.strip() or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        front[key.strip()] = _unquote(value.strip())
-    return front, match.group(2)
-
-
-def _render_agent(front: dict, body: str) -> str:
-    ordered = [k for k in _FRONT_ORDER if k in front]
-    ordered += [k for k in front if k not in ordered]
-    lines = ["---", *(f"{k}: {_yaml_scalar(front[k])}" for k in ordered), "---", ""]
-    return "\n".join(lines) + body.strip("\n") + "\n"
-
-
-def is_abstract_agent(path: Path) -> bool:
-    """A base other definitions extend, never installed on its own."""
-    if path.stem.startswith("_"):
-        return True
-    parsed = parse_agent(path.read_text())
-    return bool(parsed and (parsed[0].get("abstract") or "").lower() in ("true", "yes", "1"))
-
-
-def compose_agent(path: Path, sources: dict[str, Path], _chain: tuple = ()) -> str:
-    """The composed text of `path`, with any {{EXTENSION}} marker still in place
-    so a further child can extend it. `installable_agent_text` is what goes to
-    disk.
-
-    A file that extends nothing and carries no composition keys is returned
-    byte for byte - the common case, and what keeps a hand-written definition
-    exactly what its author wrote. Deterministic: the same sources always
-    compose to the same text, so re-running setup is a no-op.
-    """
-    text = path.read_text()
-    parsed = parse_agent(text)
-    if parsed is None:
-        return text
-    front, body = parsed
-    base_name = (front.get("extends") or "").strip()
-    if not base_name:
-        if not any(k in front for k in _COMPOSE_ONLY_KEYS):
-            return text
-        clean = {k: v for k, v in front.items() if k not in _COMPOSE_ONLY_KEYS}
-        return _render_agent(clean, body)
-
-    chain = _chain + (path.stem,)
-    if base_name in chain:
-        raise AgentCompositionError(
-            f"{path.name} extends {base_name!r}, which is already in the chain "
-            f"{' -> '.join(chain)}: a definition cannot extend itself"
-        )
-    base_path = sources.get(base_name)
-    if base_path is None:
-        raise AgentCompositionError(
-            f"{path.name} extends {base_name!r}, but there is no {base_name}.md "
-            f"beside it in {path.parent}"
-        )
-    base_parsed = parse_agent(compose_agent(base_path, sources, chain))
-    if base_parsed is None:
-        raise AgentCompositionError(
-            f"{path.name} extends {base_path.name}, which has no frontmatter block"
-        )
-    base_front, base_body = base_parsed
-    merged = {**base_front, **{k: v for k, v in front.items() if k not in _COMPOSE_ONLY_KEYS}}
-    merged = {k: v for k, v in merged.items() if k not in _COMPOSE_ONLY_KEYS}
-    denied = _union_tool_list(base_front.get(_UNION_KEY), front.get(_UNION_KEY))
-    if denied:
-        merged[_UNION_KEY] = denied
-    layer = body.strip("\n")
-    if EXTENSION_MARKER in base_body:
-        composed = base_body.replace(EXTENSION_MARKER, layer, 1)
-    else:
-        composed = base_body.rstrip("\n") + "\n\n" + layer + "\n"
-    return _render_agent(merged, composed)
-
-
-def installable_agent_text(path: Path, sources: dict[str, Path]) -> str:
-    """What is written to ~/.claude/agents/: composed, and with no marker left
-    for Claude Code to read as prompt text."""
-    text = compose_agent(path, sources)
-    if EXTENSION_MARKER not in text and AGENT_NAME_MARKER not in text:
-        return text
-    parsed = parse_agent(text)
-    if parsed is None:
-        return text.replace(EXTENSION_MARKER, "").replace(AGENT_NAME_MARKER, path.stem)
-    front, body = parsed
-    name = front.get("name") or path.stem
-    body = body.replace(EXTENSION_MARKER, "").replace(AGENT_NAME_MARKER, name)
-    return _render_agent(front, body)
-
-
-def setup_agents() -> None:
-    """Install the agent team from agents/ into ~/.claude/agents/.
-
-    agents/ in the repo is the source of truth; ~/.claude/agents/ is a build
-    artefact of it. That is the whole point - an agent edited in place under
-    ~/.claude/agents/ has no history, no review, and no way to tell whether a
-    prompt change helped. Edit agents/<name>.md and re-run setup.
-
-    Installed copies are OVERWRITTEN, exactly as the hook scripts are.
-
-    Retiring an agent removes its installed copy too, but only ever a file this
-    installer previously wrote: the manifest records what was installed last
-    time, so a hand-written agent sitting in the same directory is never touched.
-    """
-    if not AGENTS_DIR.is_dir():
-        print(f"    No agents/ directory at {AGENTS_DIR} - nothing to install.")
+    names = registry.selected(None)
+    if not names:
+        print("    No supported harness detected - nothing wired. Install one of:"
+              f" {', '.join(a.name for a in registry.ADAPTERS)}")
         return
-
-    dest = claude_agents_dir()
-    dest.mkdir(parents=True, exist_ok=True)
-
-    # README.md documents the folder for maintainers; it is not an agent. A base
-    # (`abstract: true`, or `_name.md`) is composed into others, never installed.
-    by_stem = {
-        p.stem: p for p in AGENTS_DIR.glob("*.md") if p.name.lower() != "readme.md"
-    }
-    sources = sorted(p for p in by_stem.values() if not is_abstract_agent(p))
-    installed = [p.name for p in sources]
-
-    manifest = _installed_agents_manifest()
-    previous: list[str] = []
-    if manifest.exists():
-        try:
-            previous = json.loads(manifest.read_text())
-        except Exception:  # noqa: BLE001
-            previous = []
-
-    removed = 0
-    for name in previous:
-        if name not in installed:
-            stale = dest / name
-            if stale.exists():
-                stale.unlink()
-                removed += 1
-
-    for src in sources:
-        # Composed, not copied: `extends:` is resolved here so Claude Code only
-        # ever sees a complete definition. A file that extends nothing is
-        # written byte for byte.
-        (dest / src.name).write_text(installable_agent_text(src, by_stem))
-
-    manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text(json.dumps(installed, indent=2))
-
-    summary = f"    {len(installed)} agent(s) installed to {dest}"
-    if removed:
-        summary += f" ({removed} retired)"
-    print(summary)
-    if installed:
-        print(f"    Team: {', '.join(p.removesuffix('.md') for p in installed)}")
+    for name in names:
+        adapter = registry.get(name)
+        print(f"    -- {name} --")
+        for step_name, method in (
+            ("MCP config", lambda a=adapter: a.configure_mcp(daemon_mcp_url(), remote_url, token)),
+            ("hooks", lambda a=adapter: a.install_hooks(remote_url, token)),
+            ("agents", lambda a=adapter: a.install_agents()),
+        ):
+            try:
+                method().print()
+            except Exception as e:  # noqa: BLE001 - one harness must not stop the others
+                print(f"    Warning: {step_name}: {e}")
 
 
-# ---------- 10. retire the `agent` setting ----------
-
-#: What setup used to write into ~/.claude/settings.json to make every session
-#: start as the pm agent.
-DEFAULT_SESSION_AGENT = "pm"
-
-
-def retire_default_agent() -> None:
-    """Remove `agent: pm` from ~/.claude/settings.json if WE put it there.
-
-    WHY IT WENT AWAY, so it is not re-added: the session is meant to BE the lead,
-    and the orchestration brief now rides the UserPromptSubmit hook instead
-    (enforcement.agent_team_intro / agent_team_line). Two reasons the hook won:
-
-    - The `agent` setting is silently ignored by some clients. It was set on this
-      machine and the desktop app started an ordinary session anyway, so it
-      promised an orchestrator and delivered none.
-    - With both, a CLI session would get pm's prompt as its system prompt AND the
-      hook's brief on every turn - the same instructions twice, and pm's tool and
-      effort settings forced onto every unrelated one-off session.
-
-    Only ever removes the exact value this installer wrote. An `agent` set to
-    anything else is someone's deliberate choice and is left alone.
-    """
-    path = claude_settings_path()
-    if not path.exists():
-        return
-    try:
-        settings_obj = json.loads(path.read_text())
-    except Exception:  # noqa: BLE001
-        print("    Warning: ~/.claude/settings.json invalid - leaving it alone.")
-        return
-
-    current = settings_obj.get("agent")
-    if current is None:
-        print("    No session agent set - the hook carries the lead brief.")
-        return
-    if current != DEFAULT_SESSION_AGENT:
-        print(f"    Session agent is '{current}' (set by hand) - leaving it alone.")
-        return
-
-    del settings_obj["agent"]
-    path.write_text(json.dumps(settings_obj, indent=2))
-    print("    Removed `agent: pm` - the lead brief now rides the hook instead.")
-
-
-# ---------- 11. git merge driver for the memory snapshot ----------
+# ---------- 8. git merge driver for the memory snapshot ----------
 
 def merge_driver_command() -> str:
     """The command git runs to merge two snapshot databases.
@@ -677,7 +254,7 @@ def setup_merge_driver() -> None:
     Two halves make this work, and only this one is machine-wide:
 
       1. HERE: `merge.<name>.driver` in ~/.gitconfig, so git knows what to run.
-      2. PER PROJECT: `.claude-memory/.gitattributes`, written by every
+      2. PER PROJECT: `.agent-memory/.gitattributes`, written by every
          `memory-mcp sync export`, which points the snapshot at that driver.
          It is committed, so a teammate gets it from the repo - but it only
          does anything on a machine that has run this step.
@@ -713,9 +290,14 @@ def setup_merge_driver() -> None:
 def run_update() -> None:
     """Rebuild the runtime from the current source and reload the daemon.
 
-    Lighter than full setup (skips the model/VSS/hosts/MCP-config/hooks
-    steps) - used by the auto-update hook when the repo source changes. Agent
-    definitions ARE source, so they refresh here too.
+    Lighter than full setup (skips the model/VSS/hosts/MCP-config steps) - used
+    by the auto-update hook when the repo source changes. Hooks and agent
+    definitions ARE source, so the harness steps refresh here too - this is the
+    fix for the old gap where run_update skipped setup_hooks() and an edited
+    hook script reached a machine only on a full `memory-mcp-setup`. The MCP
+    registration is deliberately NOT re-run here: it never changes short of a
+    port change, and the Stop hook should not rewrite client config files
+    mid-session.
 
     The merge driver is re-registered here as well, and it is the reason an
     install that predates it does not need a full setup: the registration is one
@@ -724,18 +306,28 @@ def run_update() -> None:
     """
     print("Updating the local installation...")
     setup_runtime()
-    setup_agents()
     setup_launchd()
     try:
         setup_merge_driver()
     except Exception as e:  # noqa: BLE001 - no git, or a locked config
         print(f"    Warning: merge driver not registered: {e}")
+    run_harness_steps()
     print("Local installation updated.")
 
 
 # ---------- main ----------
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="memory-mcp-setup", description="Install the memory-mcp daemon and wire every detected harness."
+    )
+    parser.add_argument(
+        "--harness", default="auto",
+        help="which harness(es) to wire: auto (every detected), all, or a "
+             "comma-separated list of names (claude, zcode, codex, opencode)",
+    )
+    args = parser.parse_args()
+
     print()
     print("=" * 60)
     print("  Claude Memory MCP - Setup")
@@ -749,13 +341,8 @@ def main() -> None:
         ("Installing the daemon runtime (this can take a minute)", setup_runtime),
         ("Installing launchd daemon agent", setup_launchd),
         ("Checking /etc/hosts entry", setup_hosts),
-        ("Configuring Claude Code MCP (HTTP daemon)", setup_claude_mcp),
-        ("Installing Claude Code hooks", setup_hooks),
-        ("Installing the agent team", setup_agents),
-        ("Retiring the `agent` setting (the hook carries it)", retire_default_agent),
-        ("Registering the memory snapshot git merge driver", setup_merge_driver),
     ]
-    total = len(steps)
+    total = len(steps) + 2
     for i, (msg, fn) in enumerate(steps, 1):
         print_step(i, total, msg + "...")
         try:
@@ -763,6 +350,20 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001
             print(f"    Warning: {e}")
         print()
+
+    print_step(len(steps) + 1, total, "Wiring the harnesses (MCP, hooks, agents)...")
+    try:
+        run_harness_steps()
+    except Exception as e:  # noqa: BLE001 - unknown --harness name fails loudly
+        parser.error(str(e))
+    print()
+
+    print_step(total, total, "Registering the memory snapshot git merge driver")
+    try:
+        setup_merge_driver()
+    except Exception as e:  # noqa: BLE001
+        print(f"    Warning: {e}")
+    print()
 
     port = settings.daemon_port
     host = settings.daemon_hostname
@@ -773,7 +374,8 @@ def main() -> None:
     print(f"  Management UI : http://{host}:{port}/   (after the /etc/hosts step)")
     print(f"  MCP endpoint  : http://127.0.0.1:{port}/mcp")
     print()
-    print("  Restart Claude Code to pick up the new MCP + hook configuration.")
+    print("  Restart each harness (Claude Code, ZCode, ...) to pick up the")
+    print("  new MCP + hook configuration.")
     print("=" * 60)
     print()
 
@@ -782,7 +384,7 @@ def main_client(remote_url: str, token: str | None = None) -> None:
     """Configure this machine as a pure CLIENT of a remote memory server.
 
     No local daemon, launchd, /etc/hosts, DB, model, or runtime - just point
-    Claude Code's MCP config + hooks at the remote server (with an auth token).
+    every harness's MCP config + hooks at the remote server (with an auth token).
     """
     print()
     print("=" * 60)
@@ -793,12 +395,8 @@ def main_client(remote_url: str, token: str | None = None) -> None:
 
     steps = [
         ("Creating hooks directory", setup_directories),
-        ("Configuring Claude Code MCP (remote server)",
-         lambda: setup_claude_mcp(remote_url, token)),
-        ("Installing Claude Code hooks (pointed at the server)",
-         lambda: setup_hooks(remote_url, token)),
     ]
-    total = len(steps)
+    total = len(steps) + 1
     for i, (msg, fn) in enumerate(steps, 1):
         print_step(i, total, msg + "...")
         try:
@@ -807,11 +405,15 @@ def main_client(remote_url: str, token: str | None = None) -> None:
             print(f"    Warning: {e}")
         print()
 
+    print_step(total, total, "Wiring the harnesses (MCP + hooks, pointed at the server)...")
+    run_harness_steps(remote_url, token)
+    print()
+
     print("=" * 60)
     print("  Client setup complete.")
     print()
     print(f"  MCP endpoint : {remote_url.rstrip('/')}/mcp")
-    print("  Restart Claude Code to pick up the new MCP + hook configuration.")
+    print("  Restart each harness to pick up the new MCP + hook configuration.")
     print("=" * 60)
     print()
 

@@ -13,6 +13,7 @@ import re
 import pytest
 
 from memory_mcp import setup as setup_mod
+from memory_mcp.harnesses import claude as claude_mod
 from memory_mcp.config import settings
 
 
@@ -22,8 +23,8 @@ def agent_dirs(tmp_path, monkeypatch):
     source = tmp_path / "agents"
     source.mkdir()
     dest = tmp_path / "home" / ".claude" / "agents"
-    monkeypatch.setattr(setup_mod, "AGENTS_DIR", source)
-    monkeypatch.setattr(setup_mod, "claude_agents_dir", lambda: dest)
+    monkeypatch.setattr(claude_mod, "AGENTS_DIR", source)
+    monkeypatch.setattr(claude_mod, "claude_agents_dir", lambda: dest)
     return source, dest
 
 
@@ -215,7 +216,7 @@ class TestAgentInstall:
 
     def test_a_missing_source_folder_is_not_an_error(self, tmp_path, monkeypatch):
         """Setup runs on machines where the repo layout may differ."""
-        monkeypatch.setattr(setup_mod, "AGENTS_DIR", tmp_path / "nope")
+        monkeypatch.setattr(claude_mod, "AGENTS_DIR", tmp_path / "nope")
         monkeypatch.setattr(
             setup_mod, "claude_agents_dir", lambda: tmp_path / "dest"
         )
@@ -551,7 +552,7 @@ class TestRetireDefaultAgent:
     def settings_file(self, tmp_path, monkeypatch):
         path = tmp_path / ".claude" / "settings.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr(setup_mod, "claude_settings_path", lambda: path)
+        monkeypatch.setattr(claude_mod, "claude_settings_path", lambda: path)
         return path
 
     def _write(self, path, data):

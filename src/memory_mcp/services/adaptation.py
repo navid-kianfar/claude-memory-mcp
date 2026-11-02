@@ -27,7 +27,7 @@ _STEPS = (
     "invent an answer.",
     "4. Call memory_adapt_pending(memory_id, title, content) with the rewritten "
     "text. That clears the pending flag: the rule joins this session's rules "
-    "from then on, and syncs to the project's .claude-memory/ snapshot.",
+    "from then on, and syncs to the project's .agent-memory/ snapshot.",
     "5. If a rule simply does not belong in this project, call "
     "memory_discard_pending(memory_id, reason) instead.",
 )

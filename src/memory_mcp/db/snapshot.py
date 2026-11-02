@@ -1,7 +1,7 @@
 """The committed memory snapshot: one DuckDB file per project, and its merge.
 
 This is the git-committable handoff between machines and people that used to be
-one JSON file per category under ``.claude-memory/``. That form was rewritten in
+one JSON file per category under ``.agent-memory/``. That form was rewritten in
 full every session and only grew - kalagh reached 1.1M, and this project's
 ``architecture.json`` alone was 55K - so every session added another large blob
 to git history.

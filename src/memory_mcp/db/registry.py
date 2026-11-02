@@ -205,7 +205,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE projects ADD COLUMN remote_url TEXT")
     if "project_uid" not in cols:
         # Stable identity, independent of slug and folder path. Written into the
-        # committed .claude-memory/manifest.json so a project survives being
+        # committed .agent-memory/manifest.json so a project survives being
         # moved or renamed, on this machine and on a teammate's.
         conn.execute("ALTER TABLE projects ADD COLUMN project_uid TEXT")
     # session_dispatches predates `asked` on any registry a release candidate

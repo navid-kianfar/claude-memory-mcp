@@ -14,7 +14,7 @@ def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
 
 # Task tables (v5). Deliberately NOT a MemoryCategory: SYNC_CATEGORIES is derived
 # automatically from the category enum (constants.py), so a task category would
-# immediately start writing every task into the committed .claude-memory/ JSON
+# immediately start writing every task into the committed .agent-memory/ JSON
 # snapshot. Keeping tasks in their own tables is what keeps that snapshot small.
 #
 # claimed_by/claimed_at/lease_expires_at implement the multi-session claim: one
@@ -280,7 +280,7 @@ _SYNC_DDL = (
 # Deliberately NOT a MemoryCategory, for the same reason as the task tables:
 # SYNC_CATEGORIES is derived from the category enum, so a digest category would
 # immediately start writing every review artifact into the committed
-# .claude-memory/ snapshot. A digest is local scratch work about memories, not
+# .agent-memory/ snapshot. A digest is local scratch work about memories, not
 # a memory.
 _DIGEST_DDL = (
     """
@@ -529,7 +529,7 @@ def migrate_v4_to_v5(conn: duckdb.DuckDBPyConnection) -> None:
     every existing memory keeps behaving exactly as before. Tasks are queued
     requirements with their own lifecycle (state, comments, time entries); they
     are NOT memories and NOT a MemoryCategory, which is what keeps them out of
-    the committed .claude-memory/ snapshot.
+    the committed .agent-memory/ snapshot.
 
     `sessions.last_seen_at` is the free heartbeat behind the multi-session claim
     - every tool call already reaches the daemon. Existing sessions are
@@ -636,7 +636,7 @@ def migrate_v10_to_v11(conn: duckdb.DuckDBPyConnection) -> None:
     """Migrate v10 -> v11: task attachments.
 
     Bytes go on disk and the row holds metadata plus a sha256. Two reasons: the
-    per-project DuckDB sits beside a committed .claude-memory snapshot and a few
+    per-project DuckDB sits beside a committed .agent-memory snapshot and a few
     screenshots would bloat it badly, and a content hash gives deduplication plus
     a stable key for the send-once guard even when a filename changes.
 

@@ -732,7 +732,7 @@ def _sync_export(params, body, query):
 
 
 def _sync_import(params, body, query):
-    """Reconcile the project DB to a snapshot the CLI read from .claude-memory/."""
+    """Reconcile the project DB to a snapshot the CLI read from .agent-memory/."""
     slug = params["slug"]
     container.project_service.get(slug)
     categories = body.get("categories") or {}

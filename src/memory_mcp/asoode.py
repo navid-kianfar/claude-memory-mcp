@@ -13,7 +13,7 @@ daemon's launchd environment and the UI still shows where each value came from.
 project: `set_credential` keys on the API base URL and writes to the SQLite
 registry's app_settings, so every project that talks to the same asoode reuses the
 same entry and the user is never asked for it a second time. app_settings is local
-and is never written into the committable `.claude-memory/` snapshot, so the token
+and is never written into the committable `.agent-memory/` snapshot, so the token
 cannot travel with a repo.
 
 The raw token is write-only from the outside: `status()` and every HTTP route and

@@ -2,7 +2,7 @@
 
 Tasks live in the per-project DuckDB alongside memories but in their own tables:
 they are not a MemoryCategory, so they never reach the git-committed
-.claude-memory/ snapshot however long the list gets.
+.agent-memory/ snapshot however long the list gets.
 """
 
 import logging

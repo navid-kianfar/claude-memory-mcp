@@ -213,7 +213,9 @@ _ALSO_LABELS = {"designer": "designer (before UI)", "test": "test (once per hand
 
 #: Paths under these segments, and any `*.md`, are not source: the lead writing
 #: its own notes, the memory snapshot or the docs is not implementing a task.
-_NOT_SOURCE_SEGMENTS = frozenset({".claude", ".claude-memory", "docs"})
+_NOT_SOURCE_SEGMENTS = frozenset(
+    {".claude", ".agent-memory", ".claude-memory", "docs"}
+)  # both snapshot names: the new one, and the pre-rename fallback
 
 _TITLE_MAX = 60
 _PATH_DISPLAY_MAX = 40
@@ -489,7 +491,7 @@ def delegation_escalation(
        never escalates;
     2. the LEAD's edits this session (`by_agent IS NULL`), de-duplicated by
        resolved path, inside the project root, not under `.claude`,
-       `.claude-memory` or `docs` and not `*.md`, number at least
+       `.agent-memory` or `docs` and not `*.md`, number at least
        DELEGATION_EDIT_THRESHOLD;
     3. an in-progress, unarchived task exists - sub-tasks included - taken
        running-clock first, then most recently updated;

@@ -138,7 +138,7 @@ class Memory(BaseModel):
 
 class ProjectInfo(BaseModel):
     slug: str
-    # Stable identity written into .claude-memory/manifest.json. Survives the
+    # Stable identity written into .agent-memory/manifest.json. Survives the
     # folder being moved or renamed; shared with teammates through git.
     project_uid: str | None = None
     display_name: str
@@ -192,7 +192,7 @@ class Task(BaseModel):
 
     Tasks are NOT memories and NOT a MemoryCategory: they live in their own
     DuckDB tables, which is what keeps them out of the git-committed
-    .claude-memory/ snapshot no matter how many of them pile up.
+    .agent-memory/ snapshot no matter how many of them pile up.
     """
 
     id: str

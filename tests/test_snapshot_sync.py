@@ -5,7 +5,7 @@ direct call into a real Container - so the whole path runs: folder I/O, the
 snapshot file format, SyncService, and the project DuckDB underneath.
 
 The migration tests are the important ones. On a machine that has just cloned a
-repo and not yet imported, `.claude-memory/*.json` is the ONLY copy of that
+repo and not yet imported, `.agent-memory/*.json` is the ONLY copy of that
 project's rules and decisions. A migration that deletes its source after a
 truncated write is unrecoverable, so "it refuses to delete" is tested as
 carefully as "it deletes".
@@ -170,7 +170,7 @@ class TestExport:
         # The .gitattributes is what points git at the merge driver. Without it
         # the driver is registered and never used, and a pull takes one side.
         text = (snap / GITATTRIBUTES_NAME).read_text()
-        assert f"{SNAPSHOT_DB_NAME} merge=claude-memory-snapshot" in text
+        assert f"{SNAPSHOT_DB_NAME} merge=agent-memory-snapshot" in text
 
         manifest = json.loads((snap / MANIFEST_NAME).read_text())
         assert manifest["snapshot"] == SNAPSHOT_DB_NAME
@@ -293,7 +293,7 @@ class TestManifestLinks:
         statuses = [p["status"] for p in container.task_bridge.link_proposals(dst)]
         assert statuses == ["unlinked", "unlinked"]
         assert (
-            "[Memory MCP] 2 path->board bindings in .claude-memory/ are not applied. "
+            "[Memory MCP] 2 path->board bindings in .agent-memory/ are not applied. "
             "Review with memory_asoode_links."
         ) in capsys.readouterr().out
 

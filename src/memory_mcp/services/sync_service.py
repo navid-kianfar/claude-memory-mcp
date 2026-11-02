@@ -1,6 +1,6 @@
 """Project memory sync - mirror memory to a git-committable snapshot.
 
-The snapshot is one DuckDB file, ``.claude-memory/memory.duckdb``, beside a
+The snapshot is one DuckDB file, ``.agent-memory/memory.duckdb``, beside a
 small ``manifest.json`` that carries the project's identity. It replaced one
 JSON file per category, which was rewritten in full every session and only grew.
 The ``session`` category is excluded (device-local) and embeddings are excluded

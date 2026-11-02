@@ -13,7 +13,12 @@ from memory_mcp.models import MemoryCategory
 PORTABLE_DB_NAME = ".memory-mcp.duckdb"
 
 # Git-committable snapshot directory written by `memory-mcp sync export`.
-SNAPSHOT_DIRNAME = ".claude-memory"
+# Named for every harness, not one vendor: ZCode, Codex and OpenCode read the
+# same folder (task: 89bd7647). The legacy name is a READ-ONLY fallback so a
+# teammate's older clone (or a git pull mid-migration) still reads; the rename
+# to the new name happens once, in ProjectService.migrate_snapshot_dir.
+SNAPSHOT_DIRNAME = ".agent-memory"
+LEGACY_SNAPSHOT_DIRNAME = ".claude-memory"
 
 # Snapshot manifest. Carries `project_id`, the project's stable identity: it is
 # committed with the repo, so the project survives a move, a rename, and a
@@ -46,7 +51,13 @@ SNAPSHOT_BLOCK_SIZE = 16384
 # export writes SNAPSHOT_DIRNAME/.gitattributes pointing the snapshot at it - so
 # a clone that has memory-mcp installed merges, and one that does not gets an
 # ordinary binary conflict instead of a silent overwrite.
-MERGE_DRIVER_NAME = "claude-memory-snapshot"
+#
+# Renamed from claude-memory-snapshot with the snapshot folder (2026-11-02, user
+# decision: it is OUR driver, registered by OUR setup on every install and
+# update, and nothing else consumes it). setup_merge_driver retires the legacy
+# keys from ~/.gitconfig on the same run, so the rename breaks nothing.
+MERGE_DRIVER_NAME = "agent-memory-snapshot"
+LEGACY_MERGE_DRIVER_NAME = "claude-memory-snapshot"
 GITATTRIBUTES_NAME = ".gitattributes"
 
 # Categories carried by the snapshot; `session` is device-local and excluded.

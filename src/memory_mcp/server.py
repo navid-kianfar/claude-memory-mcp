@@ -571,7 +571,7 @@ def memory_asoode_links(project: str | None = None) -> dict:
     path->board bindings the committed manifest proposes.
 
     Each link carries its `match_paths`. `proposals` come from
-    `.claude-memory/manifest.json` and are NEVER applied on their own - linking
+    `.agent-memory/manifest.json` and are NEVER applied on their own - linking
     is always explicit. Status `matches` needs nothing; `differs` is applied
     with memory_asoode_link_update(link_id, match_paths=...); `unlinked` with
     memory_asoode_attach(work_package_id=..., match_paths=...), which checks
@@ -759,7 +759,7 @@ def memory_asoode_status() -> dict:
     The endpoints default to asoode's hosted service, so nothing needs configuring
     unless this is an on-premise install. The PAT is stored once for the whole
     machine and shared by every project - it is never per-project, and never in
-    the committed .claude-memory snapshot.
+    the committed .agent-memory snapshot.
 
     Returns a FINGERPRINT of the token (prefix + last4), never the token itself.
     There is deliberately no tool to set it: a PAT pasted into a chat message
@@ -816,7 +816,7 @@ def memory_init_project(
     """Initialize a new project namespace (creates DuckDB + registers it).
 
     Pass project_path (the project's source folder) to enable git-synced
-    memory: rules/decisions mirror to <project_path>/.claude-memory/.
+    memory: rules/decisions mirror to <project_path>/.agent-memory/.
     """
     def _run():
         project = container.project_service.init_project(
@@ -850,7 +850,7 @@ def memory_link_folder(path: str, project: str | None = None) -> dict:
     """Bind a project to a source folder for git-synced memory.
 
     Once linked, the project's rules/decisions mirror to a committable
-    <path>/.claude-memory/ snapshot - so memory travels with the code across
+    <path>/.agent-memory/ snapshot - so memory travels with the code across
     devices and teammates via git push/pull.
     """
     def _run():

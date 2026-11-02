@@ -19,7 +19,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from memory_mcp.config import settings
-from memory_mcp.constants import MANIFEST_NAME, PORTABLE_DB_NAME, SNAPSHOT_DIRNAME
+from memory_mcp.constants import (
+    LEGACY_SNAPSHOT_DIRNAME,
+    MANIFEST_NAME,
+    PORTABLE_DB_NAME,
+    SNAPSHOT_DIRNAME,
+)
 
 _active_project: str | None = None
 _lock = threading.Lock()
@@ -242,7 +247,13 @@ def load_active_project() -> None:
 
 
 def _uid_from_manifest(path: Path) -> str | None:
-    """Read the stable project uid out of `<path>/.claude-memory/manifest.json`.
+    """Read the stable project uid out of `<path>/.agent-memory/manifest.json`.
+
+    `.claude-memory/` (the name before the multi-harness rename) is a read-only
+    fallback, so a teammate's older clone or a git pull mid-migration still
+    resolves; the one-time rename to the new name happens in
+    ProjectService.migrate_snapshot_dir, which runs before this on the claim
+    path.
 
     Returns None for anything unreadable - a folder the daemon has no rights to,
     a half-written file, an unresolved git conflict. Identity then falls back to
@@ -257,6 +268,8 @@ def _uid_from_manifest(path: Path) -> str | None:
     """
     try:
         manifest = path / SNAPSHOT_DIRNAME / MANIFEST_NAME
+        if not manifest.is_file():
+            manifest = path / LEGACY_SNAPSHOT_DIRNAME / MANIFEST_NAME
         if not manifest.is_file():
             return _uid_from_snapshot_db(path)
         uid = json.loads(manifest.read_text()).get("project_id")
@@ -277,6 +290,8 @@ def _uid_from_snapshot_db(path: Path) -> str | None:
     from memory_mcp.constants import SNAPSHOT_DB_NAME
 
     db_path = path / SNAPSHOT_DIRNAME / SNAPSHOT_DB_NAME
+    if not db_path.is_file():
+        db_path = path / LEGACY_SNAPSHOT_DIRNAME / SNAPSHOT_DB_NAME
     if not db_path.is_file():
         return None
     try:
@@ -314,8 +329,9 @@ def _slug_from_uid(path: Path) -> str | None:
 def detect_project_from_cwd(cwd: str | None) -> str | None:
     """Detect a registered project purely from a directory, ignoring active state.
 
-    1. Walk up from cwd looking for a committed .claude-memory/manifest.json and
-       match on its project_id - the only identity that survives a move/rename
+    1. Walk up from cwd looking for a committed .agent-memory/manifest.json
+       (or the legacy .claude-memory one) and match on its project_id - the
+       only identity that survives a move/rename
     2. Walk up looking for a portable .memory-mcp.duckdb
     3. Match the bound path, then the directory name, to a registered project
     Returns None when the directory is not a memory project.

@@ -1,5 +1,6 @@
 """Project service - initialize and describe projects."""
 
+import os
 from pathlib import Path
 
 from memory_mcp.config import settings
@@ -27,6 +28,67 @@ def is_linked_worktree(folder: Path) -> bool:
         return (folder / ".git").is_file()
     except OSError:
         return False
+
+
+def migrate_snapshot_dir(folder: Path) -> str | None:
+    """Rename `.agent-memory/` to `.agent-memory/`, once, atomically.
+
+    The snapshot folder's name is how every harness recognises a memory
+    project, and it carried one vendor's name until 2026-11-02. The rename is
+    safe for three reasons: identity is the `project_id` INSIDE manifest.json,
+    not the folder name; the inner `.gitattributes`/`.gitignore` travel with
+    the directory; and `os.rename` within one filesystem is atomic, so two
+    callers racing it (the daemon's claim, the hook's sync import) see one
+    outcome - the loser finds the new name already there and does nothing.
+
+    Returns "renamed", "both" (the legacy dir still sits beside the new one -
+    the user's to delete, since it is git history), or None. A legacy dir that
+    is a symlink or a file is refused: the migration moves a directory, and
+    anything else is someone's deliberate arrangement.
+    """
+    from memory_mcp.constants import (
+        LEGACY_SNAPSHOT_DIRNAME, SNAPSHOT_DIRNAME,
+    )
+
+    legacy = folder / LEGACY_SNAPSHOT_DIRNAME
+    current = folder / SNAPSHOT_DIRNAME
+    if not legacy.exists() or current.is_dir():
+        return "both" if (legacy.exists() and current.is_dir()) else None
+    if legacy.is_symlink() or not legacy.is_dir():
+        return None
+    os.rename(legacy, current)
+    _repoint_gitattributes(current)
+    return "renamed"
+
+
+def _repoint_gitattributes(snapshot_dir: Path) -> None:
+    """Point a moved sidecar at the current merge driver name.
+
+    Closes the window between the folder rename and the next export: a
+    .gitattributes still naming the retired driver would make git's next
+    snapshot merge fail visibly, and "visible" here means "annoying". The
+    content is otherwise exactly what the export writes; an unwritable sidecar
+    is left alone, because the next export rewrites it anyway.
+    """
+    from memory_mcp.constants import (
+        GITATTRIBUTES_NAME,
+        LEGACY_MERGE_DRIVER_NAME,
+        MERGE_DRIVER_NAME,
+    )
+
+    path = snapshot_dir / GITATTRIBUTES_NAME
+    try:
+        text = path.read_text() if path.is_file() else ""
+    except OSError:
+        return
+    if LEGACY_MERGE_DRIVER_NAME in text:
+        try:
+            path.write_text(
+                text.replace(f"merge={LEGACY_MERGE_DRIVER_NAME}",
+                             f"merge={MERGE_DRIVER_NAME}")
+            )
+        except OSError:
+            pass
 
 
 class ProjectService:
@@ -111,7 +173,7 @@ class ProjectService:
     ) -> dict:
         """Resolve which project owns `cwd`, keyed on its committed uid.
 
-        A project's identity is the uid in its `.claude-memory/manifest.json`,
+        A project's identity is the uid in its `.agent-memory/manifest.json`,
         not its path or folder name - so moving or renaming the folder rebinds
         the existing project instead of registering a second one, and a
         teammate who clones the repo gets the same identity we do.
@@ -133,6 +195,16 @@ class ProjectService:
         # root - breaking path routing, sync export and stack detection at once,
         # and leaving a dangling path as soon as the worktree was removed.
         worktree = is_linked_worktree(folder)
+
+        # The one-time `.claude-memory` -> `.agent-memory` rename. Before the uid
+        # read, so a folder on the old name is claimed under its new name in the
+        # same breath. The hook side (sync_cli) runs the same call before ITS
+        # claim, so whichever process arrives first does the rename.
+        if not worktree:
+            try:
+                migrate_snapshot_dir(folder)
+            except OSError as e:
+                print(f"    Warning: snapshot dir migration failed: {e}")
 
         if not project_uid:
             from memory_mcp.context import detect_project_from_cwd

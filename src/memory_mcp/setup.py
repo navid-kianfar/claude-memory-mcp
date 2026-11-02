@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 from memory_mcp.config import settings
-from memory_mcp.constants import MERGE_DRIVER_NAME
+from memory_mcp.constants import LEGACY_MERGE_DRIVER_NAME, MERGE_DRIVER_NAME
 from memory_mcp.harnesses.base import REPO_DIR
 
 # Re-exports: the Claude wiring moved to harnesses/claude.py, but these names
@@ -282,7 +282,33 @@ def setup_merge_driver() -> None:
                 f"git config --global {key} failed: "
                 f"{result.stderr.strip() or result.returncode}"
             )
+    _retire_legacy_merge_driver()
     print(f"    Merge driver: {MERGE_DRIVER_NAME} -> {merge_driver_command()}")
+
+
+def _retire_legacy_merge_driver() -> None:
+    """Remove the pre-rename `merge.claude-memory-snapshot.*` keys.
+
+    The driver is OURS - registered by this function machine-wide, consumed by
+    nothing but the snapshots this app writes - so the rename (2026-11-02) is a
+    global config fix, not a compatibility promise. Every install and every
+    update runs this, which is why the rename breaks nothing: a machine updates
+    before it ever merges across the rename, and a clone that somehow merges
+    first fails VISIBLY (git cannot find the driver named in .gitattributes)
+    rather than merging wrongly. Removing a section that does not exist is not
+    an error; that is what makes this safe to run forever.
+    """
+    result = subprocess.run(
+        ["git", "config", "--global", "--remove-section",
+         f"merge.{LEGACY_MERGE_DRIVER_NAME}"],
+        capture_output=True, text=True, check=False,
+    )
+    # git exits 1 for "no such section" - the ordinary case after the first run.
+    if result.returncode == 0:
+        print(
+            f"    Retired legacy merge driver {LEGACY_MERGE_DRIVER_NAME} "
+            f"from the global git config."
+        )
 
 
 # ---------- lean update ----------

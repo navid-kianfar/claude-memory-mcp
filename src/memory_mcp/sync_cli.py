@@ -4,10 +4,10 @@ This runs in Claude Code's context (invoked by the SessionStart / Stop hooks),
 so - unlike the launchd daemon - it can reach project folders. It does the
 folder I/O and talks to the daemon over HTTP for the database work:
 
-  export: GET the snapshot from the daemon, write <project>/.claude-memory/
-  import: read <project>/.claude-memory/, POST it to the daemon to reconcile
+  export: GET the snapshot from the daemon, write <project>/.agent-memory/
+  import: read <project>/.agent-memory/, POST it to the daemon to reconcile
 
-The snapshot is ``.claude-memory/memory.duckdb`` (see ``db/snapshot.py``) beside
+The snapshot is ``.agent-memory/memory.duckdb`` (see ``db/snapshot.py``) beside
 a small ``manifest.json``. It used to be one JSON file per category; a folder
 that still holds those is migrated on the first import - written into the
 database, VERIFIED by reading the rows back, and only then unlinked. On a
@@ -32,6 +32,7 @@ from pathlib import Path
 from memory_mcp.config import settings
 from memory_mcp.constants import (
     GITATTRIBUTES_NAME,
+    LEGACY_SNAPSHOT_DIRNAME,
     MANIFEST_NAME,
     MERGE_DRIVER_NAME,
     SNAPSHOT_DB_NAME,
@@ -50,7 +51,7 @@ from memory_mcp.repositories import ProjectRepository
 
 _MANIFEST = MANIFEST_NAME
 
-# Written into .claude-memory/ on every export. Paths in a .gitattributes are
+# Written into .agent-memory/ on every export. Paths in a .gitattributes are
 # relative to its own directory, so this scopes the driver to the snapshot and
 # touches nothing else in the repo. A clone WITHOUT memory-mcp installed simply
 # has no driver by that name and gets an ordinary binary conflict - which is the
@@ -95,10 +96,17 @@ def _snapshot_dir(cwd: str, slug: str) -> Path:
 
 
 def _find_manifest(cwd: str) -> tuple[Path | None, dict]:
-    """Walk up from cwd for a committed snapshot manifest. Returns (dir, data)."""
+    """Walk up from cwd for a committed snapshot manifest. Returns (dir, data).
+
+    `.agent-memory/` first, the legacy `.claude-memory/` as a read-only
+    fallback - the migration renames the folder, but a manifest that failed to
+    read must not stop the walk from climbing past it.
+    """
     check = Path(cwd).resolve()
     for _ in range(10):
         manifest = check / SNAPSHOT_DIRNAME / MANIFEST_NAME
+        if not manifest.is_file():
+            manifest = check / LEGACY_SNAPSHOT_DIRNAME / MANIFEST_NAME
         if manifest.is_file():
             try:
                 return check, json.loads(manifest.read_text())
@@ -304,7 +312,7 @@ def _manifest_text(value: object) -> str | None:
 
 
 def _manifest_links(links: object) -> list[dict]:
-    """Project links into what `.claude-memory/manifest.json` carries.
+    """Project links into what `.agent-memory/manifest.json` carries.
 
     The ONE projection, used on every side - the daemon's sync-export, the
     manifest write, and the proposals route reading a committed file back - so
@@ -348,7 +356,7 @@ def _read_manifest(snap: Path) -> dict:
 
 def _write_manifest(snap: Path, project_id: str | None, slug: str,
                     categories: dict[str, list], links: list | None = None) -> None:
-    """The one file in .claude-memory/ that stays JSON, and why.
+    """The one file in .agent-memory/ that stays JSON, and why.
 
     `context.detect_project_from_cwd` reads it on every project detection in the
     daemon to answer "which project is this folder?". Making that hot path open
@@ -376,7 +384,27 @@ def _write_manifest(snap: Path, project_id: str | None, slug: str,
     }, indent=2))
 
 
+def _migrate_before_claim(cwd: str) -> None:
+    """Rename a legacy snapshot dir before the claim reads its manifest.
+
+    Both the daemon (claim_folder) and this hook side run the same idempotent
+    migration; whoever arrives first renames, the other finds the new name and
+    moves on. A failure is logged, never fatal - the export then writes to the
+    legacy name's successor or fails visibly, but nothing is lost either way.
+    """
+    from memory_mcp.services.project_service import migrate_snapshot_dir
+
+    try:
+        result = migrate_snapshot_dir(Path(cwd).resolve())
+    except Exception as e:  # noqa: BLE001
+        _log_failure("migrate", f"{cwd}: {e}")
+        return
+    if result == "renamed":
+        print(f"[Memory MCP] Renamed {LEGACY_SNAPSHOT_DIRNAME}/ to {SNAPSHOT_DIRNAME}/.")
+
+
 def _export(cwd: str) -> None:
+    _migrate_before_claim(cwd)
     slug = _claim(cwd)
     if not slug:
         return
@@ -417,6 +445,7 @@ def _export(cwd: str) -> None:
 
 
 def _import(cwd: str) -> None:
+    _migrate_before_claim(cwd)
     slug = _claim(cwd)
     if not slug:
         return

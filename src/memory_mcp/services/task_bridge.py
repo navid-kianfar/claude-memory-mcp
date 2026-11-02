@@ -1962,7 +1962,7 @@ class TaskBridge:
 
     # ---------- bindings proposed by a committed manifest ----------
     #
-    # `.claude-memory/manifest.json` carries the project's path->board bindings
+    # `.agent-memory/manifest.json` carries the project's path->board bindings
     # so a clone knows where tasks land. Importing it NEVER links anything: the
     # standing rule is that linking is explicit, so a private project cannot
     # leak onto a server by a hook running. The manifest's bindings are stored
@@ -2039,7 +2039,7 @@ class TaskBridge:
             logger.debug("could not settle the link proposal", exc_info=True)
 
     def manifest_links(self, slug: str) -> list[dict]:
-        """The bindings `.claude-memory/manifest.json` should carry after export.
+        """The bindings `.agent-memory/manifest.json` should carry after export.
 
         This machine's live links - plus what the committed manifest proposed and
         nobody here has acted on yet. Without the second half, a teammate who

@@ -104,7 +104,7 @@ class TestAgentInstall:
         never installed on its own, and `extends` never reaches the artefact."""
         source, dest = agent_dirs
         _write(source, "_base.md",
-               "---\nabstract: true\nmodel: claude-opus-5\neffort: high\n---\n"
+               "---\nabstract: true\ncolor: blue\neffort: high\n---\n"
                "{{EXTENSION}}\n\n## Shared contract\n\nAlways pass project=.\n")
         _write(source, "backend.md",
                "---\nname: backend\ndescription: Server work.\nextends: _base\n"
@@ -116,7 +116,7 @@ class TestAgentInstall:
         text = (dest / "backend.md").read_text()
         front, body = setup_mod.parse_agent(text)
         assert front == {"name": "backend", "description": "Server work.",
-                         "model": "claude-opus-5", "effort": "xhigh"}
+                         "color": "blue", "effort": "xhigh"}
         assert "extends" not in text and "abstract" not in text
         assert "{{EXTENSION}}" not in text
         assert body.index("You are backend.") < body.index("## Shared contract")
@@ -133,7 +133,7 @@ class TestAgentInstall:
         """
         source, dest = agent_dirs
         _write(source, "_base.md",
-               "---\nabstract: true\nmodel: claude-opus-5\neffort: high\n---\n"
+               "---\nabstract: true\ncost_center: shared\neffort: high\n---\n"
                "{{EXTENSION}}\n\n## Shared\n")
         _write(source, "backend.md",
                "---\nname: backend\ndescription: b\nextends: _base\neffort: xhigh\n"
@@ -149,7 +149,7 @@ class TestAgentInstall:
         assert front["name"] == "dotnet"
         assert front["color"] == "orange", "inherited through the chain"
         assert front["effort"] == "xhigh", "the nearer layer wins over the base"
-        assert front["model"] == "claude-opus-5", "reaches the child from the base"
+        assert front["cost_center"] == "shared", "reaches the child from the base"
         assert body.index("## Backend craft") < body.index("## The .NET layer") < body.index("## Shared")
         assert "{{EXTENSION}}" not in dotnet
         assert "{{EXTENSION}}" not in (dest / "backend.md").read_text()
@@ -276,9 +276,11 @@ class TestShippedAgentDefinitions:
                 assert tool in body, f"{stem}.md never mentions {tool}"
             assert "stop the clock" in body.lower(), f"{stem}.md never says to stop the clock"
 
-    def test_every_definition_declares_name_description_and_model(self):
+    def test_every_definition_declares_name_and_description(self):
+        # `model` deliberately absent: it belongs to the composer, not the
+        # definition (test_no_definition_pins_a_model).
         for stem, (front, _) in self._definitions().items():
-            for field in ("name", "description", "model"):
+            for field in ("name", "description", "effort"):
                 assert front.get(field), f"{stem}.md is missing {field}"
             assert front["name"] == stem, f"{stem}.md declares name={front['name']!r}"
 
@@ -344,9 +346,13 @@ class TestShippedAgentDefinitions:
         reviewer = self._definitions()["reviewer"][0]["disallowedTools"]
         assert "Edit" in reviewer and "Agent" in reviewer, "the union kept both"
 
-    def test_every_agent_pins_opus_5(self):
+    def test_no_definition_pins_a_model(self):
+        # The model belongs to the composer, not the definition (2026-11-02):
+        # in ZCode the user may run DeepSeek or GLM, in OpenCode model ids are
+        # namespaced differently, and even on Claude a pinned model overrides
+        # the user's own default. A definition names a ROLE, never a vendor.
         for stem, (front, _) in self._definitions().items():
-            assert front["model"] == "claude-opus-5", f"{stem}.md is on {front['model']}"
+            assert "model" not in front, f"{stem}.md pins a model"
 
     def test_effort_levels_are_valid_and_deliberate(self):
         valid = {"low", "medium", "high", "xhigh", "max"}

@@ -1,6 +1,5 @@
 ---
 abstract: true
-model: claude-opus-5
 effort: medium
 disallowedTools: Agent
 ---

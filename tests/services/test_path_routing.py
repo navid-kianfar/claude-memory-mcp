@@ -521,7 +521,7 @@ class TestTheTools:
 
         task, _ = _create(project, path="apps/web/x.tsx")
         container.outbox_repo.remember(project, task.id, boards["web"]["id"], "r1", "todo")
-        answer = server.memory_task_update(task_id=task.id, target="main", project=project)
+        answer = server.memory_task_update(task_id=task.id, target="main", project=project, session_id="s-route")
         assert answer["type"] == "MirroredRerouteError"
         assert "'web'" in answer["error"]
 

@@ -114,7 +114,7 @@ def build_app() -> Starlette:
     after every mirror, so a dropped socket or a revoked token degrades to the
     behaviour that existed before this. Nothing it does may raise into the app.
     """
-    mcp_app = mcp.http_app(path="/mcp")
+    mcp_app = mcp.http_app(path="/mcp", stateless_http=True)
     routes = [*build_routes(), Mount("/", app=mcp_app)]
 
     @contextlib.asynccontextmanager

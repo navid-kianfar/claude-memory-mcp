@@ -132,7 +132,10 @@ asoode work package (a board), and the binding changes what the task list means.
     title loses exactly what the list exists to preserve.
 
 AT THE END of the conversation, call memory_session_end(session_id, summary,
-project="<slug>") so the next session has continuity.
+project="<slug>") so the next session has continuity. ALWAYS pass
+session_id=<the id memory_session_start returned> to memory_task_start,
+memory_task_claim_next, memory_task_done and memory_session_end - clocks and
+claims are attributed to it.
 
 There is NO active project: every project-scoped call names its project
 explicitly. A call that omits it fails with a message saying what to pass -
@@ -171,6 +174,26 @@ def _resolve(project: str | None) -> str:
             "names its project."
         )
     return project.strip()
+
+
+
+def _require_session(session_id: str | None) -> str:
+    """The memory session id, EXPLICIT - there is no reliable fallback.
+
+    The transport runs stateless (a daemon restart must not drop a harness
+    session), so the remembered-session convenience cannot be relied on: a
+    request may arrive without any context of the one that called
+    memory_session_start. A clock whose session is unknown could never be
+    stopped by that session's end, so an absent id is a teaching error, not a
+    silent session-less entry.
+    """
+    if not session_id or not session_id.strip():
+        raise ValueError(
+            "Pass session_id=<the id memory_session_start returned> - clocks "
+            "and claims are attributed to it, and session_end stops exactly "
+            "those clocks."
+        )
+    return session_id.strip()
 
 
 def _remote(slug: str):
@@ -1807,7 +1830,7 @@ def memory_task_update(
             path=path,
             target=target,
         )
-        session = session_id or current_memory_session()
+        session = _require_session(session_id or current_memory_session())
         task, changed, routing = container.task_service.update_routed(req, session)
         answer = {
             "status": "ok",
@@ -1885,13 +1908,13 @@ def memory_task_start(
     stop the clock and leave the state alone. memory_session_end stops whatever
     is still running as a last resort - do not rely on it.
 
-    `session_id` is the one memory_session_start returned; it is remembered for
-    this connection, so passing it is only needed when several sessions share
-    one connection.
+    `session_id` is the one memory_session_start returned - ALWAYS pass it:
+    the transport is stateless, so the remembered-session convenience cannot
+    be relied on across calls.
     """
     def _run():
         slug = _resolve(project)
-        session = session_id or current_memory_session()
+        session = _require_session(session_id or current_memory_session())
         answer = container.task_service.start(slug, task_id, session).model_dump(mode="json")
         return _with_mirror(answer, slug)
     return _safe(_run)
@@ -1928,12 +1951,12 @@ def memory_task_done(
     ESTIMATE, marked manual and capped: from the latest of its claim, its first
     comment, this session's previous close and this session's start, and
     `time_note.from` names which. `session_id` is the one memory_session_start
-    returned; pass it when several sessions share one connection (a dispatched
-    agent does), or the close is credited to the lead's session.
+    returned - ALWAYS pass it: the transport is stateless, so the remembered
+    mapping cannot be relied on across calls.
     """
     def _run():
         slug = _resolve(project)
-        session = session_id or current_memory_session()
+        session = _require_session(session_id or current_memory_session())
         detail = container.task_service.done(slug, task_id, note, session)
         dumped = detail.model_dump(mode="json")
         answer = _lead_with_clock_warning(dumped, detail.task.title, detail.time_note)

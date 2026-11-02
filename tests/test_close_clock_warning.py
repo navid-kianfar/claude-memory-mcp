@@ -11,6 +11,7 @@ close tools to leading with a `clock_warning` in exactly that case.
 import pytest
 
 from memory_mcp import server
+from memory_mcp.server import _require_session
 from memory_mcp.container import container
 from memory_mcp.db.connection import get_connection
 from memory_mcp.models import CreateTaskRequest
@@ -73,8 +74,11 @@ class TestTheCloseReplyLeadsWithTheWarning:
 
     def test_with_no_evidence_it_says_nothing_was_recorded(self, project):
         task = _add(project, "No claim, no comment, no session")
+        session = _session(container, project, "s-closer")
 
-        answer = server.memory_task_update(task.id, state="done", project=project)
+        answer = server.memory_task_update(
+            task.id, state="done", project=project, session_id=session,
+        )
 
         assert "No time was recorded" in answer["clock_warning"]
 
@@ -91,12 +95,28 @@ class TestTheCloseReplyLeadsWithTheWarning:
     def test_a_task_recovered_from_its_state_history_closes_quietly(self, project):
         """It WAS started; only its clock was lost. Not the pattern warned about."""
         task = _add(project, "Moved to in progress, clock lost")
-        server.memory_task_update(task.id, state="in_progress", project=project)
+        session = _session(container, project, "s-hist")
+        server.memory_task_update(
+            task.id, state="in_progress", project=project, session_id=session,
+        )
         with get_connection(project) as conn:
             conn.execute("DELETE FROM task_time_entries WHERE task_id = ?", [task.id])
         _age(project, minutes=10)
 
-        answer = server.memory_task_done(task.id, project=project)
+        answer = server.memory_task_done(
+            task.id, project=project, session_id=session,
+        )
 
         assert "clock_warning" not in answer
         assert answer["time_note"]["from"] == "state-history"
+
+
+class TestTheStatelessSessionContract:
+    def test_a_close_without_a_session_is_a_teaching_error(self):
+        """The transport is stateless: no remembered session can be relied on,
+        and a clock attributed to nobody could never be stopped by any
+        session_end. Refused, with the fix in the message."""
+        with pytest.raises(ValueError, match="session_id="):
+            _require_session(None)
+        with pytest.raises(ValueError, match="session_id="):
+            _require_session("   ")

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookText,
-  CheckCircle2,
   Download,
   FolderGit2,
   Link2,
@@ -82,7 +81,6 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
   const isAdmin = meta?.role === "admin";
 
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
-  const [activeSlug, setActiveSlug] = useState<string | null>(null);
   const [tab, setTab] = useState<TabValue>("memories");
   const [pendingCount, setPendingCount] = useState(0);
   const [openTaskCount, setOpenTaskCount] = useState(0);
@@ -157,9 +155,7 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
         if (cancelled) return;
         setMeta(m);
         setProjects(projectList);
-        setActiveSlug(m.active_project);
-        const initial =
-          m.active_project ?? projectList[0]?.slug ?? null;
+        const initial = projectList[0]?.slug ?? null;
         setSelectedSlug(initial);
       } catch (err) {
         if (!cancelled) {
@@ -288,28 +284,6 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
     if (tab === "sessions") void loadSessions();
     toast({ title: "Refreshed", variant: "success" });
   }, [tab, loadProjects, loadMemories, loadRules, loadSessions, toast]);
-
-  const setActiveProject = useCallback(
-    async (slug: string) => {
-      try {
-        const res = await api.setActive(slug);
-        setActiveSlug(res.active_project);
-        const project = projects.find((p) => p.slug === slug);
-        toast({
-          title: "Active project set",
-          description: project?.display_name ?? slug,
-          variant: "success",
-        });
-      } catch (err) {
-        toast({
-          title: "Failed to set active project",
-          description: err instanceof Error ? err.message : undefined,
-          variant: "error",
-        });
-      }
-    },
-    [projects, toast]
-  );
 
   const handleSearchSubmit = useCallback(() => {
     setActiveQuery(searchInput.trim());
@@ -554,7 +528,6 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
     () =>
       buildCommands({
         projects,
-        activeSlug,
         selectedSlug,
         selectedProjectName: selectedProject?.display_name ?? null,
         categories,
@@ -562,7 +535,6 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
           setView("projects");
           setSelectedSlug(slug);
         },
-        setActiveProject: (slug) => void setActiveProject(slug),
         newMemory: openNewMemory,
         newProject: () => setNewProjectOpen(true),
         newTemplate: () => {
@@ -601,11 +573,9 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
       }),
     [
       projects,
-      activeSlug,
       selectedSlug,
       selectedProject,
       categories,
-      setActiveProject,
       openNewMemory,
       focusSearch,
       filterByCategory,
@@ -649,7 +619,6 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
         onViewChange={setView}
         projects={projects}
         selectedSlug={selectedSlug}
-        activeSlug={activeSlug}
         onSelect={(slug) => {
           setView("projects");
           setSelectedSlug(slug);
@@ -693,12 +662,6 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
                   <h1 className="truncate text-lg font-semibold">
                     {selectedProject.display_name}
                   </h1>
-                  {activeSlug === selectedProject.slug && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-500">
-                      <CheckCircle2 className="size-3" />
-                      active
-                    </span>
-                  )}
                 </div>
                 <p className="truncate text-sm text-muted-foreground">
                   {selectedProject.description || selectedProject.slug}
@@ -745,17 +708,6 @@ function AppInner({ onLoggedOut }: { onLoggedOut: () => void }) {
                 Import rules
               </Button>
             )}
-            {view === "projects" &&
-              selectedProject &&
-              activeSlug !== selectedProject.slug && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void setActiveProject(selectedProject.slug)}
-                >
-                  Set as active
-                </Button>
-              )}
             <Button
               variant="ghost"
               size="icon"

@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 
 from memory_mcp.container import container
-from memory_mcp.context import set_active_project
 from memory_mcp.utils.text import slugify
 
 
@@ -64,6 +63,4 @@ def load_project_from_folder(path: str) -> dict:
         else:
             result["source"] = "new_empty"
 
-    set_active_project(project_slug)
-    result["active"] = True
     return result

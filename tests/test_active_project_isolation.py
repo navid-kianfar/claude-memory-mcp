@@ -1,55 +1,73 @@
-"""The management UI must never steer what an MCP session writes to.
+"""There is NO active project: a project-scoped call names its project or fails.
 
-INCIDENT 2026-09-04: `POST /api/active-project` called set_active_project(), which
-writes a process-global the daemon shares with every MCP session, every subagent
-and the UI at once. A memory_task_plan with no explicit project then resolved to
-whatever the panel was last looking at - seven tasks landed in the wrong project
-and were mirrored onto that project's board within seconds.
+The old mechanism - a process-global (then a per-session map) that one call set
+and every project-less call silently inherited - put seven tasks into the wrong
+project and onto the wrong board on 2026-09-04, and the cleanup could only
+archive cards by hand because asoode has no delete. The rule that followed
+("pass project= on every write") depended on the agent remembering; the
+mechanism is the thing that had to go. Removed 2026-11-03, user decision.
 
-A viewer must not steer a writer.
+These tests pin the world that replaced it: nothing shared exists to leak.
 """
 
 import pytest
 
-from memory_mcp.context import get_active_project, set_active_project
-from memory_mcp.db.registry import get_setting
-from memory_mcp.web import routes
+from memory_mcp import context
+from memory_mcp.context import resolve_project
+from memory_mcp.server import _resolve
 
 
-@pytest.fixture(autouse=True)
-def _clear_active():
-    set_active_project("")
-    yield
-    set_active_project("")
+class TestTheMechanismIsGone:
+    def test_the_old_globals_do_not_exist(self):
+        import memory_mcp.context as mod
 
+        for name in (
+            "set_active_project", "load_active_project", "get_active_project",
+            "forget_session_project", "_active_project", "_session_projects",
+        ):
+            assert not hasattr(mod, name), f"{name} still exists"
 
-class TestActiveProjectIsolation:
-    def test_ui_selection_does_not_change_the_mcp_active_project(self, monkeypatch):
-        """The whole point. Clicking a project in the panel must not redirect writes."""
-        set_active_project("claude-memory-mcp")
-        monkeypatch.setattr(
-            routes.container.project_service, "get", lambda slug: object()
+    def test_the_ui_key_is_gone_from_the_routes(self):
+        import memory_mcp.web.routes as routes
+
+        assert not hasattr(routes, "UI_ACTIVE_PROJECT_KEY")
+        assert not hasattr(routes, "_set_active")
+
+    def test_resolution_has_no_hidden_fallback(self):
+        """explicit > cwd-detect > None - and nothing else. No global, no
+        session map, no registry key."""
+        assert resolve_project("p") == "p"
+        assert resolve_project(None, "/nonexistent-path-xyz") is None
+        assert resolve_project(None) is None
+
+    def test_cwd_detection_still_works_for_its_owners(self, tmp_path, monkeypatch):
+        """Hooks and the CLI pass a cwd; that path is stateless and stays."""
+        from memory_mcp.repositories.project_repository import ProjectRepository
+
+        uid = "abcdefab-abcd-abcd-abcd-abcdefabcdef"
+        snap = tmp_path / ".agent-memory"
+        snap.mkdir()
+        (snap / "manifest.json").write_text(
+            f'{{"version": 3, "project_id": "{uid}", "slug": "cwd-proj"}}'
         )
+        ProjectRepository().register("cwd-proj", "CWD Proj")
+        ProjectRepository().set_uid("cwd-proj", uid)
+        monkeypatch.chdir(tmp_path)
+        assert context.detect_project_from_cwd(str(tmp_path)) == "cwd-proj"
 
-        routes._set_active({}, {"slug": "some-other-project"}, {})
 
-        assert get_active_project() == "claude-memory-mcp"
+class TestServerModeIsExplicitOnly:
+    def test_server_mode_never_detects_from_cwd(self, monkeypatch):
+        """Remote clients have a meaningless daemon cwd; the answer there is
+        the teaching error, not a guess."""
+        from memory_mcp.config import settings
 
-    def test_ui_selection_is_stored_under_its_own_key(self, monkeypatch):
-        monkeypatch.setattr(
-            routes.container.project_service, "get", lambda slug: object()
-        )
+        monkeypatch.setattr(settings, "mode", "server")
+        with pytest.raises(ValueError, match="project=<slug>"):
+            _resolve(None)
 
-        routes._set_active({}, {"slug": "some-other-project"}, {})
+    def test_explicit_project_passes_in_server_mode(self, monkeypatch):
+        from memory_mcp.config import settings
 
-        assert get_setting(routes.UI_ACTIVE_PROJECT_KEY) == "some-other-project"
-
-    def test_the_ui_route_cannot_reach_set_active_project_at_all(self):
-        """Structural, not behavioural: the import is the thing that must not return."""
-        assert not hasattr(routes, "set_active_project"), (
-            "web routes must not be able to mutate the MCP-wide active project"
-        )
-
-    def test_a_blank_slug_is_refused(self, monkeypatch):
-        with pytest.raises(ValueError):
-            routes._set_active({}, {"slug": "  "}, {})
+        monkeypatch.setattr(settings, "mode", "server")
+        assert _resolve("p1") == "p1"

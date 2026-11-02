@@ -198,13 +198,6 @@ export const api = {
     );
   },
 
-  setActive(slug: string): Promise<{ status: string; active_project: string }> {
-    return request("/api/active", {
-      method: "POST",
-      body: JSON.stringify({ slug }),
-    });
-  },
-
   listMemories(
     slug: string,
     opts: {

@@ -11,7 +11,6 @@ import {
 import type { Project } from "../types";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/Button";
-import { Badge } from "./ui/Badge";
 
 export type SidebarView =
   | "projects"
@@ -32,7 +31,6 @@ export interface SidebarProps {
   onViewChange: (view: SidebarView) => void;
   projects: Project[];
   selectedSlug: string | null;
-  activeSlug: string | null;
   onSelect: (slug: string) => void;
   onNewProject: () => void;
   onNewTemplate: () => void;
@@ -48,7 +46,6 @@ export function Sidebar({
   onViewChange,
   projects,
   selectedSlug,
-  activeSlug,
   onSelect,
   onNewProject,
   onNewTemplate,
@@ -164,7 +161,6 @@ export function Sidebar({
             )}
             {projects.map((p) => {
               const selected = p.slug === selectedSlug;
-              const active = p.slug === activeSlug;
               return (
                 <button
                   key={p.slug}
@@ -180,11 +176,6 @@ export function Sidebar({
                     <span className="truncate text-sm font-medium">
                       {p.display_name}
                     </span>
-                    {active && (
-                      <Badge variant="success" className="shrink-0">
-                        active
-                      </Badge>
-                    )}
                   </div>
                   <div className="mt-0.5 flex items-center justify-between gap-2">
                     <span className="truncate font-mono text-xs text-muted-foreground">

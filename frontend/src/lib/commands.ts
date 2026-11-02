@@ -20,12 +20,10 @@ export interface Command {
 
 export interface CommandContext {
   projects: Project[];
-  activeSlug: string | null;
   selectedSlug: string | null;
   selectedProjectName: string | null;
   categories: string[];
   selectProject: (slug: string) => void;
-  setActiveProject: (slug: string) => void;
   newMemory: (category?: string) => void;
   newProject: () => void;
   newTemplate: () => void;
@@ -65,17 +63,6 @@ export function buildCommands(ctx: CommandContext): Command[] {
       run: () => ctx.selectProject(p.slug),
     });
   }
-  for (const p of ctx.projects) {
-    commands.push({
-      id: `active:${p.slug}`,
-      group: "Projects",
-      label: `Set active project: ${p.display_name}`,
-      hint: p.slug,
-      keywords: `${p.slug} active default`,
-      run: () => ctx.setActiveProject(p.slug),
-    });
-  }
-
   commands.push(
     {
       id: "new:memory",

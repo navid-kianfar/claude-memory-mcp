@@ -793,14 +793,6 @@ def count_admins() -> int:
 # one another's active project.
 
 
-def get_user_active_project(user_id: str) -> str | None:
-    return get_setting(f"active_project:{user_id}")
-
-
-def set_user_active_project(user_id: str, slug: str) -> None:
-    set_setting(f"active_project:{user_id}", slug)
-
-
 # ---------- project links (the asoode bridge's routing table) ----------
 
 

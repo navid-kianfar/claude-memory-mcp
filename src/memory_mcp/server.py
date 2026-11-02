@@ -17,9 +17,9 @@ from memory_mcp.config import settings
 from memory_mcp.container import container
 from memory_mcp.context import (
     current_memory_session,
-    current_session_id, forget_session_project,
+    current_session_id,
     forget_memory_session,
-    load_active_project, resolve_project, set_active_project,
+    resolve_project,
     remember_memory_session,
 )
 from memory_mcp.db.connection import is_fatal
@@ -35,14 +35,13 @@ from memory_mcp.models import (
 
 # Load persisted state at startup
 container.model_service.load_persisted()
-load_active_project()
 
 SERVER_INSTRUCTIONS = """\
 This server gives Claude persistent, per-project memory: decisions, rules,
 architecture notes, sprint goals, and session summaries.
 
 ALWAYS, at the very start of a conversation that involves a project:
-  1. Call memory_session_start(project="<slug>") (or memory_use first, then
+  1. Call memory_session_start(project="<slug>")
      memory_session_start). This loads the project's mandatory rules, forbidden
      rules, last session summary, sprint goals, and recent decisions.
   2. Treat the returned mandatory_rules and forbidden_rules as BINDING for the
@@ -132,8 +131,12 @@ asoode work package (a board), and the binding changes what the task list means.
     and the files involved, and comment on the task as you learn things. A bare
     title loses exactly what the list exists to preserve.
 
-AT THE END of the conversation, call memory_session_end with a summary so the
-next session has continuity.
+AT THE END of the conversation, call memory_session_end(session_id, summary,
+project="<slug>") so the next session has continuity.
+
+There is NO active project: every project-scoped call names its project
+explicitly. A call that omits it fails with a message saying what to pass -
+nothing is ever silently written to "whatever was last used".
 """
 
 mcp = FastMCP("memory-mcp", instructions=SERVER_INSTRUCTIONS)
@@ -153,20 +156,21 @@ if settings.server_mode:
 
 
 def _resolve(project: str | None) -> str:
-    """Resolve project slug: explicit > active > CWD-detected. Raises if none.
+    """Resolve project slug: EXPLICIT or nothing. Raises if absent.
 
-    In server mode the daemon's own working directory is meaningless (clients are
-    remote), so CWD auto-detection is disabled - callers pass project= or rely on
-    their per-user active project.
+    There is no active project (removed 2026-11-03): a process-global that one
+    caller sets and every other caller silently inherits put seven tasks into
+    the wrong project on 2026-09-04, and the daemon's own cwd is meaningless
+    for MCP callers (it runs under launchd). A call that does not name its
+    project is an error that says what to pass - never a silent fallback.
     """
-    cwd = None if settings.server_mode else os.getcwd()
-    slug = resolve_project(project, cwd)
-    if not slug:
+    if not project or not project.strip():
         raise ValueError(
-            "No project specified and none detected. "
-            "Use memory_use('slug') to set active project, or pass project= explicitly."
+            "No project specified. Pass project=<slug> explicitly "
+            "(memory_list_projects lists them); every project-scoped call "
+            "names its project."
         )
-    return slug
+    return project.strip()
 
 
 def _remote(slug: str):
@@ -780,7 +784,6 @@ def memory_asoode_status() -> dict:
 def memory_version() -> dict:
     """Get the current version of the Memory MCP server and configuration."""
     from memory_mcp import __version__
-    from memory_mcp.context import get_active_project
 
     return {
         "version": __version__,
@@ -788,18 +791,7 @@ def memory_version() -> dict:
         "model_preset": settings.model_preset,
         "embedding_dim": settings.embedding_dim,
         "data_dir": str(settings.data_dir),
-        "active_project": get_active_project(),
     }
-
-
-# ---------- Active Project ----------
-
-
-@mcp.tool()
-def memory_use(project: str) -> dict:
-    """Set the active project. Subsequent tools use it by default."""
-    set_active_project(project)
-    return {"status": "ok", "active_project": project}
 
 
 # ---------- Projects ----------
@@ -810,7 +802,6 @@ def memory_init_project(
     slug: str,
     display_name: str,
     description: str | None = None,
-    set_active: bool = True,
     project_path: str | None = None,
 ) -> dict:
     """Initialize a new project namespace (creates DuckDB + registers it).
@@ -822,11 +813,7 @@ def memory_init_project(
         project = container.project_service.init_project(
             slug, display_name, description, project_path,
         )
-        result = {"status": "ok", "project": project.model_dump(mode="json")}
-        if set_active:
-            set_active_project(project.slug)
-            result["active"] = True
-        return result
+        return {"status": "ok", "project": project.model_dump(mode="json")}
     return _safe(_run)
 
 
@@ -2076,9 +2063,10 @@ def memory_task_release(
 
 
 @mcp.tool()
-def memory_session_start(project: str | None = None, agent: str | None = None) -> dict:
+def memory_session_start(project: str, agent: str | None = None) -> dict:
     """Start a session. Loads rules, last summary, sprint goals, recent decisions.
 
+    project: the slug, ALWAYS - there is no active project to fall back on.
     agent: the dispatched agent's type (its frontmatter name, e.g. 'python',
     'reviewer'). The LEAD - the session talking to the person - passes nothing.
     It is what lets the daemon tell a subagent's session from the lead's, which
@@ -2087,7 +2075,6 @@ def memory_session_start(project: str | None = None, agent: str | None = None) -
     """
     def _run():
         slug = _resolve(project)
-        set_active_project(slug)
         ctx = container.session_service.start(slug, agent=agent)
         # So memory_task_start can claim for this session without the id being
         # threaded through every call.
@@ -2100,7 +2087,7 @@ def memory_session_start(project: str | None = None, agent: str | None = None) -
 def memory_session_end(
     session_id: str,
     summary: str,
-    project: str | None = None,
+    project: str,
     memories_created: int = 0,
     memories_accessed: int = 0,
 ) -> dict:
@@ -2117,12 +2104,6 @@ def memory_session_end(
             _resolve(project), session_id, summary,
             memories_created, memories_accessed,
         )
-        # Drop this MCP session's active-project choice. Sessions are ephemeral
-        # and the transport never tells us one ended, so this is the only point
-        # where we know - without it the map only shrinks by its LRU cap.
-        mcp_session = current_session_id()
-        if mcp_session:
-            forget_session_project(mcp_session)
         forget_memory_session(session_id)
         return result
     return _safe(_run)
@@ -2138,17 +2119,11 @@ def memory_attach_project(
     display_name: str | None = None,
     description: str | None = None,
 ) -> dict:
-    """Attach an existing project directory. Auto-activates on success."""
+    """Attach an existing project directory."""
     def _run():
-        result = container.portable_service.attach(
+        return container.portable_service.attach(
             project_path, slug, display_name, description,
         )
-        if result.get("status") == "ok":
-            project_slug = result.get("project", {}).get("slug")
-            if project_slug:
-                set_active_project(project_slug)
-                result["active"] = True
-        return result
     return _safe(_run)
 
 
@@ -2165,14 +2140,9 @@ def memory_make_portable(
 
 @mcp.tool()
 def memory_sync(project_path: str, slug: str | None = None) -> dict:
-    """Sync a portable DB after git pull. Auto-activates on success."""
+    """Sync a portable DB after git pull."""
     def _run():
-        result = container.portable_service.sync(project_path, slug)
-        if result.get("status") == "ok":
-            project_slug = result.get("project", {}).get("slug")
-            if project_slug:
-                set_active_project(project_slug)
-        return result
+        return container.portable_service.sync(project_path, slug)
     return _safe(_run)
 
 

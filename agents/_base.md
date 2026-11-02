@@ -48,7 +48,7 @@ You have no transcript; you have a brief. Before anything else:
   its clock running.
 - Out-of-scope work you noticed → `memory_task_add(title, description=..., source="claude")` with
   the requirement in full, and say that you queued it. Do not widen your task to cover it.
-- Last: `memory_session_end(session_id, summary)`. It releases what you held and stops any clock
+- Last: `memory_session_end(session_id, summary, project="<slug>")` — the slug, always: there is no active project to fall back on. It releases what you held and stops any clock
   you forgot; a non-empty `clocks_stopped` in its answer means you forgot one — say so in the
   summary.
 

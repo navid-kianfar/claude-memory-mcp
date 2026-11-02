@@ -133,27 +133,20 @@ def test_org_wide_rules_inject_into_every_project_when_approved(server_mode):
     assert "org-rule" in titles  # merged into the project's block
 
 
-def test_per_user_active_project_isolation(server_mode):
-    from memory_mcp.context import get_active_project, set_active_project
+def test_per_user_active_project_is_gone(server_mode):
+    """Removed 2026-11-03: a per-user active project was still one shared
+    answer away from a wrong-project write. Server mode is explicit-only."""
+    from memory_mcp.context import current_user
 
     tok = _as(ADMIN)
     try:
-        set_active_project("admin-proj")
-        assert get_active_project() == "admin-proj"
-    finally:
-        reset_request_user(tok)
+        assert current_user().username == ADMIN.username
+        import pytest as _pytest
+        from memory_mcp.server import _resolve
 
-    tok = _as(BOB)
-    try:
-        set_active_project("bob-proj")
-        assert get_active_project() == "bob-proj"  # not clobbered by admin
-    finally:
-        reset_request_user(tok)
-
-    # Admin still sees their own.
-    tok = _as(ADMIN)
-    try:
-        assert get_active_project() == "admin-proj"
+        with _pytest.raises(ValueError, match="project=<slug>"):
+            _resolve(None)
+        assert _resolve("admin-proj") == "admin-proj"
     finally:
         reset_request_user(tok)
 

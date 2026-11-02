@@ -27,7 +27,6 @@ export interface Meta {
   version: string;
   categories: string[];
   rule_categories: string[];
-  active_project: string | null;
   model: string;
   // Present since server mode. Older/local backends omit these; the UI treats a
   // missing mode as "local" so nothing governance-related renders.

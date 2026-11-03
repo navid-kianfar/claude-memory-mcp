@@ -1,7 +1,7 @@
 # Claude Memory MCP
 
-**Claude Code forgets everything between sessions. This gives it a brain, a
-backlog, and a team.**
+**Your AI coding agent forgets everything between sessions. This gives it a
+brain, a backlog, and a team — in Claude Code, ZCode, Codex and OpenCode alike.**
 
 [![CI](https://github.com/navid-kianfar/claude-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/navid-kianfar/claude-memory-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -11,12 +11,32 @@ One local daemon, three things:
 
 | | |
 |---|---|
-| 🧠 **Memory for Claude** | Decisions, rules and architecture notes per project — searched by meaning, reloaded every session, re-injected every turn. |
+| 🧠 **Memory** | Decisions, rules and architecture notes per project — searched by meaning, reloaded every session, re-injected every turn. |
 | ✅ **Task management** | A real backlog with states, sub-tasks, comments and a stopwatch — parked mid-session, mirrored to a live board. |
-| 👥 **AI team management** | Sixteen specialised agents on one shared contract, so the lead session delegates instead of doing everything itself. |
+| 👥 **AI team management** | Specialised agents on one shared contract, so the lead session delegates instead of doing everything itself. |
 
 Everything is local: your own DuckDB files, your own embedding model, nothing
 leaving the machine.
+
+### Works with Claude Code — and ZCode, Codex and OpenCode
+
+The daemon speaks MCP over HTTP, so any MCP client can use it. What differs per
+harness is only the *wiring* — where its MCP server list lives, which lifecycle
+hooks it offers, where agent definitions go — and `memory-mcp-setup` configures
+**every harness it detects on the machine**, in one run:
+
+| Harness | MCP config | Lifecycle hooks | Agent team |
+|---|---|---|---|
+| **Claude Code** | `~/.claude.json` | full (per-turn rules, session start/end, edit gate) | `~/.claude/agents/` |
+| **ZCode** | `~/.zcode/cli/config.json` → `mcp.servers` | full (same events; no `SubagentStop`) | `~/.zcode/agents/` |
+| **Codex** | `~/.codex/config.toml` → `[mcp_servers.memory]` | `notify` at turn end (export + update) | not supported by Codex |
+| **OpenCode** | `opencode.jsonc` → `mcp` (comments preserved) | a small plugin (session start/end) | not verified; briefs ride MCP |
+
+The core — memory, tasks, the asoode board mirror, the digest — is identical for
+every harness, because it lives in the daemon, not in the client. A task created
+from ZCode mirrors to the board exactly like one created from Claude. What a
+harness cannot carry (OpenCode has no per-turn hook; Codex has no subagents) is
+declared by its adapter and degrades by design; nothing pretends.
 
 ![Claude Memory MCP management UI](screenshots/memory-browser.png)
 
@@ -63,16 +83,21 @@ cd claude-memory-mcp
 ```
 
 `install.sh` installs dependencies, builds the UI, downloads the embedding
-model, installs a launchd agent so the daemon auto-starts, points Claude Code at
+model, installs a launchd agent so the daemon auto-starts, and wires every AI
+harness it detects (Claude Code, ZCode, Codex, OpenCode) to the daemon
 the daemon, installs the rule-enforcement hooks, and installs the sixteen agents.
 It prints a one-time `sudo` command to add a `claude-memory-mcp` entry to
 `/etc/hosts` so the UI resolves at <http://claude-memory-mcp:8765/>.
 </details>
 
-**2. Connect Claude Code:**
+**2. Connect your harnesses** — automatic for every detected one during setup.
+To add one later (or point a single client manually):
 
 ```bash
-claude mcp add --transport http memory http://localhost:8765/mcp
+claude mcp add --transport http memory http://localhost:8765/mcp   # Claude Code
+# ZCode: 'memory' under mcp.servers in ~/.zcode/cli/config.json
+# Codex: 'memory' under [mcp_servers] in ~/.codex/config.toml
+# OpenCode: 'memory' under mcp in ~/.config/opencode/opencode.jsonc
 ```
 
 **3. Open the UI** at <http://localhost:8765/> and create a project — or do it
@@ -80,7 +105,8 @@ from Claude:
 
 ```text
 memory_init_project("my-app", "My App")   # create a project
-memory_session_start("my-app")            # loads rules, tasks, last summary
+memory_session_start(cwd=".")             # loads rules, tasks, last summary —
+                                          # the project is read from .agent-memory/
 ```
 
 **4. Use it.** From here Claude stores decisions and rules as they are made, and
@@ -94,15 +120,19 @@ recalls them by meaning:
 ```
 
 Every later session starts by loading that project's rules, open tasks, last
-summary and recent decisions. Nothing to re-explain.
+summary and recent decisions — from whichever harness you opened the folder in,
+identified by the committed `.agent-memory/manifest.json` rather than by the
+folder name. Nothing to re-explain, nothing to ask the user for.
 
 ### How it fits together
 
 ```mermaid
 flowchart LR
-  subgraph clients[Claude Code]
-    CLI[Terminal CLI]
-    APP[Desktop app]
+  subgraph clients[Your harnesses]
+    CLI[Claude Code]
+    ZC[ZCode]
+    CX[Codex]
+    OC[OpenCode]
   end
   UI[Management UI<br/>React + command palette]
   subgraph daemon[memory-mcp daemon · port 8765]
@@ -120,9 +150,10 @@ flowchart LR
   MCP --- EMB
 ```
 
-Both Claude Code clients and the UI talk to the **same daemon**, which is the
-sole owner of the DuckDB files — the embedding model loads once, and there are
-no database lock conflicts between clients.
+All harnesses and the UI talk to the **same daemon**, which is the sole owner
+of the DuckDB files — the embedding model loads once, there are no database
+lock conflicts between clients, and the MCP transport is stateless, so a daemon
+restart never drops a client session.
 
 ---
 
@@ -296,7 +327,7 @@ You can also set the folder when creating a project: the New Project dialog has
 a **Project folder** field, and `memory_load_from_folder` binds it automatically.
 
 Once bound, the project's rules and decisions mirror to a committable
-**`.claude-memory/`** snapshot in the project folder — a **`memory.duckdb`**
+**`.agent-memory/`** snapshot in the project folder — a **`memory.duckdb`**
 carrying the memories, both rule kinds and the audit trail, alongside a small
 `manifest.json`. A `git push` carries the latest memory; a teammate's `git pull`
 plus their next session imports it back. Export runs at the end of each turn and
@@ -344,7 +375,7 @@ teammate's clone resolves to the same project on their machine.
 > **If memory is not reaching the snapshot**, look at
 > `~/.claude-memory-mcp/sync.log`. The hooks discard the sync command's stderr so
 > it can never disturb a Claude turn, so every failure writes a dated traceback
-> there instead. Export also warns when `.claude-memory/` is gitignored, since an
+> there instead. Export also warns when `.agent-memory/` is gitignored, since an
 > ignored snapshot never reaches your teammates.
 
 ---
@@ -447,7 +478,7 @@ access, and any other path that hits the lock says so and offers both ways out
 instead of raising a DuckDB `IOException`.
 
 The token lives in the local registry (`~/.claude-memory-mcp/registry.db`), never
-in the committed `.claude-memory/` snapshot, and is never printed back — `status`
+in the committed `.agent-memory/` snapshot, and is never printed back — `status`
 shows only a `prefix…last4` fingerprint. Pass `--api-url` to store one for a
 second server.
 
@@ -563,9 +594,11 @@ fake written in this repo is not a verified integration.
 
 # 👥 AI team management
 
-`memory-mcp-setup` installs sixteen specialised agents to `~/.claude/agents/`
-from [`agents/`](agents/) — eight roles, and eight stack experts that extend a
-role:
+`memory-mcp-setup` installs the specialised agents from [`agents/`](agents/)
+into every harness that can carry them — `~/.claude/agents/` and
+`~/.zcode/agents/` today; Codex has no subagent system and OpenCode's agent
+format is not verified, so those two get the briefs through MCP instead. The
+roster: eight roles and nine stack experts that extend a role:
 
 | Roles | Stack experts |
 |---|---|
@@ -631,7 +664,7 @@ A React single-page app served by the daemon at `/`:
 - Work the task list: grouped by state, drag to reorder, inline add per group,
   and a task dialog with sub-tasks, comments, an activity trail and a stopwatch
 - Inspect sessions and per-memory provenance/history
-- Switch and set the active project
+- Switch between projects (view state only — the daemon holds no "active project": every operation names its project explicitly)
 - `Cmd+K` command palette for fast navigation and actions
 
 ---
@@ -644,7 +677,7 @@ All 74 tools:
 
 | Area | Tools |
 |------|-------|
-| Projects | `memory_init_project`, `memory_load_from_folder`, `memory_link_folder`, `memory_list_projects`, `memory_project_info`, `memory_rename_project`, `memory_use` |
+| Projects | `memory_init_project`, `memory_load_from_folder`, `memory_link_folder`, `memory_list_projects`, `memory_project_info`, `memory_rename_project` |
 | Memories | `memory_store`, `memory_search`, `memory_recall`, `memory_update`, `memory_delete`, `memory_list` |
 | Rules | `memory_get_rules`, `memory_add_rule`, `memory_add_rule_bulk`, `memory_update_rule`, `memory_delete_rule` |
 | Governance (server mode) | `memory_approve_rule`, `memory_revoke_rule` |
@@ -654,7 +687,7 @@ All 74 tools:
 | Tasks | `memory_task_add`, `memory_task_list`, `memory_task_get`, `memory_task_update`, `memory_task_comment`, `memory_task_start`, `memory_task_stop`, `memory_task_done`, `memory_task_archive`, `memory_task_convert`, `memory_task_delete` |
 | Task claims (multi-session) | `memory_task_claim_next`, `memory_task_release` |
 | Planning | `memory_task_plan` |
-| Sessions | `memory_session_start`, `memory_session_end` |
+| Sessions | `memory_session_start` (pass `cwd=` — the project is read from that folder's committed `.agent-memory/manifest.json`, never from the user), `memory_session_end` |
 | Portability | `memory_attach_project`, `memory_make_portable`, `memory_sync` |
 | Import/Export | `memory_export`, `memory_import`, `memory_import_claude_md` |
 | Model | `memory_model_info`, `memory_set_model`, `memory_reembed` |
@@ -684,6 +717,7 @@ Environment variables (prefix `MEMORY_MCP_`):
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MEMORY_MCP_DATA_DIR` | `~/.claude-memory-mcp` | Where databases are stored |
+| `MEMORY_MCP_EMBEDDING_BACKEND` | `onnx` | `onnx` (fastembed — torch never loads) or `sentence-transformers` |
 | `MEMORY_MCP_DAEMON_HOST` | `127.0.0.1` | Daemon bind address (`0.0.0.0` in Docker) |
 | `MEMORY_MCP_DAEMON_PORT` | `8765` | Daemon port |
 | `MEMORY_MCP_DAEMON_HOSTNAME` | `claude-memory-mcp` | Hostname used in the UI URL |
@@ -704,7 +738,7 @@ Environment variables (prefix `MEMORY_MCP_`):
 
 Tasks live in their own DuckDB tables (`tasks`, `task_comments`,
 `task_time_entries`) rather than as a memory category — which is what keeps them
-out of the git-committed `.claude-memory/` snapshot however long the list grows.
+out of the git-committed `.agent-memory/` snapshot however long the list grows.
 
 Existing databases are migrated automatically on open, so older project
 databases keep working after upgrades.

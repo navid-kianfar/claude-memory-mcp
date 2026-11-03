@@ -41,7 +41,10 @@ This server gives Claude persistent, per-project memory: decisions, rules,
 architecture notes, sprint goals, and session summaries.
 
 ALWAYS, at the very start of a conversation that involves a project:
-  1. Call memory_session_start(project="<slug>")
+  1. Call memory_session_start(cwd="<your working directory>") - the project is
+   read from that folder's committed .agent-memory/manifest.json, and the
+   asoode board it is bound to comes back in the brief. NEVER ask the user
+   for the project slug; pass project="<slug>" only when you already know it.
      memory_session_start). This loads the project's mandatory rules, forbidden
      rules, last session summary, sprint goals, and recent decisions.
   2. Treat the returned mandatory_rules and forbidden_rules as BINDING for the
@@ -194,6 +197,36 @@ def _require_session(session_id: str | None) -> str:
             "those clocks."
         )
     return session_id.strip()
+
+
+def _resolve_session_project(
+    project: str | None, cwd: str | None,
+) -> str:
+    """The session's project: explicit slug, or the caller's working directory.
+
+    The manifest in <cwd>/.agent-memory/ carries the project's stable uid, so
+    an agent that only knows where it is standing still names its project -
+    that is the whole point of committing the manifest. No active project
+    exists to fall back on, and neither option being present is a teaching
+    error, never a guess.
+    """
+    if project and project.strip():
+        return project.strip()
+    if cwd and cwd.strip():
+        from memory_mcp.context import detect_project_from_cwd
+
+        slug = detect_project_from_cwd(cwd.strip())
+        if slug:
+            return slug
+        raise ValueError(
+            f"No memory project found at {cwd.strip()!r} (no "
+            ".agent-memory/manifest.json matching a registered project). "
+            "Pass project=<slug> instead."
+        )
+    raise ValueError(
+        "No project specified. Pass cwd=<your working directory> (the project "
+        "is read from its .agent-memory/manifest.json) or project=<slug>."
+    )
 
 
 def _remote(slug: str):
@@ -2092,10 +2125,16 @@ def memory_task_release(
 
 
 @mcp.tool()
-def memory_session_start(project: str, agent: str | None = None) -> dict:
+def memory_session_start(
+    project: str | None = None, cwd: str | None = None, agent: str | None = None,
+) -> dict:
     """Start a session. Loads rules, last summary, sprint goals, recent decisions.
 
-    project: the slug, ALWAYS - there is no active project to fall back on.
+    The project comes from YOU, never from the user: pass `cwd` (your working
+    directory) and the committed .agent-memory/manifest.json resolves to the
+    slug - or pass `project` directly when you already know it. There is no
+    active project to fall back on, and the user is never asked.
+
     agent: the dispatched agent's type (its frontmatter name, e.g. 'python',
     'reviewer'). The LEAD - the session talking to the person - passes nothing.
     It is what lets the daemon tell a subagent's session from the lead's, which
@@ -2103,7 +2142,7 @@ def memory_session_start(project: str, agent: str | None = None) -> dict:
     share the lead's MCP connection, so there is no other signal.
     """
     def _run():
-        slug = _resolve(project)
+        slug = _resolve_session_project(project, cwd)
         ctx = container.session_service.start(slug, agent=agent)
         # So memory_task_start can claim for this session without the id being
         # threaded through every call.

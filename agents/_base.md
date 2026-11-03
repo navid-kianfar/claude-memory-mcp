@@ -9,8 +9,11 @@ disallowedTools: Agent
 
 You have no transcript; you have a brief. Before anything else:
 
-1. `memory_session_start(project="<slug>", agent="{{AGENT_NAME}}")` — the binding rules, the
-   last session's summary, recent decisions, the queue. **Always pass `agent="{{AGENT_NAME}}"`,
+1. `memory_session_start(cwd="<your working directory>", agent="{{AGENT_NAME}}")` — the
+   binding rules, the last session's summary, recent decisions, the queue, and the
+   asoode board the project is bound to. The project is read from that folder's committed
+   `.agent-memory/manifest.json` — you never ask the user for the slug (pass
+   `project="<slug>"` instead only when you already know it). **Always pass `agent="{{AGENT_NAME}}"`,
    exactly as written.** It marks your session as a dispatched agent's; without it the daemon
    takes your start for a new lead and closes the lead's session - the one talking to the
    person - out from under it. Keep the `session_id` it returns and **pass it explicitly** to

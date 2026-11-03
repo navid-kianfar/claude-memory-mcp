@@ -1136,8 +1136,9 @@ def format_intro(slug: str, *, cwd: str | None = None) -> str:
     """Session-start nudge text for a detected memory project."""
     text = (
         f"[Memory MCP] This directory is memory project '{slug}'. "
-        f"Call memory_session_start('{slug}') now, before doing any work, to load "
-        f"its rules, last session summary, sprint goals, and recent decisions."
+        f"Call memory_session_start(cwd='<this folder>') now, before doing any work, "
+        f"to load its rules, last session summary, sprint goals, and recent "
+        f"decisions - the project is read from this folder's committed manifest."
     )
     pending = _pending_count(slug)
     if pending:

@@ -19,8 +19,12 @@ from memory_mcp.harnesses.zcode import ZCodeHarness
 
 @pytest.fixture
 def zcode_home(tmp_path, monkeypatch):
-    """A temp ZCode home: config path + agents dir both redirected."""
+    """A temp ZCode home: every path the harness reads, redirected - including
+    `zcode_dir` itself, which `detect` tests. Without it the detection test
+    silently asserts against the REAL ~/.zcode: green on a machine that has
+    ZCode installed, red on a CI runner that does not."""
     root = tmp_path / "zcode"
+    monkeypatch.setattr(zcode_mod, "zcode_dir", lambda: root)
     monkeypatch.setattr(zcode_mod, "zcode_config_path", lambda: root / "cli" / "config.json")
     monkeypatch.setattr(zcode_mod, "zcode_agents_dir", lambda: root / "agents")
     return root
@@ -36,15 +40,11 @@ class TestDetection:
         zcode_home.mkdir(parents=True)
         assert ZCodeHarness().detect() is True
 
-    def test_not_detected_without_the_root(self):
-        import memory_mcp.harnesses.zcode as m
-
-        original = m.zcode_dir
-        m.zcode_dir = lambda: __import__("pathlib").Path("/nonexistent-zcode-xyz")
-        try:
-            assert ZCodeHarness().detect() is False
-        finally:
-            m.zcode_dir = original
+    def test_not_detected_without_the_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            zcode_mod, "zcode_dir", lambda: tmp_path / "nonexistent-zcode-xyz"
+        )
+        assert ZCodeHarness().detect() is False
 
 
 class TestMCP:

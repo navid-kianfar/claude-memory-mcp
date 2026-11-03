@@ -46,9 +46,8 @@ from pathlib import Path
 import duckdb
 import pytest
 
-import memory_mcp.db.connection as conn_mod
 from memory_mcp.config import settings
-from memory_mcp.db.connection import close_all_databases, connect
+from memory_mcp.db.connection import close_all_databases
 
 SOAK = os.environ.get("MEMORY_MCP_STRESS") == "1"
 KILL_RUNS = 8 if SOAK else 2
@@ -83,6 +82,35 @@ _PROBE = (
     "c.execute(f'UPDATE \"{t}\" SET {sets}')\n"
     "c.execute(f'DELETE FROM \"{t}\"')\n"
     "c.execute('COMMIT')\n"
+    "print('ok')\n"
+)
+
+
+_REOPEN = '''
+import sys
+
+import memory_mcp.db.connection as conn_mod
+from memory_mcp.db.connection import close_all_databases, connect
+
+slug = sys.argv[1]
+conn_mod._initialized_dbs.clear()
+conn_mod.invalidate_path_cache()
+with connect(slug) as conn:
+    conn.execute("SELECT count(*) FROM stress").fetchone()
+close_all_databases()
+print("ok")
+'''
+
+_CHECKPOINT = (
+    "import duckdb, sys\n"
+    "c = duckdb.connect(sys.argv[1])\n"
+    "try:\n"
+    "    c.execute('LOAD vss')\n"
+    "    c.execute('SET hnsw_enable_experimental_persistence = true')\n"
+    "except Exception:\n"
+    "    pass\n"
+    "c.execute('CHECKPOINT')\n"
+    "c.close()\n"
     "print('ok')\n"
 )
 
@@ -336,22 +364,41 @@ def _reopen_as_the_daemon_does(slug: str) -> None:
     """Open the file the way a restarted daemon does, and close it the way exit
     does: `_ensure_initialized` connects to the existing file (replaying its
     WAL), runs migrations and closes - and that close is a checkpoint - then the
-    long-lived handle opens, serves, and is closed by atexit."""
-    conn_mod._initialized_dbs.clear()
-    conn_mod.invalidate_path_cache()
-    with connect(slug) as conn:
-        conn.execute("SELECT count(*) FROM stress").fetchone()
-    close_all_databases()
+    long-lived handle opens, serves, and is closed by atexit.
+
+    A child, like every other step that touches a crash-left WAL: the daemon's
+    own `_checkpoint_after_replay` runs inside `connect()`, and replay +
+    checkpoint on a SIGKILLed file has segfaulted the process outright on the
+    CI runner (duckdb native, not catchable here). A child turns that into a
+    failure of THIS test with the stderr in the message, not a lost session.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _REOPEN, slug],
+        capture_output=True, text=True, timeout=120, env=_child_env(),
+    )
+    assert result.returncode == 0 and "ok" in result.stdout, (
+        f"the daemon-style reopen did not come back clean "
+        f"(returncode {result.returncode}): "
+        f"{(result.stderr or result.stdout).strip()[-2000:]}"
+    )
 
 
 def _checkpoint_before_anything_else(slug: str) -> None:
     """The fix under test: an explicit CHECKPOINT on the freshly opened file,
-    before any other checkpoint can happen."""
-    conn = duckdb.connect(str(_db_path(slug)))
-    try:
-        conn.execute("CHECKPOINT")
-    finally:
-        conn.close()
+    before any other checkpoint can happen.
+
+    A child, with the probe's own preamble: the file's catalog carries HNSW
+    indexes, and CHECKPOINTing a replayed WAL against them has segfaulted the
+    runner process when the extension was not loaded first."""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", _CHECKPOINT, str(_db_path(slug))],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0 and "ok" in result.stdout, (
+        f"the checkpoint-first reopen did not come back clean "
+        f"(returncode {result.returncode}): "
+        f"{(result.stderr or result.stdout).strip()[-2000:]}"
+    )
 
 
 @pytest.fixture(autouse=True)

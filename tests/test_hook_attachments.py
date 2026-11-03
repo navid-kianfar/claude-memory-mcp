@@ -33,6 +33,7 @@ from tests.test_attachment_inbox import SID, png, paste, screenshot_result, writ
 HOOKS_DIR = Path(__file__).resolve().parents[1] / ".claude" / "hooks"
 INJECT = HOOKS_DIR / "inject-rules.sh"
 SESSION_END = HOOKS_DIR / "session-end.sh"
+SESSION_START = HOOKS_DIR / "session-start.sh"
 
 
 @pytest.fixture(autouse=True)
@@ -419,7 +420,15 @@ class TestInjectRulesScript:
             result = _run(INJECT, HOOK_INPUT, port)
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout == "RULES BLOCK\n[Memory MCP] The user attached x.png\n"
+        # ZCode parses hook stdout as JSON against a STRICT schema and discards
+        # whatever fails it, so the envelope must be exactly the recognized
+        # keys - a stray key would cost the whole injection, notices included.
+        out = json.loads(result.stdout)
+        assert set(out) == {"hookSpecificOutput"}
+        assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert out["hookSpecificOutput"]["additionalContext"] == (
+            "RULES BLOCK\n[Memory MCP] The user attached x.png"
+        )
         assert [s["path"] for s in seen] == ["/api/hook/rules", "/api/hook/attachments"]
         assert seen[1]["method"] == "POST"
         assert json.loads(seen[1]["body"]) == {
@@ -431,7 +440,8 @@ class TestInjectRulesScript:
         with _daemon({"/api/hook/rules": "RULES BLOCK"}) as (port, _):
             result = _run(INJECT, HOOK_INPUT, port)
 
-        assert result.stdout == "RULES BLOCK"
+        assert json.loads(
+            result.stdout)["hookSpecificOutput"]["additionalContext"] == "RULES BLOCK"
 
     def test_without_a_transcript_it_makes_one_call(self):
         with _daemon({"/api/hook/rules": "RULES"}) as (port, seen):
@@ -458,6 +468,39 @@ class TestInjectRulesScript:
         assert result.returncode == 0
         assert not canary.exists()
         assert json.loads(seen[-1]["body"])["transcript_path"] == hostile["transcript_path"]
+
+
+@pytest.mark.skipif(not SESSION_START.exists(), reason="hook script not present")
+class TestSessionStartScript:
+    def test_it_wraps_the_intro_in_the_context_envelope(self):
+        """SessionStart is what makes a FRESH session load the project's memory
+        and rules by itself. ZCode discards plain-text hook stdout, so until the
+        envelope this intro loaded in Claude Code only - a ZCode session started
+        empty and stayed empty unless the user asked. This pins the envelope,
+        and that nothing leaks around it."""
+        with _daemon({"/api/hook/rules": "INTRO TEXT"}) as (port, seen):
+            result = _run(SESSION_START, HOOK_INPUT, port)
+
+        assert result.returncode == 0, result.stderr
+        out = json.loads(result.stdout)
+        assert set(out) == {"hookSpecificOutput"}
+        assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert out["hookSpecificOutput"]["additionalContext"] == "INTRO TEXT"
+        # The side effects still ran (the snapshot import is skipped here only
+        # because the stub binary does not exist): the folder got registered.
+        assert "/api/hook/auto-register" in [s["path"] for s in seen]
+
+    def test_a_dead_daemon_is_a_warning_in_the_envelope(self):
+        env = {**os.environ, "MEMORY_MCP_DAEMON_PORT": "9"}
+        result = subprocess.run(
+            ["bash", str(SESSION_START)], input=json.dumps(HOOK_INPUT),
+            text=True, capture_output=True, timeout=30, env=env,
+        )
+
+        assert result.returncode == 0
+        assert "daemon is not answering" in (
+            json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        )
 
 
 @pytest.mark.skipif(not SESSION_END.exists(), reason="hook script not present")

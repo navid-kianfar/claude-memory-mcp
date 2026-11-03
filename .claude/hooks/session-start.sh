@@ -61,24 +61,52 @@ MEMORY_MCP_BIN="${MEMORY_MCP_BIN:-$HOME/.claude-memory-mcp/runtime/bin/memory-mc
 # A daemon that is down makes every call below fail silently, and silence reads
 # exactly like "nothing to report" - a session then works for hours storing
 # nothing. Say so once, at the start, where it can still be acted on.
-if ! curl -s -o /dev/null --max-time 3 "${AUTH[@]}" "${BASE}/api/health" 2>/dev/null; then
-  echo "[Memory MCP] The memory daemon is not answering at ${BASE}, so its tools are unavailable and nothing this session learns will be stored. Tell the user before recording rules or decisions; restart it with: launchctl kickstart -k gui/\$(id -u)/com.claude-memory-mcp.daemon"
-  exit 0
+if curl -s -o /dev/null --max-time 3 "${AUTH[@]}" "${BASE}/api/health" 2>/dev/null; then
+  # Claim this folder for the project its committed .claude-memory/manifest.json
+  # names, then pull that snapshot into the central store. Runs BEFORE
+  # auto-register: claiming re-binds a moved or renamed folder to its existing
+  # project, and auto-register would otherwise register a duplicate first.
+  # Local only: a remote server (MEMORY_MCP_URL set) has no local DB to sync
+  # into. Both calls are silenced: nothing but the envelope below may reach
+  # stdout - a stray line in it fails ZCode's strict output validation and
+  # costs the whole injection.
+  [ -z "$MEMORY_MCP_URL" ] && [ -x "$MEMORY_MCP_BIN" ] && \
+    "$MEMORY_MCP_BIN" sync import --cwd "$CWD" >/dev/null 2>&1
+
+  # Register this folder as a project (if it is a git repo and still not
+  # known), so it appears in the management UI even before it has any rules.
+  curl -s -G --max-time 3 "${AUTH[@]}" "${IDENT[@]}" "${BASE}/api/hook/auto-register" \
+    --data-urlencode "cwd=${CWD}" >/dev/null 2>&1
+
+  CONTEXT=$(curl -s -G --max-time 2 "${AUTH[@]}" "${IDENT[@]}" "${BASE}/api/hook/rules" \
+    --data-urlencode "cwd=${CWD}" --data-urlencode "mode=intro" 2>/dev/null)
+else
+  CONTEXT="[Memory MCP] The memory daemon is not answering at ${BASE}, so its tools are unavailable and nothing this session learns will be stored. Tell the user before recording rules or decisions; restart it with: launchctl kickstart -k gui/\$(id -u)/com.claude-memory-mcp.daemon"
 fi
 
-# Claim this folder for the project its committed .claude-memory/manifest.json
-# names, then pull that snapshot into the central store. Runs BEFORE
-# auto-register: claiming re-binds a moved or renamed folder to its existing
-# project, and auto-register would otherwise register a duplicate first.
-# Local only: a remote server (MEMORY_MCP_URL set) has no local DB to sync into.
-[ -z "$MEMORY_MCP_URL" ] && [ -x "$MEMORY_MCP_BIN" ] && \
-  "$MEMORY_MCP_BIN" sync import --cwd "$CWD" 2>/dev/null
-
-# Register this folder as a project (if it is a git repo and still not known),
-# so it appears in the management UI even before it has any rules.
-curl -s -G --max-time 3 "${AUTH[@]}" "${IDENT[@]}" "${BASE}/api/hook/auto-register" \
-  --data-urlencode "cwd=${CWD}" 2>/dev/null
-
-curl -s -G --max-time 2 "${AUTH[@]}" "${IDENT[@]}" "${BASE}/api/hook/rules" \
-  --data-urlencode "cwd=${CWD}" --data-urlencode "mode=intro" 2>/dev/null
+# ---- the output contract ----
+# Claude Code injects a context hook's plain stdout into the model. ZCode does
+# NOT: its hook runner parses stdout as JSON against a STRICT schema and
+# discards whatever fails validation - so every session-start here was silently
+# dropped in ZCode, and nothing loaded unless the user asked. The envelope
+# below is the one shape BOTH clients accept (Claude Code injects
+# hookSpecificOutput.additionalContext for SessionStart too), and ZCode
+# validates it hard: exactly these keys - any extra key fails validation - and
+# a hookEventName that does not name the firing event raises. Without python3
+# the envelope cannot be built; the raw text then still reaches Claude Code,
+# and ZCode carries on exactly as before this fix.
+if [ -n "$CONTEXT" ]; then
+  if ENVELOPE=$(printf '%s' "$CONTEXT" | python3 -c '
+import json, sys
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "additionalContext": sys.stdin.read(),
+    }
+}))' 2>/dev/null) && [ -n "$ENVELOPE" ]; then
+    printf '%s\n' "$ENVELOPE"
+  else
+    printf '%s\n' "$CONTEXT"
+  fi
+fi
 exit 0

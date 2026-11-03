@@ -65,8 +65,8 @@ IDENT=(
   --data-urlencode "agent_type=${AGENT_TYPE}"
   --data-urlencode "transcript_path=${TRANSCRIPT}"
 )
-curl -s -G --max-time 2 "${AUTH[@]}" "${IDENT[@]}" "${BASE}/api/hook/rules" \
-  --data-urlencode "cwd=${CWD}" --data-urlencode "mode=rules" 2>/dev/null
+CONTEXT=$(curl -s -G --max-time 2 "${AUTH[@]}" "${IDENT[@]}" "${BASE}/api/hook/rules" \
+  --data-urlencode "cwd=${CWD}" --data-urlencode "mode=rules" 2>/dev/null)
 
 # Files the user attached in the compose box. They reach the model as inline
 # base64 inside the transcript and nowhere else, so the DAEMON reads the
@@ -78,7 +78,35 @@ if [ -n "$TRANSCRIPT" ] && [ -n "$ATTACH_BODY" ]; then
   NOTICES=$(printf '%s' "$ATTACH_BODY" | curl -s --max-time 3 -X POST "${AUTH[@]}" \
     -H 'Content-Type: application/json' --data @- \
     "${BASE}/api/hook/attachments" 2>/dev/null)
-  # On its own line: the rules body does not end in a newline.
-  [ -n "$NOTICES" ] && printf '\n%s\n' "$NOTICES"
+  if [ -n "$NOTICES" ]; then
+    # On its own line: the rules body does not end in a newline.
+    if [ -n "$CONTEXT" ]; then CONTEXT="${CONTEXT}
+${NOTICES}"; else CONTEXT="${NOTICES}"; fi
+  fi
+fi
+
+# ---- the output contract ----
+# Claude Code injects a context hook's plain stdout into the model. ZCode does
+# NOT: its hook runner parses stdout as JSON against a STRICT schema and
+# discards whatever fails validation - so the per-turn rules were silently
+# dropped in ZCode on every turn. The envelope below is the one shape BOTH
+# clients accept (Claude Code injects hookSpecificOutput.additionalContext for
+# UserPromptSubmit too), and ZCode validates it hard: exactly these keys - any
+# extra key fails validation - and a hookEventName that does not name the
+# firing event raises. Without python3 the envelope cannot be built; the raw
+# text then still reaches Claude Code, and ZCode carries on as before.
+if [ -n "$CONTEXT" ]; then
+  if ENVELOPE=$(printf '%s' "$CONTEXT" | python3 -c '
+import json, sys
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": sys.stdin.read(),
+    }
+}))' 2>/dev/null) && [ -n "$ENVELOPE" ]; then
+    printf '%s\n' "$ENVELOPE"
+  else
+    printf '%s\n' "$CONTEXT"
+  fi
 fi
 exit 0

@@ -57,6 +57,12 @@ def current_session_id() -> str | None:
 # end - and asking the agent to thread it through every memory_task_start is
 # one more thing to forget. So the MCP session remembers it.
 _memory_sessions: "OrderedDict[str, str]" = OrderedDict()
+#: Sessions are ephemeral and we are never told when one ends, so the map is
+#: bounded rather than left to grow for the daemon's lifetime. (This constant
+#: belonged to the old session-project map and was deleted with it in v0.17.0;
+#: remember_memory_session still bounds itself with it - the NameError the
+#: tg-portal session hit was exactly that dangling reference.)
+_MEMORY_SESSION_LIMIT = 256
 
 
 def remember_memory_session(memory_session_id: str) -> None:
@@ -66,7 +72,7 @@ def remember_memory_session(memory_session_id: str) -> None:
     with _lock:
         _memory_sessions[session_id] = memory_session_id
         _memory_sessions.move_to_end(session_id)
-        while len(_memory_sessions) > _SESSION_LIMIT:
+        while len(_memory_sessions) > _MEMORY_SESSION_LIMIT:
             _memory_sessions.popitem(last=False)
 
 

@@ -1,8 +1,18 @@
 """Test fixtures for memory-mcp tests."""
 
+import os
 import shutil
+import tempfile
 
 import pytest
+
+# The product keeps fastembed's model cache under the data dir, and every test
+# gets a fresh temp data dir - which would re-download the model (~90 MB) for
+# each one. Pin the suite to one shared cache instead: fastembed's own default
+# location, so a machine that already has the model downloads nothing.
+os.environ.setdefault(
+    "FASTEMBED_CACHE_PATH", os.path.join(tempfile.gettempdir(), "fastembed_cache")
+)
 
 from memory_mcp.config import settings
 import memory_mcp.db.connection as conn_mod

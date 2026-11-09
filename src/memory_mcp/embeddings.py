@@ -17,10 +17,24 @@ Model names: a settings value without a namespace is read as a
 sentence-transformers model by both backends (fastembed resolves it under
 `sentence-transformers/`). A name fastembed does not know raises with a hint
 to switch the backend rather than failing obscurely.
+
+Fallback to sentence-transformers happens ONLY when onnx genuinely cannot
+serve the configured model: fastembed is not installed, or it does not list
+the model. Any other failure - a broken download, an onnxruntime error, a
+corrupt cache - is a real fault and propagates with its own message; silently
+loading torch (~300 MB) over it hid the cause and cost the memory the onnx
+backend exists to save.
+
+The model cache lives under the data dir (`models/fastembed`), not fastembed's
+default `$TMPDIR/fastembed_cache`, which macOS clears - a cleared cache meant a
+re-download on the next daemon start. `FASTEMBED_CACHE_PATH`, fastembed's own
+variable, still wins when set.
 """
 
 import logging
+import os
 import threading
+from pathlib import Path
 
 import numpy as np
 
@@ -39,6 +53,27 @@ FASTEMBED_NAMESPACE = "sentence-transformers/"
 BACKEND_ONNX = "onnx"
 BACKEND_ST = "sentence-transformers"
 
+#: fastembed's own override for its cache directory.
+FASTEMBED_CACHE_ENV = "FASTEMBED_CACHE_PATH"
+MODEL_CACHE_SUBDIR = Path("models") / "fastembed"
+
+
+class OnnxBackendUnavailable(RuntimeError):
+    """onnx cannot serve this model at all - the one case that falls back."""
+
+
+def model_cache_dir() -> Path:
+    """Where fastembed keeps downloaded models: persistent, under the data dir."""
+    override = os.environ.get(FASTEMBED_CACHE_ENV)
+    if override:
+        return Path(override)
+    return settings.data_dir / MODEL_CACHE_SUBDIR
+
+
+def _fastembed_supports(TextEmbedding, model_name: str) -> bool:
+    supported = TextEmbedding.list_supported_models()
+    return any(entry.get("model") == model_name for entry in supported)
+
 
 def _fastembed_model_name(name: str) -> str:
     if "/" in name:
@@ -53,18 +88,22 @@ class _OnnxModel:
         try:
             from fastembed import TextEmbedding
         except ImportError as e:
-            raise RuntimeError(
+            raise OnnxBackendUnavailable(
                 "embedding_backend is 'onnx' but fastembed is not installed; "
                 "add the dependency or set MEMORY_MCP_EMBEDDING_BACKEND="
                 "sentence-transformers"
             ) from e
-        try:
-            self._m = TextEmbedding(_fastembed_model_name(name))
-        except Exception as e:
-            raise RuntimeError(
+        model_name = _fastembed_model_name(name)
+        if not _fastembed_supports(TextEmbedding, model_name):
+            raise OnnxBackendUnavailable(
                 f"fastembed does not know model {name!r}; check the preset or "
                 "set MEMORY_MCP_EMBEDDING_BACKEND=sentence-transformers"
-            ) from e
+            )
+        cache = model_cache_dir()
+        cache.mkdir(parents=True, exist_ok=True)
+        # Deliberately not wrapped: a download or onnxruntime failure here is a
+        # real fault and must surface as itself, not as "unknown model".
+        self._m = TextEmbedding(model_name, cache_dir=str(cache))
         # onnxruntime's session is thread-safe, but fastembed's generator
         # pipeline is not documented as such and tool workers embed
         # concurrently. One encode at a time costs nothing at these sizes.
@@ -112,15 +151,14 @@ def get_model():
                 if backend == BACKEND_ONNX
                 else _STModel(settings.embedding_model)
             )
-        except RuntimeError:
-            if backend != BACKEND_ONNX:
-                raise
-            # The default backend missing its dependency must not take the
-            # daemon down; the original path stays available underneath.
+        except OnnxBackendUnavailable as e:
+            # onnx cannot serve this model at all (no fastembed, or a model it
+            # does not list); the original path stays available underneath.
+            # Every other onnx failure propagates - see the module docstring.
             log.warning(
-                "onnx embedding backend unavailable (%s); falling back to "
-                "sentence-transformers",
-                str(settings.embedding_model),
+                "onnx embedding backend unavailable for %r: %s; falling back "
+                "to sentence-transformers",
+                settings.embedding_model, e,
             )
             model = _STModel(settings.embedding_model)
             backend = BACKEND_ST

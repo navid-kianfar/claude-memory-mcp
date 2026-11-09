@@ -111,6 +111,24 @@ class TestTheCloseReplyLeadsWithTheWarning:
         assert answer["time_note"]["from"] == "state-history"
 
 
+class TestClockOwnership:
+    def test_a_clock_started_by_update_belongs_to_the_session(self, project):
+        """memory_session_end stops the clocks its session owns; an ownerless
+        clock from update(state='in_progress') would run on forever."""
+        task = _add(project, "Started through update")
+        session = _session(container, project, "s-own")
+        server.memory_task_update(
+            task.id, state="in_progress", project=project, session_id=session,
+        )
+        with get_connection(project) as conn:
+            owner = conn.execute(
+                "SELECT session_id FROM task_time_entries "
+                "WHERE task_id = ? AND end_at IS NULL", [task.id],
+            ).fetchone()
+
+        assert owner == (session,)
+
+
 class TestTheStatelessSessionContract:
     def test_a_close_without_a_session_is_a_teaching_error(self):
         """The transport is stateless: no remembered session can be relied on,
@@ -120,3 +138,34 @@ class TestTheStatelessSessionContract:
             _require_session(None)
         with pytest.raises(ValueError, match="session_id="):
             _require_session("   ")
+
+
+class TestUpdateNeedsASessionOnlyForTheClock:
+    """A title, description or priority edit touches no clock, so it must not
+    fail for want of a session_id; a state change can start, stop or
+    reconstruct one, so it still must name the session."""
+
+    def test_a_title_edit_without_a_session_succeeds(self, project):
+        task = _add(project, "Old title")
+
+        answer = server.memory_task_update(task.id, title="New title", priority=1, project=project)
+
+        assert "error" not in answer
+        assert answer["task"]["title"] == "New title"
+        assert answer["changed"] == ["priority", "title"]
+
+    def test_a_close_without_a_session_is_refused_and_changes_nothing(self, project):
+        task = _add(project, "Not to be closed anonymously")
+
+        answer = server.memory_task_update(task.id, state="done", project=project)
+
+        assert "session_id=" in answer["error"]
+        assert container.task_repo.get(project, task.id).state.value == "todo"
+
+    def test_entering_in_progress_without_a_session_is_refused(self, project):
+        task = _add(project, "Would start a clock")
+
+        answer = server.memory_task_update(task.id, state="in_progress", project=project)
+
+        assert "session_id=" in answer["error"]
+        assert container.task_repo.running_entry(project, task.id) is None

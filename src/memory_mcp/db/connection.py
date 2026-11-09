@@ -149,6 +149,22 @@ def open_database_count() -> int:
         return len(_databases)
 
 
+def project_database_path(slug: str) -> Path:
+    """The file `slug` currently lives in, from the cached registry lookup."""
+    return _resolve_db_path(slug)
+
+
+def is_database_open(db_path: Path) -> bool:
+    """Whether this process holds a handle on `db_path` - never opens one.
+
+    For a background reader (the outbox sweep) that must not undo the idle LRU
+    by touching every project: what it wants to know is cheap only when the
+    handle is already there.
+    """
+    with _databases_lock:
+        return str(db_path) in _databases
+
+
 def _database(db_path: Path) -> duckdb.DuckDBPyConnection:
     """The process's handle on `db_path`, opened (and migrated) on first use."""
     key = str(db_path)

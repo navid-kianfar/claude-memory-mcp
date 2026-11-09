@@ -1,24 +1,67 @@
 #!/bin/bash
 # Codex notify wrapper: the session-end bookkeeping, on Codex's terms.
 #
-# Codex invokes the program named in its config's `notify` key when a turn
-# completes, with a JSON payload on stdin. The only thing this daemon needs at
-# a turn boundary is what the Claude Stop hook does: export the project's
-# memory snapshot so the next commit carries it, and apply an approved update
-# at a moment when no MCP call is in flight. That is exactly session-end.sh's
-# job, so this wrapper is a thin bridge: read the payload for a cwd, fall back
-# to the working directory Codex ran in, and hand it to the SAME installed
-# script the Claude harness uses.
+# Codex runs the command in its config's `notify` key when a turn completes
+# and APPENDS the JSON payload as the LAST argument. Setup writes:
 #
-# FAILS OPEN, ALWAYS: no payload, no daemon, no python3 - exit 0, silently. A
-# missed export is a missed sync; a failed notify must never break a Codex
-# turn.
+#     notify = ["<this script>", "memory-mcp", <the user's own notify...>]
+#
+# so Codex calls: this-script memory-mcp [user-command...] '<json>'.
+#
+# The only thing this daemon needs at a turn boundary is what the Claude Stop
+# hook does: export the project's memory snapshot so the next commit carries
+# it, and apply an approved update at a moment when no MCP call is in flight.
+# That is exactly session-end.sh's job, so this wrapper is a thin bridge.
+#
+#   1. Payload: the last argument when it is a JSON object; otherwise stdin
+#      (bounded wait - an open, silent stdin must not hang a turn); otherwise
+#      nothing, and the cwd falls back to $PWD.
+#   2. A chained user command (Codex has ONE notify slot; setup keeps what the
+#      user had there) runs first, with the payload appended exactly as Codex
+#      would have passed it.
+#   3. session-end.sh, the SAME installed script the Claude harness uses.
+#
+# FAILS OPEN, ALWAYS: no payload, no daemon, no python3, a failing chained
+# command - exit 0. A missed export is a missed sync; a failed notify must
+# never break a Codex turn.
 
-INPUT=$(cat)
-CWD=$(printf '%s' "$INPUT" | python3 -c '
-import sys, json
+MARKER="memory-mcp"
+STDIN_WAIT_SECONDS=2
+
+ARGS=("$@")
+if [ "${#ARGS[@]}" -gt 0 ] && [ "${ARGS[0]}" = "$MARKER" ]; then
+  ARGS=("${ARGS[@]:1}")
+fi
+
+PAYLOAD=""
+FROM_ARGV=""
+COUNT=${#ARGS[@]}
+if [ "$COUNT" -gt 0 ]; then
+  LAST="${ARGS[$((COUNT - 1))]}"
+  case "$LAST" in
+    \{*)
+      PAYLOAD="$LAST"
+      FROM_ARGV=1
+      ARGS=("${ARGS[@]:0:$((COUNT - 1))}")
+      ;;
+  esac
+fi
+if [ -z "$FROM_ARGV" ] && [ ! -t 0 ]; then
+  IFS= read -r -d '' -t "$STDIN_WAIT_SECONDS" PAYLOAD
+fi
+
+if [ "${#ARGS[@]}" -gt 0 ]; then
+  if [ -n "$FROM_ARGV" ]; then
+    "${ARGS[@]}" "$PAYLOAD" </dev/null
+  else
+    printf '%s' "$PAYLOAD" | "${ARGS[@]}"
+  fi
+fi
+
+CWD=$(MEMORY_MCP_NOTIFY_PAYLOAD="$PAYLOAD" python3 -c '
+import json, os
 try:
-    d = json.load(sys.stdin)
+    d = json.loads(os.environ.get("MEMORY_MCP_NOTIFY_PAYLOAD", ""))
 except Exception:
     d = {}
 cwd = ""
@@ -37,6 +80,6 @@ print(cwd)
 END="$HOME/.claude-memory-mcp/hooks/session-end.sh"
 [ -f "$END" ] || exit 0
 
-printf '{"cwd": %s}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$CWD")" \
+printf '{"cwd": %s}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$CWD" 2>/dev/null)" \
   | bash "$END" >/dev/null 2>&1
 exit 0

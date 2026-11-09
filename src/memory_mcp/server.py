@@ -8,20 +8,12 @@ Each @mcp.tool() is a minimal wrapper:
 """
 
 import logging
-import os
 import sys
 
 from fastmcp import FastMCP
 
 from memory_mcp.config import settings
 from memory_mcp.container import container
-from memory_mcp.context import (
-    current_memory_session,
-    current_session_id,
-    forget_memory_session,
-    resolve_project,
-    remember_memory_session,
-)
 from memory_mcp.db.connection import is_fatal
 from memory_mcp.enforcement import never_started_warning, rules_digest
 from memory_mcp.services.adaptation import adaptation_brief
@@ -184,8 +176,7 @@ def _require_session(session_id: str | None) -> str:
     """The memory session id, EXPLICIT - there is no reliable fallback.
 
     The transport runs stateless (a daemon restart must not drop a harness
-    session), so the remembered-session convenience cannot be relied on: a
-    request may arrive without any context of the one that called
+    session), so a request carries no trace of the one that called
     memory_session_start. A clock whose session is unknown could never be
     stopped by that session's end, so an absent id is a teaching error, not a
     silent session-less entry.
@@ -196,6 +187,13 @@ def _require_session(session_id: str | None) -> str:
             "and claims are attributed to it, and session_end stops exactly "
             "those clocks."
         )
+    return session_id.strip()
+
+
+def _optional_session(session_id: str | None) -> str | None:
+    """The memory session id when one was passed, for a call that does not need it."""
+    if not session_id or not session_id.strip():
+        return None
     return session_id.strip()
 
 
@@ -213,15 +211,16 @@ def _resolve_session_project(
     if project and project.strip():
         return project.strip()
     if cwd and cwd.strip():
-        from memory_mcp.context import detect_project_from_cwd
+        from memory_mcp.context import detect_project_strictly
 
-        slug = detect_project_from_cwd(cwd.strip())
+        slug = detect_project_strictly(cwd.strip())
         if slug:
             return slug
         raise ValueError(
-            f"No memory project found at {cwd.strip()!r} (no "
-            ".agent-memory/manifest.json matching a registered project). "
-            "Pass project=<slug> instead."
+            f"No memory project found at {cwd.strip()!r}: no "
+            ".agent-memory/manifest.json matching a registered project, no "
+            "registered portable database, and no project bound to this folder "
+            "or a parent of it. Pass project=<slug> instead."
         )
     raise ValueError(
         "No project specified. Pass cwd=<your working directory> (the project "
@@ -1844,8 +1843,9 @@ def memory_task_update(
 
     Closing a task that was never started records an ESTIMATE, marked manual,
     from the latest evidence of work - see memory_task_done. `session_id` is the
-    one memory_session_start returned; pass it when several sessions share one
-    connection (a dispatched agent does), or the close is credited to the lead.
+    one memory_session_start returned: REQUIRED when you pass `state` (a state
+    change starts, stops or reconstructs a clock, and the clock is that
+    session's); optional for every other edit.
     """
     def _run():
         slug = _resolve(project)
@@ -1866,7 +1866,10 @@ def memory_task_update(
             path=path,
             target=target,
         )
-        session = _require_session(session_id or current_memory_session())
+        # Only a state change can start, stop or reconstruct a clock (which
+        # one depends on the task's current state), so only it needs to know
+        # whose clock. A title or priority edit must not fail for want of it.
+        session = _require_session(session_id) if state else _optional_session(session_id)
         task, changed, routing = container.task_service.update_routed(req, session)
         answer = {
             "status": "ok",
@@ -1948,12 +1951,12 @@ def memory_task_start(
     is still running as a last resort - do not rely on it.
 
     `session_id` is the one memory_session_start returned - ALWAYS pass it:
-    the transport is stateless, so the remembered-session convenience cannot
-    be relied on across calls.
+    the transport is stateless, so no call can know which session made an
+    earlier one.
     """
     def _run():
         slug = _resolve(project)
-        session = _require_session(session_id or current_memory_session())
+        session = _require_session(session_id)
         answer = container.task_service.start(slug, task_id, session).model_dump(mode="json")
         return _with_mirror(answer, slug)
     return _safe(_run)
@@ -1990,12 +1993,12 @@ def memory_task_done(
     ESTIMATE, marked manual and capped: from the latest of its claim, its first
     comment, this session's previous close and this session's start, and
     `time_note.from` names which. `session_id` is the one memory_session_start
-    returned - ALWAYS pass it: the transport is stateless, so the remembered
-    mapping cannot be relied on across calls.
+    returned - ALWAYS pass it: the transport is stateless, so no call can know
+    which session made an earlier one.
     """
     def _run():
         slug = _resolve(project)
-        session = _require_session(session_id or current_memory_session())
+        session = _require_session(session_id)
         detail = container.task_service.done(slug, task_id, note, session)
         dumped = detail.model_dump(mode="json")
         answer = _lead_with_clock_warning(dumped, detail.task.title, detail.time_note)
@@ -2144,9 +2147,6 @@ def memory_session_start(
     def _run():
         slug = _resolve_session_project(project, cwd)
         ctx = container.session_service.start(slug, agent=agent)
-        # So memory_task_start can claim for this session without the id being
-        # threaded through every call.
-        remember_memory_session(ctx.session_id)
         return ctx.model_dump(mode="json")
     return _safe(_run)
 
@@ -2168,12 +2168,10 @@ def memory_session_end(
     summary so the next session knows where it stands.
     """
     def _run():
-        result = container.session_service.end(
+        return container.session_service.end(
             _resolve(project), session_id, summary,
             memories_created, memories_accessed,
         )
-        forget_memory_session(session_id)
-        return result
     return _safe(_run)
 
 

@@ -90,6 +90,79 @@ class TestEmptyTextGuard:
             embeddings._OnnxModel("no-such-model-anywhere-xyz")
 
 
+@pytest.fixture
+def fresh_model(monkeypatch):
+    """get_model() with no cached singleton, restored afterwards."""
+    monkeypatch.setattr(embeddings, "_model", None)
+    monkeypatch.setattr(embeddings, "_model_backend", None)
+    monkeypatch.setattr(settings, "embedding_backend", embeddings.BACKEND_ONNX)
+
+
+class _FakeST:
+    def __init__(self, name):
+        self.name = name
+
+
+class TestOnnxFallback:
+    def test_an_unsupported_model_falls_back_to_sentence_transformers(
+        self, fresh_model, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "embedding_model", "no-such-model-anywhere-xyz")
+        monkeypatch.setattr(embeddings, "_STModel", _FakeST)
+        model = embeddings.get_model()
+        assert isinstance(model, _FakeST)
+        assert embeddings.current_backend() == embeddings.BACKEND_ST
+
+    def test_a_real_onnx_failure_surfaces_instead_of_falling_back(
+        self, fresh_model, monkeypatch
+    ):
+        import fastembed
+
+        def broken(*args, **kwargs):
+            raise OSError("onnxruntime: model file is corrupt")
+
+        monkeypatch.setattr(fastembed, "TextEmbedding", type(
+            "Broken", (), {
+                "__init__": broken,
+                "list_supported_models": staticmethod(
+                    fastembed.TextEmbedding.list_supported_models
+                ),
+            },
+        ))
+        monkeypatch.setattr(embeddings, "_STModel", _FakeST)
+        with pytest.raises(OSError, match="corrupt"):
+            embeddings.get_model()
+
+
+class TestModelCache:
+    def test_cache_lives_under_the_data_dir(self, monkeypatch):
+        monkeypatch.delenv(embeddings.FASTEMBED_CACHE_ENV, raising=False)
+        cache = embeddings.model_cache_dir()
+        assert cache.is_relative_to(settings.data_dir)
+
+    def test_fastembeds_own_variable_wins(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(embeddings.FASTEMBED_CACHE_ENV, str(tmp_path / "c"))
+        assert embeddings.model_cache_dir() == tmp_path / "c"
+
+    def test_the_model_is_loaded_from_that_cache(self, monkeypatch, tmp_path):
+        import fastembed
+
+        seen = {}
+
+        class Recording:
+            list_supported_models = staticmethod(
+                fastembed.TextEmbedding.list_supported_models
+            )
+
+            def __init__(self, name, cache_dir=None):
+                seen["cache_dir"] = cache_dir
+
+        monkeypatch.setenv(embeddings.FASTEMBED_CACHE_ENV, str(tmp_path / "c"))
+        monkeypatch.setattr(fastembed, "TextEmbedding", Recording)
+        embeddings._OnnxModel(settings.embedding_model)
+        assert seen["cache_dir"] == str(tmp_path / "c")
+
+
 class TestBackendSetting:
     def test_unknown_backend_refused(self):
         from memory_mcp.config import Settings

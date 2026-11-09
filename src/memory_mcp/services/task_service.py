@@ -572,8 +572,9 @@ class TaskService:
         `link_id`; it queues no mirror op of its own, because the pending create
         routes by link_id when it flushes and a task with a card cannot get here.
 
-        `session_id` is the memory session making the change. Only a close reads
-        it: it is what an estimate for a never-started task is split by.
+        `session_id` is the memory session making the change. A close splits a
+        never-started task's estimate by it; a move to in_progress makes it the
+        owner of the clock it starts, so memory_session_end can stop it.
         """
         before = self._require(request.project, request.task_id)
 
@@ -661,8 +662,9 @@ class TaskService:
                     request.project, request.task_id,
                 ) is None
             ):
+                # Owned by the caller's session, so memory_session_end stops it.
                 self._task_repo.start_entry(
-                    request.project, str(uuid.uuid4()), request.task_id, None,
+                    request.project, str(uuid.uuid4()), request.task_id, session_id,
                 )
             # A finished task is nobody's work any more, whichever verb finished it.
             if request.state == TaskState.DONE:

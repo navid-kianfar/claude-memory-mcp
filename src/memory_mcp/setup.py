@@ -22,6 +22,7 @@ folder like ~/Desktop, ~/Documents, or ~/Downloads.
 """
 
 import argparse
+import hashlib
 import plistlib
 import shutil
 import subprocess
@@ -114,6 +115,29 @@ def setup_embedding_model() -> None:
 
 # ---------- 4. runtime install ----------
 
+#: Where the lock's pins are exported for the runtime install, under the data dir.
+RUNTIME_CONSTRAINTS_FILE = "runtime-constraints.txt"
+
+
+def _export_lock_constraints(target: Path) -> bool:
+    """Write uv.lock's resolved pins to `target` as a pip constraints file.
+
+    `uv pip install <repo>` resolves pyproject's RANGES afresh and ignores the
+    lock, which is how the runtime stayed on duckdb 1.5.2 while uv.lock said
+    1.5.6 (the crash fixes). Constraints - not requirements - so the lock pins
+    versions without installing anything the project does not ask for.
+    `--frozen` refuses to re-resolve: a lock that disagrees with pyproject is
+    exported as written, never silently rewritten by an install.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        ["uv", "export", "--frozen", "--no-dev", "--no-hashes", "--no-emit-project",
+         "--format", "requirements-txt", "--output-file", str(target)],
+        cwd=str(REPO_DIR), capture_output=True, text=True, check=False,
+    )
+    return result.returncode == 0 and target.is_file()
+
+
 def setup_runtime() -> None:
     """Install the daemon into a self-contained venv under the data dir.
 
@@ -125,14 +149,21 @@ def setup_runtime() -> None:
         ["uv", "venv", "--allow-existing", str(rt)],
         capture_output=True, text=True, check=True,
     )
-    result = subprocess.run(
-        ["uv", "pip", "install", "--python", str(rt / "bin" / "python"),
-         "--quiet", str(REPO_DIR)],
-        capture_output=True, text=True, check=False,
-    )
+    # Digest BEFORE the build: an edit landing mid-install must read as a change.
+    tree = _safe_install_tree_digest()
+    install = ["uv", "pip", "install", "--python", str(rt / "bin" / "python"), "--quiet"]
+    constraints = settings.data_dir / RUNTIME_CONSTRAINTS_FILE
+    if _export_lock_constraints(constraints):
+        install += ["--constraint", str(constraints)]
+    else:
+        print("    Warning: uv.lock not exported - installing from pyproject "
+              "ranges, not the locked pins.")
+    install.append(str(REPO_DIR))
+    result = subprocess.run(install, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip()[-400:] or "uv pip install failed")
     print(f"    Runtime venv: {rt}")
+    _record_install_tree(tree)
 
     dist = REPO_DIR / "frontend" / "dist"
     ui = runtime_ui_dir()
@@ -313,37 +344,86 @@ def _retire_legacy_merge_driver() -> None:
 
 # ---------- lean update ----------
 
-#: The paths the installer builds from. The auto-update hook's dirty-tree
-#: guard watches the same set; a snapshot export (.agent-memory) or an edited
-#: doc must never reload the daemon.
-_INSTALL_PATHS = ("src", "agents", "frontend/src")
+#: The paths the installer builds from: the package, the agent definitions,
+#: the UI source, and the hook scripts install_hooks copies out. A snapshot
+#: export (.agent-memory) or an edited doc must never reload the daemon.
+_INSTALL_PATHS = ("src", "agents", "frontend/src", ".claude/hooks")
+
+#: Content digest of _INSTALL_PATHS as the runtime was last built from them.
+#: Separate from `install:commit`, which the update checker compares against
+#: GitHub and must stay a commit sha.
+INSTALL_TREE_KEY = "install:tree"
+
+_GIT_TIMEOUT_SECONDS = 10
+_MISSING_FILE_MARKER = b"\0missing\0"
+
+
+def _install_tree_digest() -> str | None:
+    """SHA-256 over the WORKING-TREE contents of every file under _INSTALL_PATHS.
+
+    Files are the ones git would see - tracked plus untracked-not-ignored - so
+    __pycache__ and node_modules never count. Hashing contents rather than
+    recording HEAD is the point: an install built from a dirty tree that is
+    later reverted has the same HEAD but different bytes, and HEAD alone never
+    noticed. None when git cannot list the tree - the caller rebuilds.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+         "--", *_INSTALL_PATHS],
+        cwd=str(REPO_DIR), capture_output=True, timeout=_GIT_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if listed.returncode != 0:
+        return None
+    names = sorted({name for name in listed.stdout.decode().split("\0") if name})
+    digest = hashlib.sha256()
+    for name in names:
+        path = REPO_DIR / name
+        # A tracked file deleted in the working tree is still in the index.
+        content = path.read_bytes() if path.is_file() else _MISSING_FILE_MARKER
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(content).digest())
+    return digest.hexdigest()
+
+
+def _safe_install_tree_digest() -> str | None:
+    """_install_tree_digest, with no git (or a hung one) read as 'unknown'."""
+    try:
+        return _install_tree_digest()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _record_install_tree(tree: str | None) -> None:
+    """Remember the digest the runtime was just built from (see install_is_current)."""
+    if tree is None:
+        return
+    try:
+        from memory_mcp.db.registry import set_setting
+
+        set_setting(INSTALL_TREE_KEY, tree)
+    except Exception as e:  # noqa: BLE001 - unrecorded only means the next update rebuilds
+        print(f"    Warning: install tree not recorded ({e}); the next update rebuilds.")
 
 
 def install_is_current() -> bool:
     """True when the installed runtime already matches this source tree.
 
-    Compares the recorded install:commit to HEAD, plus a dirty check over the
-    built paths. A daemon reload drops nothing any more (the MCP transport is
-    stateless since v0.18.0) but it is still a restart - and a rebuild that
-    would produce the same bytes is a restart for nothing, fired on every Stop
-    hook turn whose only change was a snapshot export.
+    Compares the digest recorded at the last runtime build against the current
+    working-tree contents of the built paths. A daemon reload drops nothing any
+    more (the MCP transport is stateless since v0.18.0) but it is still a
+    restart - and a rebuild that would produce the same bytes is a restart for
+    nothing, fired on every Stop hook turn whose only change was a snapshot
+    export.
     """
     try:
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR),
-            capture_output=True, text=True, timeout=10,
-        )
-        if head.returncode != 0:
-            return False
         from memory_mcp.db.registry import get_setting
 
-        if get_setting("install:commit") != head.stdout.strip():
+        recorded = get_setting(INSTALL_TREE_KEY)
+        if not recorded:
             return False
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain", "--", *_INSTALL_PATHS],
-            cwd=str(REPO_DIR), capture_output=True, text=True, timeout=10,
-        )
-        return dirty.returncode == 0 and not dirty.stdout.strip()
+        return _install_tree_digest() == recorded
     except Exception:  # noqa: BLE001 - unsure means rebuild, the safe direction
         return False
 

@@ -6,11 +6,12 @@ they are not a MemoryCategory, so they never reach the git-committed
 """
 
 import logging
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from memory_mcp.db.connection import connect
+from memory_mcp.db.connection import connect, is_database_open, project_database_path
 from memory_mcp.models import (
     PendingAttachment, Task, TaskAttachment, TaskComment, TaskFilter, TaskTimeEntry,
 )
@@ -1411,6 +1412,21 @@ def _stamp_matched_time(conn, matched: Sequence[RemoteTimeMatch], now: datetime)
     ])
 
 
+# The last outbox depth read per project, with the file it was read from, for
+# the minute sweep. An entry is dropped by every write to that outbox, so a
+# value here is one nothing in this process has changed since it was read; the
+# path makes a project that moved to another file (portable ops) read afresh.
+# Module-level, not per instance: the writes and the sweep do not share one
+# repository object.
+_known_depths: dict[str, tuple[str, int]] = {}
+_known_depths_lock = threading.Lock()
+
+
+def _forget_depth(project: str) -> None:
+    with _known_depths_lock:
+        _known_depths.pop(project, None)
+
+
 class OutboxRepository:
     """The bridge's durable half: what changed locally and has not been mirrored.
 
@@ -1438,6 +1454,7 @@ class OutboxRepository:
                 )
         except Exception:
             return ""
+        _forget_depth(project)
         return row_id
 
     def pending(self, project: str, limit: int = 200) -> list[dict]:
@@ -1472,6 +1489,7 @@ class OutboxRepository:
         self._write_row(
             project, row_id, "DELETE FROM task_outbox WHERE id = ? RETURNING id", [row_id],
         )
+        _forget_depth(project)
 
     def fail(self, project: str, row_id: str, error: str, *, count: bool = True) -> bool:
         """Mirroring failed. Returns True if the row was given up on.
@@ -1499,6 +1517,7 @@ class OutboxRepository:
             self._write_row(
                 project, row_id, "DELETE FROM task_outbox WHERE id = ? RETURNING id", [row_id],
             )
+            _forget_depth(project)
             return True
         return False
 
@@ -1567,10 +1586,32 @@ class OutboxRepository:
 
     def depth(self, project: str) -> int:
         try:
+            db_path = project_database_path(project)
             with connect(project) as conn:
-                return conn.execute("SELECT count(*) FROM task_outbox").fetchone()[0]
+                depth = conn.execute("SELECT count(*) FROM task_outbox").fetchone()[0]
         except Exception:
             return 0
+        with _known_depths_lock:
+            _known_depths[project] = (str(db_path), depth)
+        return depth
+
+    def sweep_depth(self, project: str) -> int:
+        """`depth` for the minute sweep: never reopens a closed handle to re-read
+        a count nothing has changed.
+
+        The sweep visits every linked project; reading each one opened more files
+        than the idle LRU keeps, so every minute it closed (CHECKPOINT) and
+        reopened (connect, LOAD vss, CHECKPOINT) the overflow under the global
+        handle lock. A closed file cannot be written by this process without
+        opening it, and every outbox write here drops the remembered value, so a
+        remembered depth for a closed file is still the true one.
+        """
+        db_path = project_database_path(project)
+        with _known_depths_lock:
+            known = _known_depths.get(project)
+        if known is None or known[0] != str(db_path) or is_database_open(db_path):
+            return self.depth(project)
+        return known[1]
 
     def unmirrored_comments(self, project: str, task_id: str) -> list[dict]:
         """Comments for a task that have not been sent yet, oldest first."""
@@ -1631,6 +1672,7 @@ class OutboxRepository:
             rows = conn.execute(
                 QUEUE_UNSENT_TIME_SQL, [TIME_OP, TIME_OP, UNSENT_TIME_TASK_LIMIT],
             ).fetchall()
+        _forget_depth(project)
         return tuple(row[0] for row in rows)
 
     def mark_time_mirrored(self, project: str, entry_id: str) -> None:

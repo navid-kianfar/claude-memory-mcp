@@ -211,7 +211,7 @@ class Container:
             return nudged
         for slug in slugs:
             try:
-                if self.outbox_repo.depth(slug) > 0:
+                if self.outbox_repo.sweep_depth(slug) > 0:
                     self._mirror_soon(slug)
                     nudged.append(slug)
             except Exception:  # noqa: BLE001 - one bad project must not stop the sweep

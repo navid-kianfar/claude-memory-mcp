@@ -1362,7 +1362,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "duckdb", specifier = ">=1.1.0" },
+    { name = "duckdb", specifier = ">=1.5.6" },
     { name = "fastembed", specifier = ">=0.9.1" },
     { name = "fastmcp", specifier = ">=2.0" },
     { name = "httpx", specifier = ">=0.27" },

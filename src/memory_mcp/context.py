@@ -10,19 +10,19 @@ mechanism. Now a project-scoped call without an explicit project FAILS with a
 message that says what to pass; hooks and the CLI derive the project from the
 working directory they already carry.
 
-What remains keyed on the MCP session id is the MEMORY-session mapping
-(`remember_memory_session`) - which memory session owns this connection's
-clocks and claims. That is per-connection bookkeeping, not project state, and
-cannot leak a write into the wrong project.
+Nothing is keyed on the MCP session id either. The transport is stateless
+HTTP, so every request arrives under a freshly minted MCP session id: a map
+from it to the memory session never read back what it stored, and was removed.
+Clock and claim calls name their memory session explicitly (`session_id=`).
 """
 
 import contextlib
 import contextvars
 import json
-import threading
-from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from memory_mcp.config import settings
 from memory_mcp.constants import (
@@ -32,8 +32,8 @@ from memory_mcp.constants import (
     SNAPSHOT_DIRNAME,
 )
 
-_lock = threading.Lock()
-
+if TYPE_CHECKING:
+    from memory_mcp.models import ProjectInfo
 
 def current_session_id() -> str | None:
     """The calling MCP session, or None when there is no MCP request in flight.
@@ -47,52 +47,6 @@ def current_session_id() -> str | None:
         return getattr(get_context(), "session_id", None) or None
     except Exception:  # noqa: BLE001 - no context, or a FastMCP that lacks it
         return None
-
-
-# ---------- which MEMORY session an MCP session is running ----------
-#
-# memory_session_start hands back a session id that memory_session_end and
-# memory_task_claim_next take explicitly. The clock and the claim need it too -
-# a task started by a session must be handed back and stopped by that session's
-# end - and asking the agent to thread it through every memory_task_start is
-# one more thing to forget. So the MCP session remembers it.
-_memory_sessions: "OrderedDict[str, str]" = OrderedDict()
-#: Sessions are ephemeral and we are never told when one ends, so the map is
-#: bounded rather than left to grow for the daemon's lifetime. (This constant
-#: belonged to the old session-project map and was deleted with it in v0.17.0;
-#: remember_memory_session still bounds itself with it - the NameError the
-#: tg-portal session hit was exactly that dangling reference.)
-_MEMORY_SESSION_LIMIT = 256
-
-
-def remember_memory_session(memory_session_id: str) -> None:
-    session_id = current_session_id()
-    if not session_id or not memory_session_id:
-        return
-    with _lock:
-        _memory_sessions[session_id] = memory_session_id
-        _memory_sessions.move_to_end(session_id)
-        while len(_memory_sessions) > _MEMORY_SESSION_LIMIT:
-            _memory_sessions.popitem(last=False)
-
-
-def current_memory_session() -> str | None:
-    """The memory session this MCP session started, or None."""
-    session_id = current_session_id()
-    if not session_id:
-        return None
-    with _lock:
-        return _memory_sessions.get(session_id)
-
-
-def forget_memory_session(memory_session_id: str | None = None) -> None:
-    """Drop the mapping when a memory session ends."""
-    session_id = current_session_id()
-    with _lock:
-        if session_id and (
-            memory_session_id is None or _memory_sessions.get(session_id) == memory_session_id
-        ):
-            _memory_sessions.pop(session_id, None)
 
 
 @dataclass(frozen=True)
@@ -250,75 +204,83 @@ def _slug_from_uid(path: Path) -> str | None:
 def detect_project_from_cwd(cwd: str | None) -> str | None:
     """Detect a registered project purely from a directory, ignoring active state.
 
-    1. Walk up from cwd looking for a committed .agent-memory/manifest.json
-       (or the legacy .claude-memory one) and match on its project_id - the
-       only identity that survives a move/rename
-    2. Walk up looking for a portable .memory-mcp.duckdb
-    3. Match the bound path, then the directory name, to a registered project
-    Returns None when the directory is not a memory project.
+    The same evidence `detect_project_strictly` accepts - a committed manifest
+    uid, a registered portable DB, a bound project_path at or above cwd - and
+    nothing looser. The old fallbacks (cwd a SUBSTRING of some db_path, a folder
+    named like a slug) handed a session opened in the home folder whichever
+    project lived under it: its rules, its brief, its board. Returns None when
+    the directory is not a memory project.
     """
     if not cwd:
         return None
+    return detect_project_strictly(cwd)
 
+
+#: How many directories a cwd walk visits: the cwd and its nearest parents.
+_WALK_UP_LIMIT = 10
+
+
+def _walk_up(path: Path) -> tuple[Path, ...]:
+    """`path` and its parents, nearest first, at most _WALK_UP_LIMIT of them."""
+    return (path, *path.parents)[:_WALK_UP_LIMIT]
+
+
+def detect_project_strictly(cwd: str) -> str | None:
+    """A project only on evidence that names it, never on a resemblance.
+
+    For memory_session_start, whose answer scopes every write of the session.
+    Accepts, nearest folder first:
+    1. a committed manifest whose project_id is a registered uid;
+    2. a portable .memory-mcp.duckdb that is the registered db_path of a project;
+    3. a registered project_path equal to the cwd or an ancestor of it.
+    `detect_project_from_cwd`'s loose fallbacks - a cwd that is a SUBSTRING of
+    some db_path, a folder named like a slug - are left out: from a home folder
+    the substring match named whichever project lived under it.
+    """
     cwd_path = Path(cwd).resolve()
-
-    check = cwd_path
-    for _ in range(10):
-        slug = _slug_from_uid(check)
+    folders = _walk_up(cwd_path)
+    for folder in folders:
+        slug = _slug_from_uid(folder)
         if slug:
             return slug
-        if check.parent == check:
-            break
-        check = check.parent
 
-    check = cwd_path
-    for _ in range(10):
-        portable_db = check / PORTABLE_DB_NAME
-        if portable_db.exists():
-            slug = _slug_from_path(check)
-            if slug:
-                return slug
-        if check.parent == check:
-            break
-        check = check.parent
-
-    return _slug_from_path(cwd_path)
+    projects = _real_projects()
+    for folder in folders:
+        portable_db = folder / PORTABLE_DB_NAME
+        if not portable_db.exists():
+            continue
+        slug = _slug_owning_file(projects, portable_db.resolve())
+        if slug:
+            return slug
+    return _slug_bound_to(projects, cwd_path)
 
 
-def _slug_from_path(path: Path) -> str | None:
-    """Find a registered project matching this directory.
-
-    Priority: an explicit project_path (the folder a project is bound to,
-    exact or an ancestor of cwd) wins; then a portable DB inside the folder;
-    then a folder name that equals the slug.
-    """
+def _real_projects() -> tuple["ProjectInfo", ...]:
+    """Every registered project except the reserved org-wide one; () if unreadable."""
     from memory_mcp.models import is_global_project
     from memory_mcp.repositories import ProjectRepository
-    from memory_mcp.utils.text import slugify
-
-    dir_slug = slugify(path.name)
-    if is_global_project(dir_slug):
-        return None  # the reserved org-wide project is never a real folder
 
     try:
-        projects = [
-            p for p in ProjectRepository().list_all()
-            if not is_global_project(p.slug)
-        ]
-        for p in projects:
-            if p.project_path:
-                bound = Path(p.project_path).resolve()
-                if path == bound or bound in path.parents:
-                    return p.slug
-        for p in projects:
-            if p.db_path and path.as_posix() in p.db_path:
-                return p.slug
-        for p in projects:
-            if p.slug == dir_slug:
-                return p.slug
-    except Exception:
-        pass
+        projects = ProjectRepository().list_all()
+    except Exception:  # noqa: BLE001 - no registry means no project, not a crash
+        return ()
+    return tuple(p for p in projects if not is_global_project(p.slug))
 
+
+def _slug_owning_file(projects: Sequence["ProjectInfo"], db_file: Path) -> str | None:
+    for p in projects:
+        if p.db_path and Path(p.db_path).resolve() == db_file:
+            return p.slug
+    return None
+
+
+def _slug_bound_to(projects: Sequence["ProjectInfo"], path: Path) -> str | None:
+    for p in projects:
+        if not p.project_path:
+            continue
+        bound = Path(p.project_path).resolve()
+        if path == bound or bound in path.parents:
+            return p.slug
     return None
 
 

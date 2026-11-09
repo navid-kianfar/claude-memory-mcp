@@ -151,6 +151,181 @@ class TestTheWrapper:
         assert result.returncode == 0
 
 
+class TestMemorySubtables:
+    """Our entry renders `[mcp_servers.memory.http_headers]` in remote mode; the
+    span must own it, or a re-run strands or duplicates it."""
+
+    REMOTE_URL = "https://mem.example.com"
+
+    def test_remote_to_local_drops_the_stale_bearer_header(self, codex_home):
+        path = codex_home / "config.toml"
+        path.write_text(USER_CONFIG)
+        CodexHarness().configure_mcp("unused", self.REMOTE_URL, "secret-token")
+
+        report = CodexHarness().configure_mcp("http://127.0.0.1:8765/mcp")
+
+        text = path.read_text()
+        parsed = tomllib.loads(text)
+        assert parsed["mcp_servers"]["memory"] == {"url": "http://127.0.0.1:8765/mcp"}
+        assert "secret-token" not in text
+        assert "context7" in parsed["mcp_servers"], "the next server survives"
+        assert report.actions and not any("validation failed" in a for a in report.actions)
+
+    def test_token_rotation_replaces_the_header_table(self, codex_home):
+        path = codex_home / "config.toml"
+        path.write_text(USER_CONFIG)
+        CodexHarness().configure_mcp("unused", self.REMOTE_URL, "old-token")
+
+        CodexHarness().configure_mcp("unused", self.REMOTE_URL, "new-token")
+
+        text = path.read_text()
+        parsed = tomllib.loads(text)
+        headers = parsed["mcp_servers"]["memory"]["http_headers"]
+        assert headers == {"Authorization": "Bearer new-token"}
+        assert text.count("[mcp_servers.memory.http_headers]") == 1
+
+    def test_a_following_unrelated_table_is_kept(self, codex_home):
+        path = codex_home / "config.toml"
+        path.write_text(
+            '[mcp_servers.memory]\nurl = "http://old/mcp"\n'
+            '[mcp_servers.memory.http_headers]\nAuthorization = "Bearer x"\n\n'
+            '[mcp_servers.memoryish]\nurl = "http://keep/mcp"\n'
+        )
+
+        CodexHarness().configure_mcp("http://127.0.0.1:8765/mcp")
+
+        parsed = tomllib.loads(path.read_text())
+        assert parsed["mcp_servers"]["memoryish"]["url"] == "http://keep/mcp"
+        assert "http_headers" not in parsed["mcp_servers"]["memory"]
+
+
+class TestNotifyChaining:
+    def test_an_existing_user_notify_is_chained_not_replaced(self, codex_home):
+        path = codex_home / "config.toml"
+        path.write_text('notify = ["notify-send", "Codex"]\n\n' + USER_CONFIG)
+
+        report = CodexHarness().install_hooks()
+
+        notify = tomllib.loads(path.read_text())["notify"]
+        assert notify[0].endswith("codex-notify.sh")
+        assert notify[1:] == ["memory-mcp", "notify-send", "Codex"]
+        assert any("notify-send" in a for a in report.actions), "the user is told"
+
+    def test_a_multiline_user_notify_is_chained(self, codex_home):
+        path = codex_home / "config.toml"
+        path.write_text(
+            'notify = [\n  "python3",  # the runner\n  "/x/notify.py",\n]\n\n' + USER_CONFIG
+        )
+
+        CodexHarness().install_hooks()
+
+        notify = tomllib.loads(path.read_text())["notify"]
+        assert notify[1:] == ["memory-mcp", "python3", "/x/notify.py"]
+
+    def test_rerun_keeps_the_chain_without_nesting_ourselves(self, codex_home):
+        path = codex_home / "config.toml"
+        path.write_text('notify = ["notify-send", "Codex"]\n')
+        CodexHarness().install_hooks()
+        first = tomllib.loads(path.read_text())["notify"]
+
+        CodexHarness().install_hooks()
+
+        assert tomllib.loads(path.read_text())["notify"] == first
+
+    def test_a_non_command_notify_is_a_conflict_left_alone(self, codex_home):
+        path = codex_home / "config.toml"
+        path.write_text('notify = "not-a-list"\n')
+        before = path.read_text()
+
+        report = CodexHarness().install_hooks()
+
+        assert path.read_text() == before
+        assert any("notify" in c for c in report.conflicts)
+
+
+@pytest.fixture
+def fake_home(tmp_path):
+    """$HOME whose session-end.sh records the stdin it was handed."""
+    home = tmp_path / "home"
+    hooks = home / ".claude-memory-mcp" / "hooks"
+    hooks.mkdir(parents=True)
+    record = tmp_path / "session-end.in"
+    (hooks / "session-end.sh").write_text(f'#!/bin/bash\ncat > "{record}"\nexit 0\n')
+    return home, record
+
+
+def _run_wrapper(home, args, stdin=None, cwd=None):
+    import os
+
+    script = cx.Path(cx.__file__).parent / "codex" / cx.NOTIFY_WRAPPER_NAME
+    env = {**os.environ, "HOME": str(home)}
+    return subprocess.run(
+        ["bash", str(script), *args], input=stdin, capture_output=True, text=True,
+        timeout=30, env=env, cwd=cwd, check=False,
+    )
+
+
+class TestWrapperPayload:
+    def test_payload_is_read_from_the_last_argument(self, fake_home, tmp_path):
+        home, record = fake_home
+        project = tmp_path / "proj"
+        project.mkdir()
+        payload = json.dumps({"type": "agent-turn-complete", "cwd": str(project)})
+
+        result = _run_wrapper(home, ["memory-mcp", payload], stdin="")
+
+        assert result.returncode == 0
+        assert json.loads(record.read_text()) == {"cwd": str(project)}
+
+    def test_stdin_is_the_fallback(self, fake_home, tmp_path):
+        home, record = fake_home
+        project = tmp_path / "proj"
+        project.mkdir()
+
+        result = _run_wrapper(home, ["memory-mcp"], stdin=json.dumps({"cwd": str(project)}))
+
+        assert result.returncode == 0
+        assert json.loads(record.read_text()) == {"cwd": str(project)}
+
+    def test_pwd_is_the_last_resort(self, fake_home, tmp_path):
+        home, record = fake_home
+        here = tmp_path / "here"
+        here.mkdir()
+
+        result = _run_wrapper(home, ["memory-mcp"], stdin="", cwd=str(here))
+
+        assert result.returncode == 0
+        assert json.loads(record.read_text())["cwd"] == str(here.resolve())
+
+    def test_chained_command_gets_the_payload_as_its_last_argument(self, fake_home, tmp_path):
+        home, record = fake_home
+        seen = tmp_path / "chained.out"
+        chained = tmp_path / "user-notify.sh"
+        chained.write_text(f'#!/bin/bash\nprintf "%s\\n" "$@" > "{seen}"\n')
+        chained.chmod(0o755)
+        payload = json.dumps({"cwd": str(tmp_path)})
+
+        result = _run_wrapper(home, ["memory-mcp", str(chained), "--flag", payload], stdin="")
+
+        assert result.returncode == 0
+        assert seen.read_text().splitlines() == ["--flag", payload]
+        assert record.exists(), "our session-end still ran"
+
+    def test_a_failing_chained_command_still_exits_zero(self, fake_home, tmp_path):
+        home, record = fake_home
+        payload = json.dumps({"cwd": str(tmp_path)})
+
+        result = _run_wrapper(home, ["memory-mcp", "false", payload], stdin="")
+
+        assert result.returncode == 0
+        assert record.exists()
+
+
+class TestAgentsPointer:
+    def test_session_end_is_shown_with_its_required_project(self):
+        assert "memory_session_end(session_id, summary, project=<slug>)" in cx.AGENTS_POINTER
+
+
 class TestHonestLimits:
     def test_agents_raise_not_supported(self):
         from memory_mcp.harnesses.base import HarnessNotSupported

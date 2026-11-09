@@ -151,6 +151,18 @@ class TestAgents:
         backend = (dest / "backend.md").read_text()
         assert "memory_session_start" in backend
 
+    def test_no_agent_is_left_skill_only(self, harness, zcode_home):
+        """ZCode turns `skills:` without `tools:` into a Skill-only agent (no
+        Read/Grep/Bash) - the reviewer failed exactly this way."""
+        from memory_mcp.harnesses.claude import parse_agent
+
+        harness.install_agents()
+        for p in (zcode_home / "agents").glob("*.md"):
+            front, _ = parse_agent(p.read_text())
+            assert "skills" not in front or "tools" in front, p.name
+        reviewer, _ = parse_agent((zcode_home / "agents" / "reviewer.md").read_text())
+        assert "Edit" in reviewer["disallowedTools"], "read-only guard kept"
+
     def test_retirement_removes_only_our_own(self, harness, zcode_home):
         dest = zcode_home / "agents"
         harness.install_agents()

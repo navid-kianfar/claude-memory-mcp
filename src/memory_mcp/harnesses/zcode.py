@@ -35,8 +35,10 @@ from memory_mcp.harnesses.claude import (
     HOOK_EVENTS,
     HOOK_MATCHERS,
     HOOKS_DIR,
+    _render_agent,
     installable_agent_text,
     is_abstract_agent,
+    parse_agent,
 )
 
 #: ZCode has no SubagentStop event; the stop ledger simply has no source here.
@@ -53,6 +55,23 @@ def zcode_config_path() -> Path:
 
 def zcode_agents_dir() -> Path:
     return zcode_dir() / "agents"
+
+
+def zcode_agent_text(text: str) -> str:
+    """A composed Claude definition, adjusted for ZCode's tool resolution.
+
+    ZCode computes a subagent's tools as `tools ?? []` (empty = every tool),
+    then appends `Skill` when `skills:` is set. A definition with `skills:` but
+    no `tools:` therefore becomes a Skill-ONLY agent - no Read, Grep or Bash
+    (the reviewer could not open a file). The skills we name are Claude Code
+    built-ins anyway, so `skills:` is dropped here; Claude keeps it.
+    """
+    parsed = parse_agent(text)
+    if parsed is None or "skills" not in parsed[0]:
+        return text
+    front, body = parsed
+    front.pop("skills")
+    return _render_agent(front, body)
 
 
 class ZCodeHarness:
@@ -236,7 +255,7 @@ class ZCodeHarness:
                     removed += 1
 
         for src in sources:
-            (dest / src.name).write_text(installable_agent_text(src, by_stem))
+            (dest / src.name).write_text(zcode_agent_text(installable_agent_text(src, by_stem)))
 
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text(json.dumps(installed, indent=2))

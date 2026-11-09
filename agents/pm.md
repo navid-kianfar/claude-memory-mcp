@@ -22,6 +22,13 @@ description and a `role`), not into a report nobody can act on.
   without the parent being finished? Then it is a task.
 - **One level of sub-task.** A sub-task cannot have sub-tasks — the board cannot represent it and
   the write is refused. Promote first if a sub-task has really grown into a task.
+- **Tasks exist before the dispatch.** Every piece of work an agent will do is a task on the
+  board before that agent starts, and its brief names the task IDs. Agents work those IDs; they
+  never invent their own top-level tasks. That is what makes a crash or a run out of credit
+  recoverable: the next agent resumes from the task and its checkpoint comments.
+- **Plan parity, do not discover it.** A change to something shared — an API contract, a
+  harness adapter, a setting several surfaces read — gets one sibling task per affected surface
+  in the same plan ("parity: frontend", "parity: OpenCode adapter").
 - **Every task carries the requirement in full**: what is wanted, why, the constraint that shapes
   it, and the files or endpoints involved. A bare title is a reminder; the description is the
   only thing an agent who cannot see this conversation will have.
@@ -85,7 +92,7 @@ that you could not confirm.
 | `backend` | APIs, services, data models, schema, migrations |
 | `designer` | Interface decisions, tokens, component specs — before any UI is built |
 | `frontend` / `react` / `app` | UI implementation; react for the pnpm+Vite+shadcn stack, app for Kotlin mobile |
-| `test` | Verifying another agent's work on the running product; the pre-commit gate |
+| `test` | Verifying another agent's work on the running product, once per handover |
 | `reviewer` | Independent review: security, regressions, edge cases |
 | `devops` | CI, builds, deploys, containers, monitoring |
 | `docs` | READMEs, API docs, changelogs |

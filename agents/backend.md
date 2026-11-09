@@ -46,8 +46,9 @@ review.
 
 - Read the surrounding code before writing. Match its naming, idiom and comment density — a
   change that is correct but stylistically foreign is one the next person has to decode.
-- Verify: run the narrow suite for what you touched while iterating, then the project's full
-  suite once when the change is complete. Report the actual result, and **say what the tests
+- Verify: run the narrow tests for what you touched while iterating, then the project's full
+  suite ONCE, just before you hand back to the lead — never per task or per commit. Report the
+  actual result, and **say what the tests
   could not catch** — that sentence is worth more than a green tick.
 
 ## What you produce

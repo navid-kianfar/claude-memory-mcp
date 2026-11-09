@@ -159,12 +159,15 @@ class ClaudeHarness:
         self, remote_url: str | None = None, token: str | None = None
     ) -> ChangeReport:
         report = ChangeReport(self.name)
-        env_prefix = ""
+        # MEMORY_MCP_HARNESS=claude tells the shared hook scripts they may add
+        # a top-level `systemMessage` (the person-facing update banner): Claude
+        # Code accepts it, ZCode's strict schema rejects any extra key.
+        parts = ["env", "MEMORY_MCP_HARNESS=claude"]
         if remote_url:
-            parts = ["env", f"MEMORY_MCP_URL={shlex.quote(remote_url.rstrip('/'))}"]
+            parts.append(f"MEMORY_MCP_URL={shlex.quote(remote_url.rstrip('/'))}")
             if token:
                 parts.append(f"MEMORY_MCP_TOKEN={shlex.quote(token)}")
-            env_prefix = " ".join(parts) + " "
+        env_prefix = " ".join(parts) + " "
         path = claude_settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         settings_obj: dict = {}
@@ -201,9 +204,7 @@ class ClaudeHarness:
                 dst = hooks_dest / script
                 shutil.copy2(src, dst)
                 os.chmod(dst, 0o755)
-                command = (
-                    f"{env_prefix}{shlex.quote(str(dst))}" if env_prefix else str(dst)
-                )
+                command = f"{env_prefix}{shlex.quote(str(dst))}"
                 if _add_hook(
                     settings_obj, event, command, HOOK_MATCHERS.get(script),
                 ):

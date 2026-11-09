@@ -339,7 +339,9 @@ async def _hook_rules(request):
         # edit ledgers and escalate by name. Both reads are wrapped inside
         # enforcement, so a broken ledger costs the escalation, never the rules.
         if mode == "intro":
-            return format_intro(slug, cwd=cwd or None)
+            return format_intro(
+                slug, cwd=cwd or None, session_id=identity.session_id or None,
+            )
         if mode == "end":
             return format_session_end(slug)
         return rules_text_for_project(
@@ -654,6 +656,29 @@ def _hook_update(request):
     return PlainTextResponse(f"{answer} {repo}".strip())
 
 
+async def _hook_update_banner(request):
+    """The update notice for the PERSON, as plain text (empty most of the time).
+
+    The Claude Code hooks put it in `systemMessage`, which the client shows to
+    the person and never to the model - so the notice cannot be left unsaid.
+    Not project-scoped: an update concerns every session on the machine.
+    """
+    if not _hook_authorized(request):
+        return PlainTextResponse("")
+    identity = identity_from_query(request)
+
+    def _run() -> str:
+        from memory_mcp.enforcement import update_banner
+
+        return update_banner(identity.session_id or None)
+
+    try:
+        text = await to_thread.run_sync(_run)
+    except Exception:  # noqa: BLE001 - a hook must never see a 500
+        text = ""
+    return PlainTextResponse(text)
+
+
 def _hook_update_done(request):
     """The hook says it finished; clear the approval so it does not loop."""
     import contextlib
@@ -676,4 +701,5 @@ HOOK_ROUTES = [
     Route("/api/hook/attachments", _hook_attachments, methods=["POST"]),
     Route("/api/hook/update", _hook_update, methods=["GET"]),
     Route("/api/hook/update-done", _hook_update_done, methods=["POST"]),
+    Route("/api/hook/update-banner", _hook_update_banner, methods=["GET"]),
 ]

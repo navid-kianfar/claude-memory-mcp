@@ -396,11 +396,16 @@ def _daemon(answers: dict[str, str]):
         thread.join(timeout=5)
 
 
-def _run(script: Path, hook_input: dict, port: int) -> subprocess.CompletedProcess:
+def _run(
+    script: Path, hook_input: dict, port: int, harness: str | None = None,
+) -> subprocess.CompletedProcess:
     env = {**os.environ, "MEMORY_MCP_DAEMON_PORT": str(port),
            "MEMORY_MCP_BIN": "/nonexistent/memory-mcp"}
     env.pop("MEMORY_MCP_URL", None)
     env.pop("MEMORY_MCP_TOKEN", None)
+    env.pop("MEMORY_MCP_HARNESS", None)
+    if harness:
+        env["MEMORY_MCP_HARNESS"] = harness
     return subprocess.run(["bash", str(script)], input=json.dumps(hook_input), text=True,
                           capture_output=True, timeout=30, env=env)
 
@@ -501,6 +506,44 @@ class TestSessionStartScript:
         assert "daemon is not answering" in (
             json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         )
+
+
+@pytest.mark.skipif(not INJECT.exists(), reason="hook script not present")
+class TestUpdateBanner:
+    """The person-facing update banner rides `systemMessage` - on Claude only."""
+
+    @pytest.mark.parametrize("script,event", [
+        (INJECT, "UserPromptSubmit"), (SESSION_START, "SessionStart"),
+    ])
+    def test_claude_gets_the_banner_beside_the_context(self, script, event):
+        answers = {"/api/hook/rules": "CTX",
+                   "/api/hook/update-banner": "Memory MCP update available"}
+        with _daemon(answers) as (port, _):
+            result = _run(script, HOOK_INPUT, port, harness="claude")
+
+        out = json.loads(result.stdout)
+        assert out["systemMessage"] == "Memory MCP update available"
+        assert out["hookSpecificOutput"]["hookEventName"] == event
+        assert out["hookSpecificOutput"]["additionalContext"] == "CTX"
+
+    @pytest.mark.parametrize("script", [INJECT, SESSION_START])
+    def test_other_harnesses_never_ask_and_never_get_the_extra_key(self, script):
+        """ZCode rejects any extra top-level key and drops the whole injection."""
+        answers = {"/api/hook/rules": "CTX",
+                   "/api/hook/update-banner": "Memory MCP update available"}
+        with _daemon(answers) as (port, seen):
+            result = _run(script, HOOK_INPUT, port)
+
+        assert set(json.loads(result.stdout)) == {"hookSpecificOutput"}
+        assert "/api/hook/update-banner" not in [s["path"] for s in seen]
+
+    def test_the_banner_alone_is_still_shown(self):
+        """No project here (empty rules) - the update concerns the machine."""
+        with _daemon({"/api/hook/update-banner": "BANNER"}) as (port, _):
+            result = _run(INJECT, {**HOOK_INPUT, "transcript_path": ""}, port,
+                          harness="claude")
+
+        assert json.loads(result.stdout) == {"systemMessage": "BANNER"}
 
 
 @pytest.mark.skipif(not SESSION_END.exists(), reason="hook script not present")

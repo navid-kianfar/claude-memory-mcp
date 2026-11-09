@@ -179,10 +179,19 @@ class TestInstalling:
 
         group = _group_for(settings_file, "PreToolUse", "record-dispatch.sh")
         command = group["hooks"][0]["command"]
-        assert command.startswith("env MEMORY_MCP_URL=https://memory.example.com")
+        assert command.startswith("env MEMORY_MCP_HARNESS=claude ")
+        assert "MEMORY_MCP_URL=https://memory.example.com" in command
         assert "MEMORY_MCP_TOKEN=tok" in command
         # And the matcher still applies, which is the bit a prefix could break.
         assert group["matcher"] == "Agent|Task"
+
+    def test_every_command_marks_the_install_as_claude(self, settings_file):
+        """The hooks may add the person-facing `systemMessage` only on Claude
+        Code; the marker in the command is how the shared scripts know."""
+        setup_mod.setup_hooks()
+
+        group = _group_for(settings_file, "UserPromptSubmit", "inject-rules.sh")
+        assert group["hooks"][0]["command"].startswith("env MEMORY_MCP_HARNESS=claude ")
 
     def test_invalid_settings_json_is_left_untouched(self, settings_file):
         """Better to install no hooks than to overwrite somebody's config."""

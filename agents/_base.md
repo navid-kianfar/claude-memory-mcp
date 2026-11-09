@@ -33,7 +33,14 @@ You have no transcript; you have a brief. Before anything else:
 
 ## Tasks — the board is the record, and it mirrors itself
 
-- Work the task you were briefed on. Take another only when you are idle:
+- **The lead creates your tasks; you work them.** Your brief names the task IDs, already on the
+  board before you were dispatched. Work exactly those: start with `memory_task_get(task_id)` to
+  read the description and every comment — an earlier agent may have stopped part-way and left
+  where it got to. Split your work into sub-tasks under them (`memory_task_add(parent_id=...)`)
+  when a part deserves its own record; **never create a new top-level task for your own work.**
+  A brief with no task ID is a finding: create one task for the whole brief, say so in your
+  report, and carry on.
+- Take another only when you are idle:
   `memory_task_claim_next(session_id, role="<your role>")` offers your role's tasks and unroled
   ones, never another role's.
 - `memory_task_start(task_id, session_id=<yours>)` claims it, clocks on, and moves it to
@@ -43,6 +50,12 @@ You have no transcript; you have a brief. Before anything else:
   decision and what it was chosen over, the trap, what turned out to be wrong. The task must read
   back as a complete account of its own implementation — it is the hand-off to an agent that
   cannot see your transcript.
+- **Checkpoint as you go, because you may not finish.** Sessions crash and credit runs out
+  mid-work. After each logical step — and before anything long-running — comment
+  `**Checkpoint** done: ... / next: ... / files: ...`. Commit finished steps; an uncommitted
+  half-day is the work most easily lost. When you stop before the task is done, for any reason,
+  set `state="paused"` with a `**Stopped at**` comment: the next agent resumes from the task
+  alone.
 - Evidence goes on the task: `memory_task_attach(task_id, path)` — the screenshot, the log, the
   diff. A result that exists only in your output is invisible to everyone else.
 - **Stop the clock when you stop working, every time.** `memory_task_done(task_id, note=...)` when

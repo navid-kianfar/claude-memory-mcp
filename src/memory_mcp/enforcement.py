@@ -250,6 +250,16 @@ _DIVISION_OF_WORK = (
     "you do not write it yourself. The exception is genuinely small - a single-file "
     "fix, a config value, a typo. Answering questions, reading code and git "
     "operations are always yours.",
+    "  - TASKS FIRST, THEN THE DISPATCH. Before you brief an agent, YOU create its "
+    "tasks - memory_task_plan or memory_task_add, one per deliverable with a role, "
+    "so they are on the board too - and the brief names their task IDs. The agent "
+    "works those IDs and never invents its own top-level task, so a crash or an "
+    "empty credit balance leaves the work recorded and resumable: re-dispatch "
+    "with 'resume task <id>, read its comments'. PARITY IS PLANNED HERE: a change "
+    "to something shared (an API contract, a harness adapter, a setting several "
+    "surfaces read) gets one sibling task per affected surface now, not a gap "
+    "found in a later review. Do not dispatch a separate agent to write tasks - "
+    "you hold the context it would pay to rediscover.",
     "  - SPEND AS IF IT IS MEASURED, BECAUSE IT IS: a real dispatch costs 115k-380k "
     "tokens (measured 2026-09-13), not a rounding error. Dispatch a genuine "
     "specialism or genuinely parallel implementation. Keep integration work whose "
@@ -1031,8 +1041,32 @@ def _update_status() -> dict | None:
         return None
 
 
-def update_intro() -> str:
-    """The full notice, at session start."""
+#: A session seen by a hook within this window counts as live for the update
+#: warning: hooks fire on every prompt, so an idle hour reads as gone.
+LIVE_SESSION_WINDOW_MINUTES = 30
+#: The user-facing banner's own cadence key - separate from the model line's,
+#: so one being shown never silences the other.
+BANNER_AT_KEY = "update:last_banner_at"
+
+
+def _others_live(session_id: str | None) -> int:
+    try:
+        from memory_mcp.db.registry import live_client_session_count
+
+        return live_client_session_count(LIVE_SESSION_WINDOW_MINUTES, session_id)
+    except Exception:  # noqa: BLE001 - a notice must never break the hook
+        return 0
+
+
+def _interruption_clause(others: int) -> str:
+    if not others:
+        return "No other session is active."
+    noun = "session is" if others == 1 else "sessions are"
+    return f"{others} other {noun} active and will be interrupted by the restart."
+
+
+def update_intro(session_id: str | None = None) -> str:
+    """The full notice, at session start: the lead asks the person, once."""
     status = _update_status()
     if not status:
         return ""
@@ -1040,11 +1074,46 @@ def update_intro() -> str:
     latest = status.get("latest_version") or "?"
     behind = status.get("commits_behind")
     detail = f" ({behind} commits behind)" if behind else ""
+    others = _others_live(session_id)
     return (
         f"\n[Memory MCP] An update is available: {current} -> {latest}{detail}. "
-        "Approve it in the management UI, or say so here and it will be applied "
-        "at the END of a turn - never mid-turn, because installing reloads the "
-        "daemon and drops this MCP connection."
+        f"{_interruption_clause(others)} ASK THE PERSON once, with your question/"
+        "confirm tool where you have one (AskUserQuestion in Claude Code), before "
+        f"anything else: 'Update memory MCP {current} -> {latest}?' with 'Later' "
+        "as the first, recommended answer when other sessions are active and "
+        "'Update' as the other; say how many sessions it would interrupt. On "
+        "'Update', tell them to approve it in the management UI (Updates) - it "
+        "is applied at the END of a turn, never mid-turn, because installing "
+        "reloads the daemon and drops every MCP connection. On 'Later', do not "
+        "raise it again this session."
+    )
+
+
+def update_banner(session_id: str | None = None) -> str:
+    """One line shown to the PERSON, not the model - at most every few hours.
+
+    Carried as the hook's `systemMessage`, which only Claude Code accepts: the
+    hook scripts send it only where setup marked the install as Claude's.
+    """
+    status = _update_status()
+    if not status:
+        return ""
+    try:
+        last = float(get_setting(BANNER_AT_KEY) or 0)
+    except (TypeError, ValueError):
+        last = 0.0
+    now = time.time()
+    if now - last < NOTIFY_INTERVAL_SECONDS:
+        return ""
+    try:
+        set_setting(BANNER_AT_KEY, str(now))
+    except Exception:  # noqa: BLE001
+        pass
+    others = _others_live(session_id)
+    return (
+        f"Memory MCP update available: {status.get('current_version')} -> "
+        f"{status.get('latest_version')}. {_interruption_clause(others)} "
+        "Approve it in the memory UI (Updates) or ask Claude to apply it."
     )
 
 
@@ -1132,7 +1201,9 @@ def format_rules_block(
     return "\n".join(lines)
 
 
-def format_intro(slug: str, *, cwd: str | None = None) -> str:
+def format_intro(
+    slug: str, *, cwd: str | None = None, session_id: str | None = None,
+) -> str:
     """Session-start nudge text for a detected memory project."""
     text = (
         f"[Memory MCP] This directory is memory project '{slug}'. "
@@ -1161,7 +1232,7 @@ def format_intro(slug: str, *, cwd: str | None = None) -> str:
         )
     text += asoode_intro(slug)
     text += agent_team_intro(cwd=cwd, slug=slug)
-    text += update_intro()
+    text += update_intro(session_id)
     return text
 
 

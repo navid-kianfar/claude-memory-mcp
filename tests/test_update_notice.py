@@ -25,7 +25,8 @@ def _store(available=True, current="1.0.0", latest="2.0.0", source="github_relea
 
 @pytest.fixture(autouse=True)
 def _clean():
-    for key in (poller.STATUS_KEY, enforcement.NOTIFIED_AT_KEY, poller.ERROR_KEY):
+    for key in (poller.STATUS_KEY, enforcement.NOTIFIED_AT_KEY,
+                enforcement.BANNER_AT_KEY, poller.ERROR_KEY):
         set_setting(key, "")
     yield
 
@@ -95,3 +96,46 @@ class TestUpdateNotice:
 
         assert enforcement.update_intro() == ""
         assert enforcement.update_line() == ""
+
+
+class TestPersonFacingNotice:
+    """The banner reaches the person; the intro makes the lead ask them."""
+
+    def test_the_intro_tells_the_lead_to_ask_the_person(self):
+        _store()
+
+        text = enforcement.update_intro()
+
+        assert "ASK THE PERSON" in text and "Later" in text
+
+    def test_the_intro_counts_the_sessions_an_update_would_interrupt(self):
+        from memory_mcp.db.registry import touch_client_session
+
+        _store()
+        touch_client_session("me")
+        touch_client_session("other-a")
+        touch_client_session("other-b")
+
+        text = enforcement.update_intro("me")
+
+        assert "2 other sessions are active" in text
+
+    def test_the_banner_is_shown_once_then_rests(self):
+        _store()
+
+        first = enforcement.update_banner()
+        second = enforcement.update_banner()
+
+        assert "1.0.0" in first and "2.0.0" in first
+        assert second == ""
+
+    def test_the_banner_and_the_model_line_do_not_silence_each_other(self):
+        _store()
+
+        assert enforcement.update_line() != ""
+        assert enforcement.update_banner() != ""
+
+    def test_no_banner_without_an_update(self):
+        _store(available=False)
+
+        assert enforcement.update_banner() == ""

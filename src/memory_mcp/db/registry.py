@@ -386,6 +386,29 @@ def touch_client_session(
         pass
 
 
+def live_client_session_count(
+    window_minutes: int, exclude_session_id: str | None = None,
+) -> int:
+    """Client sessions a hook has seen within the window, minus the caller.
+
+    "Live" is approximate by design: a session is seen on every prompt, so one
+    idle for longer than the window is counted as gone. The answer warns the
+    person before an update restarts the daemon; zero on any failure, because
+    a ledger must never fail a hook.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
+    try:
+        with registry_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM client_sessions "
+                "WHERE last_seen >= ? AND session_id != ?",
+                (cutoff, exclude_session_id or ""),
+            ).fetchone()
+    except Exception:  # noqa: BLE001
+        return 0
+    return int(row[0]) if row else 0
+
+
 def client_session(session_id: str) -> dict | None:
     if not session_id:
         return None

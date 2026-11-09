@@ -4,6 +4,19 @@ extends: _base
 ---
 {{EXTENSION}}
 
+## Test cadence — narrow while working, the full suite once per handover
+
+Set by the user on 2026-11-09, after a ten-minute job took two hours because the whole stack's
+suite ran every few minutes.
+
+- **While you code, run only the tests for what you are touching** — one file, one `-k`, one
+  package. Seconds, not minutes.
+- **No test gate on a commit or a finished task.** Commit each logical step; do not run the
+  full suite to do it.
+- **The full suite runs ONCE, when you are about to hand back to the lead** — after all your
+  tasks, not after each. Red? Fix it then, rerun, and hand back with the actual result. Nothing
+  the suite covers changed (docs, config, agent text)? Do not run it at all, and say so.
+
 ## Code standard — how code on this team is written
 
 Set by the user on 2026-09-15, for every language. It applies to code you write and to code you

@@ -95,17 +95,31 @@ fi
 # a hookEventName that does not name the firing event raises. Without python3
 # the envelope cannot be built; the raw text then still reaches Claude Code,
 # and ZCode carries on exactly as before this fix.
-if [ -n "$CONTEXT" ]; then
-  if ENVELOPE=$(printf '%s' "$CONTEXT" | python3 -c '
-import json, sys
-print(json.dumps({
-    "hookSpecificOutput": {
+# The update banner is for the PERSON: Claude Code shows a top-level
+# `systemMessage` to the user and never to the model, so the notice cannot be
+# left unsaid. ZCode rejects any extra top-level key, so it is sent ONLY where
+# setup marked the install as Claude Code's (MEMORY_MCP_HARNESS=claude in the
+# hook command). Its own short timeout: a slow answer costs the banner only.
+BANNER=""
+if [ "$MEMORY_MCP_HARNESS" = "claude" ]; then
+  BANNER=$(curl -s -G --max-time 2 "${AUTH[@]}" "${IDENT[@]}" \
+    "${BASE}/api/hook/update-banner" 2>/dev/null)
+fi
+if [ -n "$CONTEXT" ] || [ -n "$BANNER" ]; then
+  if ENVELOPE=$(printf '%s' "$CONTEXT" | BANNER="$BANNER" python3 -c '
+import json, os, sys
+context = sys.stdin.read()
+out = {}
+if context:
+    out["hookSpecificOutput"] = {
         "hookEventName": "SessionStart",
-        "additionalContext": sys.stdin.read(),
+        "additionalContext": context,
     }
-}))' 2>/dev/null) && [ -n "$ENVELOPE" ]; then
+if os.environ.get("BANNER"):
+    out["systemMessage"] = os.environ["BANNER"]
+print(json.dumps(out))' 2>/dev/null) && [ -n "$ENVELOPE" ]; then
     printf '%s\n' "$ENVELOPE"
-  else
+  elif [ -n "$CONTEXT" ]; then
     printf '%s\n' "$CONTEXT"
   fi
 fi

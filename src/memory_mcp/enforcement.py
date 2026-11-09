@@ -259,7 +259,20 @@ _DIVISION_OF_WORK = (
     "to something shared (an API contract, a harness adapter, a setting several "
     "surfaces read) gets one sibling task per affected surface now, not a gap "
     "found in a later review. Do not dispatch a separate agent to write tasks - "
-    "you hold the context it would pay to rediscover.",
+    "you hold the context it would pay to rediscover. LOOK BEFORE YOU CREATE: "
+    "memory_task_list (open, plus include_done for recent work) and reuse a task "
+    "that already IS this work - comment, update or add a sub-task under it. "
+    "A write that answers with `similar_tasks` is the board telling you it may "
+    "already hold it: reuse and delete the new one, or carry on if it differs.",
+    "  - FULL SUITE ONCE PER MERGE POINT, and the brief says who: write "
+    "`full suite: yes` or `full suite: no` in every implementation brief. One "
+    "agent alone on its project/sub-project runs it before handing back, and "
+    "you do not rerun it on the unchanged tree. Several agents sharing one test "
+    "scope run only narrow and own-area tests; YOU run the suite once after "
+    "they all hand back, route each failure to the agent owning that file, and "
+    "rerun once. Separate sub-projects with separate suites each run their own. "
+    "Never two full suites at once in one checkout - each would test the "
+    "other's half-finished edits.",
     "  - SPEND AS IF IT IS MEASURED, BECAUSE IT IS: a real dispatch costs 115k-380k "
     "tokens (measured 2026-09-13), not a rounding error. Dispatch a genuine "
     "specialism or genuinely parallel implementation. Keep integration work whose "

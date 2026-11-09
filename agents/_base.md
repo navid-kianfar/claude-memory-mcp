@@ -38,8 +38,9 @@ You have no transcript; you have a brief. Before anything else:
   read the description and every comment — an earlier agent may have stopped part-way and left
   where it got to. Split your work into sub-tasks under them (`memory_task_add(parent_id=...)`)
   when a part deserves its own record; **never create a new top-level task for your own work.**
-  A brief with no task ID is a finding: create one task for the whole brief, say so in your
-  report, and carry on.
+  A brief with no task ID is a finding: look for an existing task that is this work
+  (`memory_task_list`) and use it; only if there is none, create one task for the whole brief.
+  Say which in your report, and carry on.
 - Take another only when you are idle:
   `memory_task_claim_next(session_id, role="<your role>")` offers your role's tasks and unroled
   ones, never another role's.

@@ -13,9 +13,13 @@ suite ran every few minutes.
   package. Seconds, not minutes.
 - **No test gate on a commit or a finished task.** Commit each logical step; do not run the
   full suite to do it.
-- **The full suite runs ONCE, when you are about to hand back to the lead** — after all your
-  tasks, not after each. Red? Fix it then, rerun, and hand back with the actual result. Nothing
-  the suite covers changed (docs, config, agent text)? Do not run it at all, and say so.
+- **The full suite runs ONCE, when you are about to hand back to the lead — and only if your
+  brief says `full suite: yes`.** After all your tasks, not after each. Red? Fix it then,
+  rerun, and hand back with the actual result. `full suite: no` means another agent shares
+  your test scope and the lead runs the suite once on the combined work: run your narrow and
+  own-area tests, and say which. No instruction in the brief? Ask yourself whether another
+  agent could be editing the same code right now; if so, do not run it. Nothing the suite
+  covers changed (docs, config, agent text)? Do not run it at all, and say so.
 
 ## Code standard — how code on this team is written
 

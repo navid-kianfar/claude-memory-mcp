@@ -805,10 +805,37 @@ def memory_task_plan(
     """
     def _run():
         slug = _resolve(project)
-        return _with_mirror(
-            container.task_planner.plan(slug, request, tasks, path=path), slug,
-        )
+        answer = container.task_planner.plan(slug, request, tasks, path=path)
+        if isinstance(answer, dict) and not answer.get("deduplicated"):
+            _attach_similar(answer, slug, answer.get("tasks") or [])
+        return _with_mirror(answer, slug)
     return _safe(_run)
+
+
+def _attach_similar(answer: dict, slug: str, created: list[dict]) -> None:
+    """Warn - never refuse - when what was just created looks like a task the
+    board already holds. The new tasks themselves and their parents are not
+    matches: a sub-task naturally resembles the task it belongs to."""
+    exclude = {t.get("id") for t in created} | {t.get("parent_id") for t in created}
+    exclude.discard(None)
+    similar: dict[str, list[dict]] = {}
+    for t in created:
+        try:
+            hits = container.task_service.similar_tasks(
+                slug, t.get("title") or "", exclude_ids=tuple(exclude),
+            )
+        except Exception:  # noqa: BLE001 - a warning must never fail a write
+            continue
+        if hits:
+            similar[t["id"]] = hits
+    if not similar:
+        return
+    answer["similar_tasks"] = similar
+    answer["similar_note"] = (
+        "These look like tasks already on the board. If one IS this work, use it "
+        "- comment on it, update it or add a sub-task under it - and delete or "
+        "archive the new one; if they differ, carry on."
+    )
 
 
 @mcp.tool()
@@ -1732,6 +1759,8 @@ def memory_task_add(
             )
         if added.routing is not None:
             answer["routing"] = added.routing
+        if not added.is_deduplicated:
+            _attach_similar(answer, slug, [task.model_dump(mode="json")])
         hint = decomposition_hint(
             task.description, has_parent=task.parent_id is not None,
         )
@@ -2127,6 +2156,28 @@ def memory_task_release(
 # ---------- Sessions ----------
 
 
+def _lead_briefing(answer: dict, slug: str, cwd: str | None) -> None:
+    """The lead's team contract and the update notice, in the one call every
+    harness makes. Claude Code and ZCode also get both from the session-start
+    hook; OpenCode and Codex have no hook that reaches the model, so without
+    this they never learned how work is divided or that an update is waiting.
+    A dispatched agent (agent=...) gets neither: it is not the lead."""
+    from memory_mcp.enforcement import agent_team_intro, update_intro
+
+    try:
+        team = agent_team_intro(cwd=cwd, slug=slug).strip()
+    except Exception:  # noqa: BLE001 - guidance must never fail a session start
+        team = ""
+    if team:
+        answer["team_instructions"] = team
+    try:
+        notice = update_intro(answer.get("session_id")).strip()
+    except Exception:  # noqa: BLE001
+        notice = ""
+    if notice:
+        answer["update_notice"] = notice
+
+
 @mcp.tool()
 def memory_session_start(
     project: str | None = None, cwd: str | None = None, agent: str | None = None,
@@ -2147,7 +2198,10 @@ def memory_session_start(
     def _run():
         slug = _resolve_session_project(project, cwd)
         ctx = container.session_service.start(slug, agent=agent)
-        return ctx.model_dump(mode="json")
+        answer = ctx.model_dump(mode="json")
+        if agent is None:
+            _lead_briefing(answer, slug, cwd)
+        return answer
     return _safe(_run)
 
 

@@ -139,6 +139,46 @@ class MirroredRerouteError(ValidationError):
     """
 
 
+
+#: Title-similarity duplicate warning (similar_tasks). Tuned on this repo's own
+#: board: a reworded copy of a task scores >= 0.5, unrelated work < 0.3.
+_SIMILAR_THRESHOLD = 0.5
+_SIMILAR_MIN_WORDS = 2
+_SIMILAR_MAX = 3
+_SIMILAR_CLOSED_DAYS = 14
+_SIMILAR_SCAN_LIMIT = 500
+_TITLE_STOPWORDS = frozenset(
+    "the a an and or of to for in on at by with from into is are be it its this "
+    "that not no when then than as via per one all any each".split()
+)
+
+
+def _title_words(title: str) -> frozenset[str]:
+    import re
+
+    tokens = re.findall(r"[a-z0-9_]+", (title or "").lower())
+    return frozenset(
+        _stem(t) for t in tokens if len(t) >= 3 and t not in _TITLE_STOPWORDS
+    )
+
+
+def _stem(word: str) -> str:
+    """Crude suffix strip so 'reopens' / 'reopening' / 'reopened' meet."""
+    for suffix in ("ing", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[: -len(suffix)]
+    return word
+
+
+def _title_similarity(a: frozenset[str], b: frozenset[str]) -> float:
+    """Jaccard, lifted for a short title wholly inside a longer one."""
+    if not a or not b:
+        return 0.0
+    shared = len(a & b)
+    jaccard = shared / len(a | b)
+    contained = shared / min(len(a), len(b))
+    return max(jaccard, contained * 0.75) if shared >= 3 else jaccard
+
 class TaskService:
     """Business logic for the task store."""
 
@@ -482,6 +522,48 @@ class TaskService:
         this is a real history rather than a reconstruction."""
         self._require(project, task_id)
         return self._provenance_repo.for_memory(project, task_id)
+
+    def similar_tasks(
+        self,
+        project: str,
+        title: str,
+        *,
+        exclude_ids: Sequence[str] = (),
+    ) -> list[dict]:
+        """Tasks whose titles look like `title`: open, or closed recently.
+
+        A WARNING for the caller, never a refusal - the lead now creates tasks
+        before every dispatch, and without a look at the board it re-creates
+        work that is already there. Title words only: deterministic, no model
+        call on the write path, and a near-identical title is the duplicate that
+        actually happens. Exact retries are deduplicated elsewhere.
+        """
+        words = _title_words(title)
+        if len(words) < _SIMILAR_MIN_WORDS:
+            return []
+        listed = self._task_repo.list_tasks(
+            project,
+            TaskFilter(include_done=True, include_subtasks=True),
+            _SIMILAR_SCAN_LIMIT,
+            0,
+        )[0]
+        cutoff = datetime.now() - timedelta(days=_SIMILAR_CLOSED_DAYS)
+        skip = set(exclude_ids)
+        found: list[tuple[float, Task]] = []
+        for task in listed:
+            if task.id in skip or task.state in (TaskState.CANCELLED, TaskState.DUPLICATE):
+                continue
+            if task.done_at is not None and task.done_at < cutoff:
+                continue
+            score = _title_similarity(words, _title_words(task.title))
+            if score >= _SIMILAR_THRESHOLD:
+                found.append((score, task))
+        found.sort(key=lambda pair: pair[0], reverse=True)
+        return [
+            {"id": t.id, "title": t.title, "state": str(t.state),
+             "parent_id": t.parent_id, "similarity": round(score, 2)}
+            for score, t in found[:_SIMILAR_MAX]
+        ]
 
     def list_tasks(
         self,

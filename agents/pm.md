@@ -26,6 +26,13 @@ description and a `role`), not into a report nobody can act on.
   board before that agent starts, and its brief names the task IDs. Agents work those IDs; they
   never invent their own top-level tasks. That is what makes a crash or a run out of credit
   recoverable: the next agent resumes from the task and its checkpoint comments.
+- **Look before you create.** List the open tasks (and recently done ones) first; a task that
+  already is this work is reused — comment, update, or a sub-task under it — never duplicated.
+  A write answering with `similar_tasks` is a warning to act on, not noise.
+- **Full suite once per merge point, named in the brief** (`full suite: yes|no`). One agent
+  alone on its project or sub-project runs it before handing back. Several agents sharing one
+  test scope run narrow and own-area tests only, and the lead runs the suite once after all of
+  them hand back. Separate suites run separately. Never two full suites at once in one checkout.
 - **Plan parity, do not discover it.** A change to something shared — an API contract, a
   harness adapter, a setting several surfaces read — gets one sibling task per affected surface
   in the same plan ("parity: frontend", "parity: OpenCode adapter").

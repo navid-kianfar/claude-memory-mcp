@@ -2085,6 +2085,45 @@ def memory_task_delete(task_id: str, project: str | None = None) -> dict:
 
 
 @mcp.tool()
+def memory_task_bulk(
+    task_ids: list[str], action: str, project: str, state: str | None = None,
+    target: str | None = None, confirm: bool = False, session_id: str | None = None,
+) -> dict:
+    """One action over many tasks: archive, unarchive, set_state, move, delete.
+
+    A DRY RUN unless confirm=True: the first call writes nothing and answers
+    what would change (`would_change`, `unchanged`, `failed`); call again with
+    confirm=True to apply. Up to 500 ids.
+
+    LOCAL FIRST: each id goes through the same path as its single-task tool
+    (memory_task_archive / memory_task_update / memory_task_delete), then the
+    board follows through the normal mirror - never a board-only change. Queued
+    archives reach asoode as one bulk call.
+
+    - `set_state` needs `state` (todo, in_progress, done, paused, blocked,
+      cancelled, duplicate, incomplete, blocker) and `session_id` - a state
+      change starts or stops clocks, and the clock is that session's.
+    - `move` needs `target`, a board linked to THIS project (label or work
+      package id). A task already on a board moves with its sub-tasks where the
+      platform can carry it, and is reported failed where it cannot.
+    - `delete` is permanent and promotes sub-tasks, like memory_task_delete.
+
+    Partial by design: `{succeeded: [...], failed: {id: reason}}` - one bad id
+    never undoes the others. `project` is required.
+    """
+    def _run():
+        slug = _resolve(project)
+        needs_session = confirm and action == "set_state"
+        session = _require_session(session_id) if needs_session else session_id
+        answer = container.task_service.bulk(
+            slug, task_ids, action, state=state, target=target, confirm=confirm,
+            session_id=session,
+        )
+        return _with_mirror(answer, slug)
+    return _safe(_run)
+
+
+@mcp.tool()
 def memory_task_claim_next(
     session_id: str, role: str | None = None, project: str | None = None,
 ) -> dict:

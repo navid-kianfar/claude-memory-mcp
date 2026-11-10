@@ -435,3 +435,56 @@ class TestBatchedArchive:
         bridge.flush(project)
 
         assert provider.archived == [("r1", True), ("r2", True)]
+
+
+class TestBulkToolMirrors:
+    def test_a_bulk_move_previews_then_moves_the_cards(self, project):
+        provider = _provider()
+        tasks, bridge, _ = _stack(provider)
+        a, b = _create(tasks, project, "a"), _create(tasks, project, "b")
+        bridge.flush(project)
+
+        preview = tasks.bulk(project, [a.id, b.id], "move", target="other")
+        assert all(c["board_move"] for c in preview["would_change"])
+        assert provider.board_moves == []
+
+        tasks.bulk(project, [a.id, b.id], "move", target="other", confirm=True)
+        bridge.flush(project)
+
+        assert sorted(m[0] for m in provider.board_moves) == ["r1", "r2"]
+        assert len(provider.created_tasks) == 2
+
+    def test_a_card_the_board_cannot_carry_is_a_failed_id_not_an_abort(self, project):
+        provider = _provider(with_bulk=False)
+        tasks, bridge, _ = _stack(provider)
+        mirrored = _create(tasks, project, "mirrored")
+        bridge.flush(project)
+        fresh = _create(tasks, project, "fresh")
+
+        answer = tasks.bulk(project, [mirrored.id, fresh.id], "move", target="other",
+                            confirm=True)
+
+        assert answer["succeeded"] == [fresh.id]
+        assert "SECOND card" in answer["failed"][mirrored.id]
+
+    def test_a_bulk_archive_reaches_the_board_as_one_call(self, project):
+        provider = _provider()
+        tasks, bridge, _ = _stack(provider)
+        made = [_create(tasks, project, f"t{n}") for n in range(3)]
+        bridge.flush(project)
+
+        tasks.bulk(project, [t.id for t in made], "archive", confirm=True)
+        bridge.flush(project)
+
+        assert provider.bulk_calls == [("archive", ("r1", "r2", "r3"))]
+
+    def test_a_bulk_delete_removes_every_card(self, project):
+        provider = _provider()
+        tasks, bridge, _ = _stack(provider)
+        made = [_create(tasks, project, f"t{n}") for n in range(2)]
+        bridge.flush(project)
+
+        tasks.bulk(project, [t.id for t in made], "delete", confirm=True)
+        bridge.flush(project)
+
+        assert sorted(provider.deleted) == ["r1", "r2"]

@@ -460,6 +460,19 @@ class TaskRepository:
                 pass
             conn.execute("DELETE FROM tasks WHERE id = ?", [task_id])
 
+    def unarchive(self, project: str, task_id: str) -> Task:
+        """Put an archived task back in the list."""
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE tasks SET archived_at = NULL, "
+                "updated_at = current_timestamp WHERE id = ?",
+                [task_id],
+            )
+            row = conn.execute(
+                f"SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?", [task_id]
+            ).fetchone()
+        return _row_to_task(row)
+
     def archive(self, project: str, task_id: str) -> Task:
         """Take a task out of the list without deleting it. Nothing is ever
         hard-deleted here, matching the memory store's soft-delete."""

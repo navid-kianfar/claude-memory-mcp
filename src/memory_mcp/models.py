@@ -440,8 +440,9 @@ class UpdateTaskRequest(BaseModel):
     estimated_minutes: int | None = Field(default=None, ge=0)
     position: int | None = None
     role: str | None = None
-    # Re-route: the same meaning as on CreateTaskRequest. Refused once the task
-    # has a card on the board it would leave - there is no move between boards.
+    # Re-route: the same meaning as on CreateTaskRequest. Once the task has a
+    # card, the card is moved where the platform can carry it between the two
+    # boards, and the re-route is refused where it cannot.
     path: str | None = Field(default=None, max_length=4096)
     target: str | None = None
 

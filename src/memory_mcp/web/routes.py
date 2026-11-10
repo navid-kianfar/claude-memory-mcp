@@ -1280,6 +1280,29 @@ def _task_archive_bulk(params, body, query):
     return {"status": "ok", "archived": len(archived), "failed": failed}
 
 
+def _task_bulk(params, body, query):
+    """One action over many tasks - the same contract as memory_task_bulk.
+
+    POST /api/projects/{slug}/tasks/bulk
+    {ids: [...], action, state?, target?, confirm?}. Without `confirm: true`
+    it is a dry run that writes nothing. Explicit ids only, for the reason the
+    Clear button gives above: the caller acts on exactly what it showed.
+    """
+    slug = params["slug"]
+    container.project_service.get(slug)
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+        raise ValueError("ids must be a non-empty list of task ids")
+    action = body.get("action")
+    if not isinstance(action, str):
+        raise ValueError("action is required")
+    return container.task_service.bulk(
+        slug, ids, action,
+        state=body.get("state"), target=body.get("target"),
+        confirm=body.get("confirm") is True,
+    )
+
+
 def _task_archive(params, body, query):
     task = container.task_service.archive(params["slug"], params["tid"])
     return {"status": "ok", "task": task.model_dump(mode="json")}
@@ -1521,6 +1544,7 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/tasks", _api(_task_create), methods=["POST"]),
         Route("/api/projects/{slug}/tasks/reorder", _api(_task_reorder), methods=["POST"]),
         Route("/api/projects/{slug}/tasks/archive", _api(_task_archive_bulk), methods=["POST"]),
+        Route("/api/projects/{slug}/tasks/bulk", _api(_task_bulk), methods=["POST"]),
         Route("/api/projects/{slug}/tasks/{tid}", _api(_task_get), methods=["GET"]),
         Route("/api/projects/{slug}/tasks/{tid}", _api(_task_update), methods=["PUT"]),
         Route("/api/projects/{slug}/tasks/{tid}/comments", _api(_task_comment), methods=["POST"]),

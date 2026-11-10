@@ -133,10 +133,26 @@ class AddedTask:
 class MirroredRerouteError(ValidationError):
     """A re-route refused because the task already has a card where it is.
 
-    task_sync is keyed (task_id, link_id) and no platform here can move a card
-    between boards, so changing link_id after the first mirror would create a
-    SECOND card on the new board. The HTTP layer answers 409.
+    task_sync is keyed (task_id, link_id), so changing link_id after the first
+    mirror would create a SECOND card on the new board - unless the platform
+    can move the card (supports_cross_board_move), in which case the re-route
+    is a move and this is not raised. The HTTP layer answers 409.
     """
+
+
+class BulkAction(StrEnum):
+    """What memory_task_bulk can do to many tasks at once."""
+
+    ARCHIVE = "archive"
+    UNARCHIVE = "unarchive"
+    SET_STATE = "set_state"
+    MOVE = "move"
+    DELETE = "delete"
+
+
+#: The most ids one bulk call takes - the same cap asoode's POST /tasks/bulk
+#: puts on an explicit selector, so one local bulk is at most one remote call.
+BULK_MAX_IDS = 500
 
 
 
@@ -1552,6 +1568,154 @@ class TaskService:
                 "title": task.title,
             })
         return {"status": "ok", "deleted": task_id, "title": task.title}
+
+    def unarchive(self, project: str, task_id: str) -> Task:
+        """Put an archived task back in the list, and on the board."""
+        self._require(project, task_id)
+        task = self._task_repo.unarchive(project, task_id)
+        self._record(project, task_id, "task_unarchive", {"title": task.title})
+        self._enqueue(project, task_id, "archive", {"archived": False})
+        return task
+
+    def bulk(
+        self, project: str, task_ids: Sequence[str], action: str, *,
+        state: str | None = None, target: str | None = None, confirm: bool = False,
+        session_id: str | None = None,
+    ) -> dict:
+        """One action over many tasks, LOCAL first; the board follows through
+        the outbox like any single change (which batches archives).
+
+        Without `confirm` nothing is written: each id is checked and the answer
+        says what WOULD change. With it each id goes through the same method
+        its single-task tool uses - archive, unarchive, update, delete - so
+        clocks, claims, provenance and mirroring behave exactly as they do one
+        at a time. Per id: one that fails lands in `failed` with the reason and
+        the rest still go; nothing already applied is undone.
+        """
+        bulk_action = self._bulk_action(action)
+        ids = tuple(dict.fromkeys(task_ids))
+        if not ids:
+            raise ValidationError("task_ids must name at least one task")
+        if len(ids) > BULK_MAX_IDS:
+            raise ValidationError(
+                f"at most {BULK_MAX_IDS} task ids per bulk call, got {len(ids)}"
+            )
+        wanted_state = self._bulk_state(bulk_action, state)
+        if bulk_action is BulkAction.MOVE and not (target or "").strip():
+            raise ValidationError("action 'move' needs target= (the board to move to)")
+
+        if not confirm:
+            return self._preview_bulk(project, ids, bulk_action, wanted_state, target)
+
+        succeeded: list[str] = []
+        failed: dict[str, str] = {}
+        for task_id in ids:
+            try:
+                self._apply_bulk(
+                    project, task_id, bulk_action, wanted_state, target, session_id,
+                )
+            except MemoryMCPError as e:
+                failed[task_id] = str(e)
+                continue
+            succeeded.append(task_id)
+        return {
+            "status": "ok", "action": bulk_action.value, "dry_run": False,
+            "succeeded": succeeded, "failed": failed,
+        }
+
+    @staticmethod
+    def _bulk_action(action: str) -> BulkAction:
+        try:
+            return BulkAction(action)
+        except ValueError:
+            allowed = ", ".join(a.value for a in BulkAction)
+            raise ValidationError(f"unknown action {action!r}; one of: {allowed}") from None
+
+    @staticmethod
+    def _bulk_state(action: BulkAction, state: str | None) -> TaskState | None:
+        if action is not BulkAction.SET_STATE:
+            return None
+        try:
+            return TaskState(state or "")
+        except ValueError:
+            allowed = ", ".join(s.value for s in TaskState)
+            raise ValidationError(
+                f"action 'set_state' needs state= one of: {allowed}"
+            ) from None
+
+    def _apply_bulk(
+        self, project: str, task_id: str, action: BulkAction, state: TaskState | None,
+        target: str | None, session_id: str | None,
+    ) -> None:
+        match action:
+            case BulkAction.ARCHIVE:
+                self.archive(project, task_id)
+            case BulkAction.UNARCHIVE:
+                self.unarchive(project, task_id)
+            case BulkAction.SET_STATE:
+                request = UpdateTaskRequest(project=project, task_id=task_id, state=state)
+                self.update_routed(request, session_id)
+            case BulkAction.MOVE:
+                request = UpdateTaskRequest(project=project, task_id=task_id, target=target)
+                self.update_routed(request, session_id)
+            case BulkAction.DELETE:
+                self.delete(project, task_id)
+            case _:
+                raise ValidationError(f"unhandled bulk action {action!r}")
+
+    def _preview_bulk(
+        self, project: str, ids: Sequence[str], action: BulkAction,
+        state: TaskState | None, target: str | None,
+    ) -> dict:
+        """What a confirmed run would do, writing nothing.
+
+        A move is resolved the way the real one is - including the refusal of
+        a mirrored task the board cannot carry - so a preview that says "would
+        move" is not contradicted by the confirmed run for that reason.
+        """
+        changes: list[dict] = []
+        failed: dict[str, str] = {}
+        for task_id in ids:
+            try:
+                task = self._require(project, task_id)
+                change = self._preview_one(project, task, action, state, target)
+            except MemoryMCPError as e:
+                failed[task_id] = str(e)
+                continue
+            changes.append(change)
+        return {
+            "status": "ok", "action": action.value, "dry_run": True,
+            "would_change": [c for c in changes if c["changes"]],
+            "unchanged": [c["id"] for c in changes if not c["changes"]],
+            "failed": failed,
+            "confirm": "nothing was written - call again with confirm=True to apply",
+        }
+
+    def _preview_one(
+        self, project: str, task: Task, action: BulkAction, state: TaskState | None,
+        target: str | None,
+    ) -> dict:
+        entry: dict = {"id": task.id, "title": task.title}
+        match action:
+            case BulkAction.ARCHIVE:
+                entry["changes"] = task.archived_at is None
+            case BulkAction.UNARCHIVE:
+                entry["changes"] = task.archived_at is not None
+            case BulkAction.SET_STATE:
+                entry["changes"] = task.state != state
+                entry["from"], entry["to"] = task.state.value, state.value if state else None
+            case BulkAction.MOVE:
+                request = UpdateTaskRequest(project=project, task_id=task.id, target=target)
+                reroute = self._reroute(request, task)
+                entry["changes"] = reroute.changes_link
+                entry["from"], entry["to"] = task.link_id, reroute.link_id
+                entry["board_move"] = reroute.moves_card_from is not None
+            case BulkAction.DELETE:
+                entry["changes"] = True
+                entry["sub_tasks_promoted"] = len(self._task_repo.child_ids(project, task.id))
+            case _:
+                raise ValidationError(f"unhandled bulk action {action!r}")
+        return entry
 
     def archive(self, project: str, task_id: str) -> Task:
         """Take a task out of the list. Never deleted, matching the memory

@@ -684,7 +684,7 @@ All 74 tools:
 | Templates | `memory_list_templates`, `memory_create_template`, `memory_add_template_rule`, `memory_apply_template`, `memory_import_rules` |
 | Imported rules | `memory_pending_list`, `memory_adapt_pending`, `memory_discard_pending` |
 | Digest | `memory_digest`, `memory_digest_propose`, `memory_digest_apply`, `memory_digest_revert`, `memory_digest_reject`, `memory_digest_list`, `memory_digest_get` |
-| Tasks | `memory_task_add`, `memory_task_list`, `memory_task_get`, `memory_task_update`, `memory_task_comment`, `memory_task_start`, `memory_task_stop`, `memory_task_done`, `memory_task_archive`, `memory_task_convert`, `memory_task_delete` |
+| Tasks | `memory_task_add`, `memory_task_list`, `memory_task_get`, `memory_task_update`, `memory_task_comment`, `memory_task_start`, `memory_task_stop`, `memory_task_done`, `memory_task_archive`, `memory_task_convert`, `memory_task_delete`, `memory_task_bulk` |
 | Task claims (multi-session) | `memory_task_claim_next`, `memory_task_release` |
 | Planning | `memory_task_plan` |
 | Sessions | `memory_session_start` (pass `cwd=` — the project is read from that folder's committed `.agent-memory/manifest.json`, never from the user), `memory_session_end` |

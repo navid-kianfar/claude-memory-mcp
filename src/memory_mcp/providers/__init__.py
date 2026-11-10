@@ -6,12 +6,15 @@ the bridge holds a `TaskProvider`, never an `AsoodeProvider`.
 """
 
 from memory_mcp.providers.base import (
+    BULK_ACTIONS,
+    BulkResult,
     Capabilities,
     Container,
     ContainerRef,
     Group,
     ProviderError,
     ProviderAuthError,
+    ProviderNotFoundError,
     RemoteTask,
     RemoteTimeEntry,
     SpaceRef,
@@ -44,6 +47,9 @@ __all__ = [
     "Group",
     "ProviderError",
     "ProviderAuthError",
+    "ProviderNotFoundError",
+    "BULK_ACTIONS",
+    "BulkResult",
     "TransientProviderError",
     "RemoteTask",
     "RemoteTimeEntry",

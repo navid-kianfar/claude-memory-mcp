@@ -153,6 +153,56 @@ class ProviderConformance(SpaceConformance):
 
         provider.archive_group(group)  # must not raise
 
+    # ---------- bulk ----------
+
+    def test_archive_many_is_partial_not_all_or_nothing(self, provider, container):
+        """One task the platform skips must not fail the rest - and must say so."""
+        if not provider.capabilities.supports_bulk:
+            pytest.skip("provider has no bulk API")
+        task = provider.create_task(container.id, None, "Archive me")
+
+        result = provider.archive_many([task.id, "no-such-task"], True)
+
+        assert task.id in result.succeeded
+        assert "no-such-task" in result.failed
+
+    def test_delete_takes_the_sub_task_tree_with_it(self, provider, container):
+        """The property the bridge's promote-before-remove exists to work around."""
+        caps = provider.capabilities
+        if not (caps.supports_delete and caps.supports_subtasks):
+            pytest.skip("provider cannot delete, or has no sub-tasks")
+        parent = provider.create_task(container.id, None, "Parent")
+        child = provider.create_task(container.id, None, "Child", parent_id=parent.id)
+
+        result = provider.delete([parent.id])
+
+        assert {parent.id, child.id} <= set(result.succeeded)
+        left = {t.id for t in provider.fetch_container(container.id, with_tasks=True).tasks}
+        assert not left & {parent.id, child.id}
+
+    def test_move_to_board_lands_the_task_on_the_other_container(self, provider, container):
+        if not provider.capabilities.supports_cross_board_move:
+            pytest.skip("provider cannot move across containers")
+        task = provider.create_task(container.id, None, "Travelling")
+        other = provider.create_container(
+            "Other board", external_ref="conformance-2", space_id=container.space_id,
+        )
+
+        provider.move_to_board(task.id, other.id)
+
+        moved = {t.id for t in provider.fetch_container(other.id, with_tasks=True).tasks}
+        assert task.id in moved
+
+    def test_a_move_the_platform_refused_raises(self, provider, container):
+        if not provider.capabilities.supports_cross_board_move:
+            pytest.skip("provider cannot move across containers")
+        other = provider.create_container(
+            "Other board", external_ref="conformance-3", space_id=container.space_id,
+        )
+
+        with pytest.raises(ProviderError):
+            provider.move_to_board("no-such-task", other.id)
+
     # ---------- shape ----------
 
     def test_satisfies_the_protocol(self, provider):

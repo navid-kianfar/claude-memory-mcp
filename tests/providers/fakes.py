@@ -11,6 +11,7 @@ mock's author expected.
 from datetime import timedelta, timezone
 
 from memory_mcp.providers import (
+    BulkResult,
     Capabilities,
     Container,
     ContainerRef,
@@ -57,10 +58,21 @@ class FakeProvider:
     `fail` makes every call raise, for testing the unreachable path. `seed`
     installs a container with known ids, so a test can assert on "l-done" instead
     of chasing generated ones.
+
+    `with_bulk` turns on the bulk API - bulk, delete, archive_many and
+    move_to_board - with asoode's tree semantics: remove deletes a card's
+    sub-tasks, move carries them, archive applies to each. Off by default, so
+    every existing test keeps exercising the per-card fallback.
     """
 
-    def __init__(self, fail: Exception | None = None):
+    def __init__(self, fail: Exception | None = None, with_bulk: bool = False):
         self.fail = fail
+        self.with_bulk = with_bulk
+        self.bulk_calls: list[tuple[str, tuple[str, ...]]] = []
+        self.deleted: list[str] = []
+        self.board_moves: list[tuple[str, str, str | None]] = []
+        # Every remote write in call order, for tests about ORDER across kinds.
+        self.calls: list[tuple] = []
         self._spaces: dict[str, str] = {}
         self._containers: dict[str, dict] = {}
         self._tasks: dict[str, dict] = {}
@@ -143,6 +155,8 @@ class FakeProvider:
             supports_attachments=True, supports_archive=True,
             supports_change_feed=True, supports_labels=True,
             supports_fields=True, supports_assignees=True, supports_subtasks=True,
+            supports_bulk=self.with_bulk, supports_delete=self.with_bulk,
+            supports_cross_board_move=self.with_bulk,
             states=STATES,
         )
 
@@ -287,6 +301,7 @@ class FakeProvider:
     def archive(self, task_id, archived=True):
         self._require_task(task_id)["archived"] = bool(archived)
         self.archived.append((task_id, bool(archived)))
+        self.calls.append(("archive", task_id, bool(archived)))
 
     def set_role_label(self, task_id, container_id, role):
         self._require_task(task_id)["role_label"] = role
@@ -317,6 +332,80 @@ class FakeProvider:
     def promote(self, task_id):
         self._require_task(task_id)["parent"] = None
         self.promoted.append(task_id)
+        self.calls.append(("promote", task_id))
+
+    # ---------- bulk (only when with_bulk) ----------
+
+    def _tree(self, root_id):
+        """The card and every descendant, root first."""
+        tree, frontier = [root_id], [root_id]
+        while frontier:
+            children = [tid for tid, t in self._tasks.items()
+                        if t.get("parent") in frontier and tid not in tree]
+            tree.extend(children)
+            frontier = children
+        return tree
+
+    def bulk(self, task_ids, action, *, state=None, container_id=None, group_id=None,
+             dry_run=False):
+        self._boom()
+        if not self.with_bulk:
+            raise ProviderError("bulk is not enabled on this fake")
+        ids = tuple(dict.fromkeys(task_ids))
+        self.bulk_calls.append((action, ids))
+        self.calls.append(("bulk", action, ids))
+        succeeded, failed, handled = [], [], set()
+        for root in ids:
+            if root in handled:
+                continue
+            if root not in self._tasks or (
+                action == "move" and container_id not in self._containers
+            ):
+                failed.append(root)
+                continue
+            tree = [tid for tid in self._tree(root) if tid not in handled]
+            handled.update(tree)
+            succeeded.extend(tree)
+            if not dry_run:
+                self._apply_bulk(action, root, tree, state, container_id, group_id)
+        return BulkResult(
+            matched=ids, succeeded=() if dry_run else tuple(succeeded),
+            failed=tuple(failed), affected_count=len(succeeded), dry_run=dry_run,
+        )
+
+    def _apply_bulk(self, action, root, tree, state, container_id, group_id):
+        match action:
+            case "remove":
+                for tid in tree:
+                    del self._tasks[tid]
+                    self.deleted.append(tid)
+            case "move":
+                group = group_id or self._containers[container_id]["groups"][0].id
+                for tid in tree:
+                    self._tasks[tid]["container"] = container_id
+                self._tasks[root]["group"] = group
+                self.board_moves.append((root, container_id, group_id))
+            case "archive" | "unarchive":
+                for tid in tree:
+                    self._tasks[tid]["archived"] = action == "archive"
+                    self.archived.append((tid, action == "archive"))
+            case "set_state":
+                for tid in tree:
+                    self._tasks[tid]["state"] = state
+                    self.states.append((tid, state))
+            case _:
+                raise ProviderError(f"unknown bulk action {action!r}")
+
+    def delete(self, task_ids):
+        return self.bulk(task_ids, "remove")
+
+    def archive_many(self, task_ids, archived=True):
+        return self.bulk(task_ids, "archive" if archived else "unarchive")
+
+    def move_to_board(self, task_id, container_id, group_id=None):
+        result = self.bulk((task_id,), "move", container_id=container_id, group_id=group_id)
+        if task_id not in result.succeeded:
+            raise ProviderError(f"could not move {task_id} to {container_id}")
 
     def remove_attachment(self, task_id, filename):
         self._require_task(task_id)

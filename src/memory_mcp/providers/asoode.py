@@ -31,6 +31,7 @@ The four translations that earn the adapter:
 
 import contextlib
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timezone
 
 from memory_mcp.asoode_client import (
@@ -44,6 +45,8 @@ from memory_mcp.asoode_client import (
 from memory_mcp.utils.richtext import html_to_markdown, markdown_to_html
 
 from memory_mcp.providers.base import (
+    BULK_ACTIONS,
+    BulkResult,
     Capabilities,
     Container,
     ContainerRef,
@@ -79,6 +82,12 @@ _CAPABILITIES = Capabilities(
     supports_subtasks=True,
     # POST /work-packages/:id/lists/create and /work-packages/lists/:id/edit
     supports_group_style=True,
+    # POST /tasks/bulk {selector, action, dryRun?} - archive, unarchive,
+    # remove, set-state and move over up to 500 ids per call; remove deletes
+    # the sub-task tree and move carries it (tasks.service.ts `bulk`).
+    supports_bulk=True,
+    supports_delete=True,
+    supports_cross_board_move=True,
     states=tuple(STATE_TO_ORDINAL),
 )
 
@@ -449,6 +458,63 @@ class AsoodeProvider:
     def archive(self, task_id: str, archived: bool = True) -> None:
         """POST /tasks/:id/archive - {archived} sets the state absolutely."""
         self.client.archive_task(task_id, archived)
+
+    def bulk(
+        self, task_ids: Sequence[str], action: str, *, state: str | None = None,
+        container_id: str | None = None, group_id: str | None = None,
+        dry_run: bool = False,
+    ) -> BulkResult:
+        """POST /tasks/bulk over explicit ids, chunked at 500 by the client."""
+        wire_action = self._bulk_action(action, state, container_id, group_id)
+        answer = self.client.bulk_tasks_by_ids(task_ids, wire_action, dry_run=dry_run)
+        return BulkResult(
+            matched=tuple(answer["matched"]),
+            succeeded=tuple(answer["succeeded"]),
+            failed=tuple(answer["failed"]),
+            affected_count=answer["affectedCount"],
+            dry_run=answer["dryRun"],
+        )
+
+    def delete(self, task_ids: Sequence[str]) -> BulkResult:
+        """Bulk `remove` - permanent, and the sub-task tree goes with each card."""
+        return self.bulk(task_ids, "remove")
+
+    def archive_many(self, task_ids: Sequence[str], archived: bool = True) -> BulkResult:
+        return self.bulk(task_ids, "archive" if archived else "unarchive")
+
+    def move_to_board(self, task_id: str, container_id: str,
+                      group_id: str | None = None) -> None:
+        """Bulk `move` of one card. asoode's single-task move takes the same
+        {packageId, listId}, but only the bulk route is documented as carrying
+        the sub-task tree, which is the point of using it."""
+        result = self.bulk((task_id,), "move", container_id=container_id,
+                           group_id=group_id)
+        if task_id not in result.succeeded:
+            raise AsoodeError(
+                f"asoode did not move task {task_id} to work package {container_id}: "
+                "it is gone, or the token lacks Editor on one of the two boards"
+            )
+
+    def _bulk_action(self, action: str, state: str | None,
+                     container_id: str | None, group_id: str | None) -> dict:
+        """Our bulk action as POST /tasks/bulk's `action` object."""
+        if action not in BULK_ACTIONS:
+            raise AsoodeError(f"unknown bulk action: {action!r}")
+        match action:
+            case "archive" | "unarchive" | "remove":
+                return {"type": action}
+            case "set_state":
+                ordinal = STATE_TO_ORDINAL.get(state or "")
+                if ordinal is None:
+                    raise AsoodeError(f"unknown task state: {state!r}")
+                return {"type": "set-state", "state": ordinal}
+            case "move":
+                if not container_id:
+                    raise AsoodeError("a bulk move needs the target work package")
+                list_id = group_id or self._first_group(container_id)
+                return {"type": "move", "packageId": container_id, "listId": list_id}
+            case _:
+                raise AsoodeError(f"unhandled bulk action: {action!r}")
 
     def role_label_plan(self, container_id: str) -> list[dict]:
         """Role labels on this board whose colour is not the convention's.

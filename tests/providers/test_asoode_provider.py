@@ -38,6 +38,7 @@ class FakeAsoodeClient:
         self.labels_created: list[tuple] = []
         self.lists_created: list[tuple] = []
         self.lists_edited: list[tuple] = []
+        self.bulk_requests: list[tuple] = []
         self._n = 0
 
     def _next(self, prefix):
@@ -126,7 +127,8 @@ class FakeAsoodeClient:
                     return t
         tid = self._next("t")
         task = {"id": tid, "title": title, "description": description, "state": 1,
-                "externalRef": external_ref, "boardId": board["id"], "listId": list_id}
+                "externalRef": external_ref, "boardId": board["id"], "listId": list_id,
+                "parentId": kw.get("parent_id")}
         self.tasks[tid] = task
         lst["tasks"].append(task)
         return task
@@ -209,6 +211,61 @@ class FakeAsoodeClient:
     def archive_task(self, task_id, archived=True):
         self.tasks[task_id]["archivedAt"] = "now" if archived else None
         self.archived.append((task_id, archived))
+
+    def _subtree(self, root_id):
+        tree, frontier = [root_id], [root_id]
+        while frontier:
+            children = [tid for tid, t in self.tasks.items()
+                        if t.get("parentId") in frontier and tid not in tree]
+            tree.extend(children)
+            frontier = children
+        return tree
+
+    def bulk_tasks_by_ids(self, ids, action, *, dry_run=False):
+        """POST /tasks/bulk with asoode's semantics: the tree follows the card,
+        a move needs a list ON the named board, a missing id is `failed`."""
+        self.bulk_requests.append((tuple(ids), dict(action), dry_run))
+        succeeded, failed, handled = [], [], set()
+        for root in dict.fromkeys(ids):
+            if root in handled:
+                continue
+            target = None
+            if action["type"] == "move":
+                board = self.boards.get(action["packageId"]) or {"lists": []}
+                target = next((l for l in board["lists"] if l["id"] == action["listId"]),
+                              None)
+            if root not in self.tasks or (action["type"] == "move" and target is None):
+                failed.append(root)
+                continue
+            tree = [tid for tid in self._subtree(root) if tid not in handled]
+            handled.update(tree)
+            succeeded.extend(tree)
+            if not dry_run:
+                self._apply_bulk(action, root, tree, target)
+        return {"matched": list(dict.fromkeys(ids)),
+                "succeeded": [] if dry_run else succeeded, "failed": failed,
+                "affectedCount": len(succeeded), "dryRun": dry_run}
+
+    def _apply_bulk(self, action, root, tree, target):
+        kind = action["type"]
+        for tid in tree:
+            task = self.tasks[tid]
+            if kind == "remove":
+                _, lst = self._list_of(task["listId"])
+                lst["tasks"] = [t for t in lst["tasks"] if t["id"] != tid]
+                del self.tasks[tid]
+            elif kind in ("archive", "unarchive"):
+                task["archivedAt"] = "now" if kind == "archive" else None
+            elif kind == "set-state":
+                task["state"] = action["state"]
+            elif kind == "move":
+                task["boardId"] = action["packageId"]
+        if kind == "move":
+            task = self.tasks[root]
+            _, old = self._list_of(task["listId"])
+            old["tasks"] = [t for t in old["tasks"] if t["id"] != root]
+            target["tasks"].append(task)
+            task["listId"] = target["id"]
 
     def archive_list_tasks(self, list_id):
         """Mirrors the server: updateMany over one list, in a single call."""

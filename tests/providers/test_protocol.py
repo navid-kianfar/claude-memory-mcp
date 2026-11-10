@@ -54,3 +54,12 @@ class TestTheInterfaceItself:
     def test_a_container_carries_its_groups_not_a_lookup(self):
         c = Container(id="c1", title="Board", groups=(Group(id="g1", title="To Do"),))
         assert c.groups[0].title == "To Do"
+
+
+class TestFakeBulkConformance(ProviderConformance):
+    """The fake again, with the bulk API on, so the bulk promises are held by
+    the reference implementation too - not only skipped."""
+
+    @pytest.fixture
+    def provider(self):
+        return FakeProvider(with_bulk=True)

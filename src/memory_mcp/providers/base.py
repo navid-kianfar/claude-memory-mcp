@@ -37,6 +37,7 @@ never on the one serving a tool call.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 
@@ -53,6 +54,15 @@ class ProviderAuthError(ProviderError):
 
     Separate because it is the one failure retrying cannot fix: the flusher
     surfaces it rather than queueing behind it forever.
+    """
+
+
+class ProviderNotFoundError(ProviderError):
+    """The platform does not have the task (or container) the call named.
+
+    Separate because for some calls it IS the outcome wanted: promoting a
+    sub-task that is already gone before its parent is deleted has nothing
+    left to protect. Callers that do not care keep catching ProviderError.
     """
 
 
@@ -118,9 +128,48 @@ class Capabilities:
     #: build carries the same columns and colours a person would have chosen.
     #: False means the platform's own board template is left exactly as it came.
     supports_group_style: bool = False
+    #: One call can act on many tasks at once (`bulk`, `archive_many`): the
+    #: flusher coalesces queued archives instead of one request per card.
+    #: Without it every archive goes through `archive`, one task at a time.
+    supports_bulk: bool = False
+    #: A task can be DELETED on the platform (`delete`), not just archived.
+    #: The platform deletes the task's whole sub-task tree with it, so the
+    #: bridge promotes the children it wants to keep first. Without it a local
+    #: delete closes and archives the card instead.
+    supports_delete: bool = False
+    #: An existing task can be moved to ANOTHER container (`move_to_board`),
+    #: carrying its sub-tasks. Without it a task that already has a card stays
+    #: on that board - a re-route is refused rather than creating a second card.
+    supports_cross_board_move: bool = False
     #: Local task states this platform can represent. A state outside this set is
     #: mapped to the nearest one by the provider, never dropped silently.
     states: tuple[str, ...] = ()
+
+
+#: The actions `TaskProvider.bulk` takes, in OUR vocabulary.
+BULK_ACTIONS: frozenset[str] = frozenset(
+    {"archive", "unarchive", "remove", "set_state", "move"}
+)
+
+
+@dataclass(frozen=True)
+class BulkResult:
+    """What one bulk call did, by REMOTE task id.
+
+    Partial success is normal: `failed` names the tasks the platform skipped
+    (gone, or not enough access) and everything in `succeeded` went through.
+    Sub-tasks the platform touched alongside a matched card appear in
+    `succeeded` too, so it can be longer than the ids sent.
+    """
+
+    #: The cards the selector resolved to, before sub-task expansion.
+    matched: tuple[str, ...] = ()
+    succeeded: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
+    #: How many tasks (sub-tasks included) the action applied to - or, on a
+    #: dry run, would apply to.
+    affected_count: int = 0
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -366,6 +415,42 @@ class TaskProvider(Protocol):
         un-archive, and a one-way call would make that unmirrorable, so the two
         sides would drift the moment anyone restored a task.
         """
+
+    def bulk(
+        self, task_ids: Sequence[str], action: str, *, state: str | None = None,
+        container_id: str | None = None, group_id: str | None = None,
+        dry_run: bool = False,
+    ) -> BulkResult:
+        """Apply one action to many tasks. Only called when `supports_bulk`.
+
+        `action` is one of BULK_ACTIONS. `state` (a local TaskState value) is
+        required for set_state; `container_id` for move, with `group_id` the
+        column there (None: the container's first). Every task brings its
+        sub-task tree: remove deletes it, move carries it, the others apply to
+        each descendant too. Partial-tolerant - a skipped task lands in
+        `failed` rather than raising; only a failure of the call itself raises.
+        """
+        ...
+
+    def delete(self, task_ids: Sequence[str]) -> BulkResult:
+        """Delete tasks for good, sub-task trees included. Only called when
+        `supports_delete`. Partial-tolerant, like `bulk`."""
+        ...
+
+    def archive_many(self, task_ids: Sequence[str], archived: bool = True) -> BulkResult:
+        """Archive (or restore) many tasks in one call, descendants included.
+        Only called when `supports_bulk`. Partial-tolerant, like `bulk`."""
+        ...
+
+    def move_to_board(self, task_id: str, container_id: str,
+                      group_id: str | None = None) -> None:
+        """Move one task, and its sub-tasks, into another container.
+
+        Only called when `supports_cross_board_move`. `group_id` is the column
+        in the target container; None means its first. Raises ProviderError
+        when the platform did not move it - one task, so there is no partial.
+        """
+        ...
 
     def set_role_label(self, task_id: str, container_id: str,
                        role: str | None) -> None:

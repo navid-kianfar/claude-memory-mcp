@@ -17,12 +17,13 @@ bridge passes the local UUID, so "push everything again" is a no-op rather than 
 second copy of the board.
 """
 
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
 
 from memory_mcp.providers.base import (
-    ProviderAuthError, ProviderError, TransientProviderError,
+    ProviderAuthError, ProviderError, ProviderNotFoundError, TransientProviderError,
 )
 
 from memory_mcp.asoode import get_endpoints, get_pat
@@ -52,6 +53,13 @@ ORDINAL_TO_STATE = {v: k for k, v in STATE_TO_ORDINAL.items()}
 # so an untouched local task and an untouched remote one agree.
 PRIORITY_TO_OBJECTIVE = {0: 1, 1: 2, 2: 4, 3: 5}
 OBJECTIVE_TO_PRIORITY = {1: 0, 2: 1, 3: 1, 4: 2, 5: 3}
+
+# POST /tasks/bulk caps an explicit `ids` selector at 500 (BULK_TASK_IDS_MAX in
+# apps/backend/src/common/dto/task.dto.ts); a longer list is sent in chunks.
+BULK_IDS_MAX = 500
+
+# The action `type`s POST /tasks/bulk accepts (BULK_TASK_ACTION_TYPES, same file).
+BULK_ACTION_TYPES = frozenset({"archive", "unarchive", "move", "set-state", "remove"})
 
 # OperationResultStatus (packages/shared/src/enums/core.enum.ts) - 2 is Success;
 # the rest are why not. Verified against the enum on 2026-09-05: an earlier copy
@@ -92,6 +100,11 @@ class AsoodeError(ProviderError):
 
 class AsoodeAuthError(AsoodeError, ProviderAuthError):
     """The PAT is missing, revoked, expired, or not accepted."""
+
+
+class AsoodeNotFoundError(AsoodeError, ProviderNotFoundError):
+    """The envelope said NotFound (status 3): the task or board is not there,
+    or the token may not see it - asoode answers both the same way."""
 
 
 class AsoodeTransientError(AsoodeError, TransientProviderError):
@@ -158,7 +171,10 @@ class AsoodeClient:
             if status != STATUS_SUCCESS:
                 reason = _STATUS_MESSAGE.get(status, f"status {status}")
                 detail = payload.get("message") or payload.get("errors") or ""
-                raise AsoodeError(
+                error_type = (
+                    AsoodeNotFoundError if status == STATUS_NOT_FOUND else AsoodeError
+                )
+                raise error_type(
                     f"asoode {path}: {reason}{f' - {detail}' if detail else ''}",
                     status=status if isinstance(status, int) else None,
                 )
@@ -398,6 +414,61 @@ class AsoodeClient:
         than flipping it back.
         """
         return self._post(f"/tasks/{task_id}/archive", {"archived": bool(archived)})
+
+    def bulk_tasks(self, selector: dict, action: dict, *, dry_run: bool = False) -> dict:
+        """POST /tasks/bulk - one action over a selector (tasks.controller.ts:104).
+
+        `selector` is EITHER `{ids: [...]}` (1..500 UUIDv4) OR a board filter
+        `{packageId, listIds?, states?, archived?}`; sending both is a
+        validation failure. `action` is `{type}` for archive / unarchive /
+        remove, `{type: "set-state", state: <ordinal>}` or `{type: "move",
+        packageId, listId}`.
+
+        Partial-tolerant server-side: the answer's `failed` names the ids it
+        skipped (gone, or not enough access) and everything else went through,
+        so a non-empty `failed` is NOT raised here - the caller decides. Every
+        matched card brings its sub-task tree: remove deletes it, move carries
+        it, archive/unarchive/set-state apply to each descendant too.
+
+        Returns `{matched, succeeded, failed, affectedCount, dryRun}` with the
+        three id lists always present.
+        """
+        if action.get("type") not in BULK_ACTION_TYPES:
+            raise AsoodeError(f"unknown bulk action: {action.get('type')!r}")
+        body: dict = {"selector": selector, "action": action}
+        if dry_run:
+            body["dryRun"] = True
+        data = self._post("/tasks/bulk", body) or {}
+        return {
+            "matched": list(data.get("matched") or []),
+            "succeeded": list(data.get("succeeded") or []),
+            "failed": list(data.get("failed") or []),
+            "affectedCount": int(data.get("affectedCount") or 0),
+            "dryRun": bool(data.get("dryRun", dry_run)),
+        }
+
+    def bulk_tasks_by_ids(
+        self, ids: Sequence[str], action: dict, *, dry_run: bool = False,
+    ) -> dict:
+        """bulk_tasks over explicit ids, in chunks of BULK_IDS_MAX, merged.
+
+        Duplicates are dropped before chunking so one id never straddles two
+        calls. A chunk that raises stops the run: the chunks before it have
+        already been applied, which the caller learns from the exception
+        rather than from a half-merged answer.
+        """
+        unique = tuple(dict.fromkeys(i for i in ids if i))
+        merged: dict = {
+            "matched": [], "succeeded": [], "failed": [], "affectedCount": 0,
+            "dryRun": dry_run,
+        }
+        for start in range(0, len(unique), BULK_IDS_MAX):
+            chunk = list(unique[start:start + BULK_IDS_MAX])
+            answer = self.bulk_tasks({"ids": chunk}, action, dry_run=dry_run)
+            for key in ("matched", "succeeded", "failed"):
+                merged[key].extend(answer[key])
+            merged["affectedCount"] += answer["affectedCount"]
+        return merged
 
     def archive_list_tasks(self, list_id: str) -> Any:
         """Archive EVERY unarchived task in one list, in a single call.

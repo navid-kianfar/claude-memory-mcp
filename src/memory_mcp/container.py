@@ -89,6 +89,10 @@ class Container:
             outbox_repo=self.outbox_repo,
             mirror=self._mirror_soon,
             attachment_repo=self.attachment_repo,
+            # Same late binding: may an existing card move between two boards?
+            board_mover=lambda project, from_id, to_id: self.task_bridge.can_move_card(
+                project, from_id, to_id
+            ),
         )
         self.project_service = ProjectService(self.project_repo)
         self.portable_service = PortableService(self.project_repo)

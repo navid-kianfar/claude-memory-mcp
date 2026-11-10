@@ -65,6 +65,17 @@ def boards(project):
     }
 
 
+@pytest.fixture
+def no_card_moves(monkeypatch):
+    """A platform that cannot carry a card between boards.
+
+    asoode can now (POST /tasks/bulk `move`), so the refusal these tests pin is
+    the behaviour of a provider WITHOUT supports_cross_board_move. The move
+    itself is pinned in tests/services/test_bulk_mirror.py.
+    """
+    monkeypatch.setattr(container.task_bridge, "_provider", FakeProvider())
+
+
 def _create(project, **fields):
     return container.task_service.create_routed(
         CreateTaskRequest(project=project, title=fields.pop("title", "T"), **fields)
@@ -253,7 +264,9 @@ class TestRerouting:
         assert "link_id" in changed
         assert routing["board"] == "web"
 
-    def test_rerouting_a_mirrored_task_is_refused_naming_its_board(self, project, boards):
+    def test_rerouting_a_mirrored_task_is_refused_naming_its_board(
+        self, project, boards, no_card_moves,
+    ):
         task, _ = _create(project, title="Already mirrored")
         container.outbox_repo.remember(project, task.id, boards["main"]["id"], "r1", "todo")
 
@@ -344,7 +357,9 @@ class TestTheHttpContract:
         assert res.status_code == 400
         assert "belongs to board 'api'" in res.json()["error"]
 
-    def test_put_target_reroutes_and_a_mirrored_task_is_409(self, http, project, boards):
+    def test_put_target_reroutes_and_a_mirrored_task_is_409(
+        self, http, project, boards, no_card_moves,
+    ):
         free, _ = _create(project)
         res = http.put(f"/api/projects/{project}/tasks/{free.id}", json={"target": "web"})
         assert res.status_code == 200
@@ -516,7 +531,9 @@ class TestTheTools:
         assert answer["routing"]["board"] == "web"
         assert answer["task"]["link_id"] == boards["web"]["id"]
 
-    def test_task_update_refuses_moving_a_mirrored_task_as_an_error(self, project, boards):
+    def test_task_update_refuses_moving_a_mirrored_task_as_an_error(
+        self, project, boards, no_card_moves,
+    ):
         from memory_mcp import server
 
         task, _ = _create(project, path="apps/web/x.tsx")

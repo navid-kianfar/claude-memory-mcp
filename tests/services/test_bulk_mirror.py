@@ -57,6 +57,9 @@ def _stack(provider):
         container.session_repo, outbox_repo=outbox,
         link_resolver=lambda project, target: bridge_box["bridge"].resolve_link(
             project, target),
+        path_resolver=lambda project, **kw: bridge_box["bridge"].routing_for(project, **kw),
+        board_mover=lambda project, from_id, to_id: bridge_box["bridge"].can_move_card(
+            project, from_id, to_id),
     )
     bridge = TaskBridge(container.project_service, tasks, provider, outbox_repo=outbox)
     bridge_box["bridge"] = bridge
@@ -183,3 +186,137 @@ class TestRealDelete:
         bridge.flush(project)
 
         assert _ops(outbox, project) == ["delete"]
+
+
+def _link_id(slug, label):
+    from memory_mcp.db.registry import get_project_links
+
+    return next(l["id"] for l in get_project_links(slug) if l["label"] == label)
+
+
+class TestBoardMove:
+    def test_a_mirrored_task_moves_instead_of_being_refused(self, project):
+        from memory_mcp.models import UpdateTaskRequest
+
+        provider = _provider()
+        tasks, bridge, outbox = _stack(provider)
+        task = _create(tasks, project)
+        bridge.flush(project)
+
+        moved, changed, routing = tasks.update_routed(
+            UpdateTaskRequest(project=project, task_id=task.id, target="other"),
+        )
+
+        assert moved.link_id == _link_id(project, "other")
+        assert "link_id" in changed
+        assert "move" in _ops(outbox, project)
+
+    def test_the_card_moves_and_its_mapping_follows(self, project):
+        from memory_mcp.models import UpdateTaskRequest
+
+        provider = _provider()
+        tasks, bridge, outbox = _stack(provider)
+        task = _create(tasks, project)
+        bridge.flush(project)
+        tasks.update(UpdateTaskRequest(project=project, task_id=task.id, target="other"))
+
+        bridge.flush(project)
+
+        assert provider.board_moves == [("r1", "wp2", "o-todo")]
+        assert len(provider.created_tasks) == 1, "a move must never create a second card"
+        assert outbox.remote_id(project, task.id, _link_id(project, "other")) == "r1"
+        assert outbox.remote_id(project, task.id, _link_id(project, "board")) is None
+
+    def test_the_card_lands_in_the_column_of_its_state(self, project):
+        from memory_mcp.models import TaskState, UpdateTaskRequest
+
+        provider = _provider()
+        tasks, bridge, _ = _stack(provider)
+        task = _create(tasks, project)
+        tasks.set_state(project, task.id, TaskState.IN_PROGRESS)
+        bridge.flush(project)
+        tasks.update(UpdateTaskRequest(project=project, task_id=task.id, target="other"))
+
+        bridge.flush(project)
+
+        assert provider.board_moves == [("r1", "wp2", "o-doing")]
+
+    def test_sub_tasks_travel_with_the_card(self, project):
+        from memory_mcp.models import TaskState, UpdateTaskRequest
+
+        provider = _provider()
+        tasks, bridge, outbox = _stack(provider)
+        parent = _create(tasks, project, "Parent")
+        child = _create(tasks, project, "Child", parent_id=parent.id)
+        bridge.flush(project)
+        other = _link_id(project, "other")
+
+        tasks.update(UpdateTaskRequest(project=project, task_id=parent.id, target="other"))
+        assert tasks.get(project, child.id).link_id == other
+        tasks.set_state(project, child.id, TaskState.DONE)
+        bridge.flush(project)
+
+        assert [m[0] for m in provider.board_moves] == ["r1"], "the child rides along"
+        assert outbox.remote_id(project, child.id, other) == "r2"
+        assert ("r2", "done") in provider.states
+        assert len(provider.created_tasks) == 2
+
+    def test_an_op_queued_before_the_move_does_not_create_a_second_card(self, project):
+        from memory_mcp.models import UpdateTaskRequest
+
+        provider = _provider()
+        tasks, bridge, _ = _stack(provider)
+        task = _create(tasks, project)
+        bridge.flush(project)
+        tasks.comment(project, task.id, "queued while still on the first board")
+        tasks.update(UpdateTaskRequest(project=project, task_id=task.id, target="other"))
+
+        bridge.flush(project)
+
+        assert len(provider.created_tasks) == 1
+        assert provider.board_moves == [("r1", "wp2", "o-todo")]
+        assert provider.comments == [("r1", "queued while still on the first board")]
+
+    def test_without_the_capability_the_reroute_is_still_refused(self, project):
+        from memory_mcp.models import UpdateTaskRequest
+        from memory_mcp.services.task_service import MirroredRerouteError
+
+        provider = _provider(with_bulk=False)
+        tasks, bridge, _ = _stack(provider)
+        task = _create(tasks, project)
+        bridge.flush(project)
+
+        with pytest.raises(MirroredRerouteError):
+            tasks.update(UpdateTaskRequest(project=project, task_id=task.id, target="other"))
+        assert tasks.get(project, task.id).link_id is None
+
+    def test_a_board_of_another_memory_project_is_never_a_move_target(self, project):
+        provider = _provider()
+        _, bridge, _ = _stack(provider)
+        stranger = "bulk-mirror-stranger"
+        container.project_service.init_project(stranger, "Stranger")
+        upsert_project_link(
+            stranger, base_url="https://api.asoode.com", remote_project_id="p9",
+            remote_work_package_id="wp9", label="theirs", is_default=True,
+            default_list_id="x", state_list_map={},
+        )
+
+        assert not bridge.can_move_card(
+            project, _link_id(project, "board"), _link_id(stranger, "theirs"),
+        )
+        assert bridge.can_move_card(
+            project, _link_id(project, "board"), _link_id(project, "other"),
+        )
+
+    def test_boards_on_different_servers_cannot_trade_cards(self, project):
+        provider = _provider()
+        _, bridge, _ = _stack(provider)
+        upsert_project_link(
+            project, base_url="https://asoode.example.org", remote_project_id="p5",
+            remote_work_package_id="wp5", label="elsewhere", is_default=False,
+            default_list_id="e", state_list_map={},
+        )
+
+        assert not bridge.can_move_card(
+            project, _link_id(project, "board"), _link_id(project, "elsewhere"),
+        )

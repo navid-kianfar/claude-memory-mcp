@@ -1243,6 +1243,10 @@ class TaskBridge:
         # the record home.
         self.echo.note(remote_id)
 
+        if op == "move":
+            # _ensure_remote above already moved the card if it was elsewhere;
+            # this op only exists so the move happens with no other edit.
+            return True
         if op == "role":
             if created_here or not caps.supports_labels:
                 return created_here  # a new card already carries its role
@@ -1311,6 +1315,9 @@ class TaskBridge:
         )
         if remote_id:
             return remote_id, False
+        moved_id = self._move_from_other_board(slug, task, link, provider)
+        if moved_id:
+            return moved_id, False
 
         parent_remote = None
         if task.parent_id and provider.capabilities.supports_subtasks:
@@ -1341,6 +1348,76 @@ class TaskBridge:
         self._sync_new_card(slug, task, link, provider, remote_id)
         self._remember(slug, task.id, link["id"], remote_id, task.state.value)
         return remote_id, True
+
+    def can_move_card(self, slug: str, from_link_id: int, to_link_id: int) -> bool:
+        """Can a card on one of this project's boards be moved to another?
+
+        Both links must belong to `slug` - a card never leaves its memory
+        project - and reach the same platform on the same server, and that
+        platform must carry a card between containers.
+        """
+        links = {link["id"]: link for link in get_project_links(slug)}
+        source, target = links.get(from_link_id), links.get(to_link_id)
+        if source is None or target is None or from_link_id == to_link_id:
+            return False
+        if (source.get("base_url") or "") != (target.get("base_url") or ""):
+            return False
+        source_provider = self.provider_for(source)
+        target_provider = self.provider_for(target)
+        if source_provider.name != target_provider.name:
+            return False
+        return bool(target_provider.capabilities.supports_cross_board_move)
+
+    def _move_from_other_board(self, slug: str, task, link: dict, provider) -> str | None:
+        """Move the task's card here from another of the project's boards.
+
+        A task with no card on `link` but one on another link it can move from
+        was RE-ROUTED (TaskService queues a `move` op). Any op of the task may
+        get here first - one queued before the re-route included - and
+        creating would put a SECOND card on this board, so every path through
+        _ensure_remote moves instead. Returns the card's id, or None when there
+        is nothing to move.
+
+        A sub-task moves with its parent: the parent is brought here first,
+        which carries this card along, and only a card still left behind is
+        moved on its own. Every mapping the move carried follows it in
+        task_sync.
+        """
+        if self._outbox is None or not provider.capabilities.supports_cross_board_move:
+            return None
+        elsewhere = self._outbox.remote_ids_for(slug, task.id)
+        movable = next(
+            (
+                (link_id, remote_id) for link_id, remote_id in elsewhere.items()
+                if link_id != link["id"] and self.can_move_card(slug, link_id, link["id"])
+            ),
+            None,
+        )
+        if movable is None:
+            return None
+        if task.parent_id:
+            self._bring_parent(slug, task, link, provider)
+            carried = self._outbox.remote_id(slug, task.id, link["id"])
+            if carried:
+                return carried
+        from_link_id, remote_id = movable
+        group_id = (
+            (link.get("state_list_map") or {}).get(task.state.value)
+            or link.get("default_list_id")
+        )
+        self.echo.note(remote_id)
+        provider.move_to_board(remote_id, link["remote_work_package_id"], group_id)
+        descendants = self._tasks.descendant_ids(slug, task.id)
+        self._outbox.rebind_link(slug, (task.id, *descendants), from_link_id, link["id"])
+        return remote_id
+
+    def _bring_parent(self, slug: str, task, link: dict, provider) -> None:
+        """Ensure the parent's card is on `link`, moving it if it is elsewhere."""
+        try:
+            parent = self._tasks.get(slug, task.parent_id)
+        except Exception:  # noqa: BLE001 - parent gone; the child moves alone
+            return
+        self._ensure_remote(slug, parent, link, provider)
 
     def _remember(self, slug: str, task_id: str, link_id: int, remote_id: str,
                   state: str) -> None:

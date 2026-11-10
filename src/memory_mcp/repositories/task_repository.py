@@ -11,7 +11,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from memory_mcp.db.connection import connect, is_database_open, project_database_path
+from memory_mcp.db.connection import (
+    connect, is_database_open, project_database_path, transaction,
+)
 from memory_mcp.models import (
     PendingAttachment, Task, TaskAttachment, TaskComment, TaskFilter, TaskTimeEntry,
 )
@@ -73,6 +75,10 @@ STATE_ORDER_SQL = """
 # user put things in has to survive. Priority stays a column, not a sort key -
 # otherwise dragging a task past a higher-priority one would silently snap back.
 _ORDER_BY = f"ORDER BY {STATE_ORDER_SQL}, position ASC, created_at ASC"
+
+# How deep a sub-task walk goes before it stops. Real trees are two or three
+# levels; the bound exists so a corrupted parent loop cannot spin forever.
+_MAX_TREE_DEPTH = 32
 
 
 def _row_to_task(row) -> Task:
@@ -275,6 +281,47 @@ class TaskRepository:
                 [parent_id],
             ).fetchall()
         return [_row_to_task(r) for r in rows]
+
+    def child_ids(self, project: str, parent_id: str) -> tuple[str, ...]:
+        """Every direct sub-task's id, ARCHIVED ones included - what
+        hard_delete promotes, unlike children_of, which lists live ones."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE parent_id = ? ORDER BY created_at, id",
+                [parent_id],
+            ).fetchall()
+        return tuple(r[0] for r in rows)
+
+    def descendant_ids(self, project: str, root_id: str) -> tuple[str, ...]:
+        """Every task below `root_id`, archived ones included, in one query.
+
+        The cycle guard is the depth bound: a parent loop cannot be written
+        through _check_parentable, but a recursive walk must terminate anyway.
+        """
+        with connect(project) as conn:
+            rows = conn.execute(
+                "WITH RECURSIVE tree(id, depth) AS ("
+                "  SELECT id, 1 FROM tasks WHERE parent_id = ?"
+                "  UNION ALL"
+                "  SELECT t.id, tree.depth + 1 FROM tasks t"
+                "  JOIN tree ON t.parent_id = tree.id WHERE tree.depth < ?"
+                ") SELECT DISTINCT id FROM tree ORDER BY id",
+                [root_id, _MAX_TREE_DEPTH],
+            ).fetchall()
+        return tuple(r[0] for r in rows)
+
+    def set_link_many(self, project: str, task_ids: Sequence[str], link_id: int | None) -> int:
+        """Point several tasks at one board in a single statement."""
+        if not task_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in task_ids)
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"UPDATE tasks SET link_id = ?, updated_at = current_timestamp "
+                f"WHERE id IN ({placeholders}) RETURNING id",
+                [link_id, *task_ids],
+            ).fetchall()
+        return len(rows)
 
     def count_open(self, project: str) -> int:
         with connect(project) as conn:
@@ -1800,6 +1847,35 @@ class OutboxRepository:
         for link_id, remote_task_id in rows:
             grouped.setdefault(int(link_id), []).append(remote_task_id)
         return {link_id: tuple(ids) for link_id, ids in grouped.items()}
+
+    def rebind_link(
+        self, project: str, task_ids: Sequence[str], from_link: int, to_link: int,
+    ) -> int:
+        """Move task_sync rows from one link to another - the card moved boards.
+
+        The remote id and last pushed state travel unchanged: it is the same
+        card. A task that somehow already maps on `to_link` keeps that row and
+        loses the stale one, since (task_id, link_id) is the key. One
+        transaction, so a half-moved mapping is never visible.
+        """
+        if not task_ids:
+            return 0
+        from datetime import datetime, timezone
+
+        placeholders = ", ".join("?" for _ in task_ids)
+        now = datetime.now(timezone.utc)
+        with transaction(project), connect(project) as conn:
+            conn.execute(
+                f"DELETE FROM task_sync WHERE link_id = ? AND task_id IN ({placeholders}) "
+                "AND task_id IN (SELECT task_id FROM task_sync WHERE link_id = ?)",
+                [from_link, *task_ids, to_link],
+            )
+            rows = conn.execute(
+                f"UPDATE task_sync SET link_id = ?, updated_at = ? "
+                f"WHERE link_id = ? AND task_id IN ({placeholders}) RETURNING task_id",
+                [to_link, now, from_link, *task_ids],
+            ).fetchall()
+        return len(rows)
 
     def remote_id(self, project: str, task_id: str, link_id: int) -> str | None:
         try:

@@ -1864,11 +1864,13 @@ def memory_task_update(
 
     `path` / `target` re-route the task to another BOARD, with the same meaning
     as on memory_task_add (`path` here is the repo subtree the work touches, not
-    a file to attach - that is memory_task_attach). Only before the task is on
-    a board: once it has a card there, moving it is refused, naming that board,
-    because no board move exists and a second card would be created. A path
-    matching no board leaves the task where it is. The answer's `routing` says
-    what was decided.
+    a file to attach - that is memory_task_attach). A task that already has a
+    card is MOVED to the other board, sub-tasks and all, when the platform can
+    carry a card between the two (asoode can; `routing.board_move` is then
+    true); otherwise moving it is refused, naming its board, because a second
+    card would be created. Only boards linked to the same project qualify. A
+    path matching no board leaves the task where it is. The answer's `routing`
+    says what was decided.
 
     Closing a task that was never started records an ESTIMATE, marked manual,
     from the latest evidence of work - see memory_task_done. `session_id` is the

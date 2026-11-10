@@ -179,6 +179,18 @@ def _title_similarity(a: frozenset[str], b: frozenset[str]) -> float:
     contained = shared / min(len(a), len(b))
     return max(jaccard, contained * 0.75) if shared >= 3 else jaccard
 
+@dataclass(frozen=True)
+class _Reroute:
+    """What an update's path/target decided about the task's board."""
+
+    routing: dict | None = None
+    link_id: int | None = None
+    #: The task's link_id changes.
+    changes_link: bool = False
+    #: The link the task's existing card moves FROM, when it moves at all.
+    moves_card_from: int | None = None
+
+
 class TaskService:
     """Business logic for the task store."""
 
@@ -193,6 +205,7 @@ class TaskService:
         mirror=None,
         attachment_repo=None,
         path_resolver=None,
+        board_mover=None,
     ):
         self._task_repo = task_repo
         self._provenance_repo = provenance_repo
@@ -207,6 +220,11 @@ class TaskService:
         # (TaskBridge.routing_for). Injected for the same reason. Without it,
         # only `target` routes, exactly as before path routing existed.
         self._path_resolver = path_resolver
+        # `(project, from_link_id, to_link_id) -> bool`: can a card that already
+        # exists on one linked board be MOVED to the other (TaskBridge.
+        # can_move_card)? Injected for the same reason. Without it, or when it
+        # says no, re-routing a mirrored task is refused as it always was.
+        self._board_mover = board_mover
         # The bridge's durable half. Both optional: a task store with no asoode
         # configured must behave exactly as it always has.
         self._outbox = outbox_repo
@@ -604,17 +622,19 @@ class TaskService:
         task, changed, _ = self.update_routed(request)
         return task, changed
 
-    def _reroute(self, request: UpdateTaskRequest, before: Task) -> tuple[dict | None, int | None, bool]:
-        """Resolve an update's path/target. Returns (routing, new_link_id, changes).
+    def _reroute(self, request: UpdateTaskRequest, before: Task) -> _Reroute:
+        """Resolve an update's path/target into a _Reroute.
 
-        Refused - before anything is written - when the task already has a card
-        on the board it would leave (MirroredRerouteError). A path matching no
-        board is no evidence, so the task keeps the board it has.
+        A task that already has a card on the board it would leave is MOVED
+        there when the platform can carry a card between the two boards
+        (`board_mover`), and refused otherwise - before anything is written
+        (MirroredRerouteError). A path matching no board is no evidence, so
+        the task keeps the board it has.
         """
         current: dict | None = None
         if self._path_resolver is None:
             if not request.target:
-                return None, None, False
+                return _Reroute()
             new_id = self._resolve_target(request.project, request.target)
             current_id = before.link_id
             routing = None
@@ -623,14 +643,20 @@ class TaskService:
                 request.project, request.path, request.target, before,
             )
             if routing is None or not routing["matched"]:
-                return routing, None, False
+                return _Reroute(routing=routing)
             new_id = routing["link_id"]
             current_id = current["id"] if current else None
 
-        if (
+        has_card_elsewhere = (
             current_id is not None and new_id != current_id and self._outbox is not None
             and self._outbox.remote_id(request.project, before.id, current_id)
-        ):
+        )
+        if has_card_elsewhere and self._can_move_card(request.project, current_id, new_id):
+            return _Reroute(
+                routing=routing, link_id=new_id, changes_link=True,
+                moves_card_from=current_id,
+            )
+        if has_card_elsewhere:
             here = (
                 (current or {}).get("label")
                 or (current or {}).get("remote_work_package_id")
@@ -639,11 +665,18 @@ class TaskService:
             there = (routing or {}).get("board") or f"link {new_id}"
             raise MirroredRerouteError(
                 f"{before.title!r} already has a card on board {here!r}. Moving it "
-                f"to {there!r} would create a SECOND card - no board move exists. "
+                f"to {there!r} would create a SECOND card - this board cannot move a card to that one. "
                 f"Move or close the card on {here!r} by hand, then re-create the "
                 "task with the right path."
             )
-        return routing, new_id, new_id != before.link_id
+        return _Reroute(
+            routing=routing, link_id=new_id, changes_link=new_id != before.link_id,
+        )
+
+    def _can_move_card(self, project: str, from_link: int, to_link: int | None) -> bool:
+        if self._board_mover is None or to_link is None:
+            return False
+        return bool(self._board_mover(project, from_link, to_link))
 
     def update_routed(
         self, request: UpdateTaskRequest, session_id: str | None = None,
@@ -651,8 +684,11 @@ class TaskService:
         """update() plus the routing decision when `path` or `target` was passed.
 
         Returns (task, changed, routing). A link change shows in `changed` as
-        `link_id`; it queues no mirror op of its own, because the pending create
-        routes by link_id when it flushes and a task with a card cannot get here.
+        `link_id`. For a task with no card yet it queues no mirror op of its
+        own: the pending create routes by link_id when it flushes. For a task
+        whose card the platform can move, it queues a `move` op, re-points the
+        task's sub-tasks at the new board too (their cards travel with it), and
+        `routing` gains `board_move: true`.
 
         `session_id` is the memory session making the change. A close splits a
         never-started task's estimate by it; a move to in_progress makes it the
@@ -660,9 +696,14 @@ class TaskService:
         """
         before = self._require(request.project, request.task_id)
 
-        routing, new_link_id, link_changes = None, None, False
+        reroute = _Reroute()
         if request.path is not None or request.target is not None:
-            routing, new_link_id, link_changes = self._reroute(request, before)
+            reroute = self._reroute(request, before)
+        routing, new_link_id, link_changes = (
+            reroute.routing, reroute.link_id, reroute.changes_link,
+        )
+        if reroute.moves_card_from is not None and routing is not None:
+            routing = {**routing, "board_move": True}
 
         role_changed = False
         fields: dict = {}
@@ -704,6 +745,10 @@ class TaskService:
         task = self._task_repo.update(request.project, request.task_id, fields)
         if routing is not None:
             self._record_route(request.project, request.task_id, routing)
+        if reroute.moves_card_from is not None:
+            self._queue_board_move(
+                request.project, request.task_id, reroute.moves_card_from, new_link_id,
+            )
 
         state_changed = request.state is not None and request.state != before.state
         closed: list = []
@@ -798,6 +843,26 @@ class TaskService:
                 "role": task.role,
             })
         return task, changed, routing
+
+    def _queue_board_move(
+        self, project: str, task_id: str, from_link: int, to_link: int | None,
+    ) -> None:
+        """The task's card is moving boards: its sub-tasks go with it.
+
+        The platform carries the sub-task cards, so locally they follow the
+        parent to the new board - otherwise their next edit would route to the
+        old one and find no card there. Queued as its own op so the move
+        happens even when nothing else about the task changes.
+        """
+        descendants = self._task_repo.descendant_ids(project, task_id)
+        self._task_repo.set_link_many(project, descendants, to_link)
+        self._record(project, task_id, "task_board_move", {
+            "from_link": from_link, "to_link": to_link,
+            "sub_tasks": len(descendants),
+        })
+        self._enqueue(project, task_id, "move", {
+            "from_link": from_link, "to_link": to_link,
+        })
 
     def reorder(self, project: str, ordered_ids: list[str]) -> int:
         """Apply a manual order to the given tasks, in the order supplied."""
@@ -1421,6 +1486,10 @@ class TaskService:
         self._enqueue(project, task_id, "time", {})
         return self._with_time_note(self.detail(project, task_id), recovered)
 
+    def descendant_ids(self, project: str, task_id: str) -> tuple[str, ...]:
+        """Every sub-task below a task, archived ones included."""
+        return self._task_repo.descendant_ids(project, task_id)
+
     def convert_to_task(self, project: str, task_id: str) -> Task:
         """Promote a sub-task to a task of its own.
 
@@ -1457,8 +1526,9 @@ class TaskService:
         # locally. The flusher deletes it where the platform can, and closes
         # and archives it where it cannot.
         remotes = self._outbox.remote_ids_for(project, task_id) if self._outbox else {}
-        children = self._task_repo.children_of(project, task_id)
-        child_ids = tuple(child.id for child in children)
+        # ALL children, archived ones too: hard_delete promotes every one, and
+        # an archived child's card would otherwise go down with the parent's.
+        child_ids = self._task_repo.child_ids(project, task_id)
         child_remotes = (
             self._outbox.remote_ids_by_link(project, child_ids) if self._outbox else {}
         )
@@ -1467,8 +1537,8 @@ class TaskService:
         # Queued BEFORE the delete, and the order is load-bearing: a platform
         # delete takes the card's whole sub-task tree with it, so a promote that
         # reached the board after the remove would have nothing left to promote.
-        for child in children:
-            self._enqueue(project, child.id, "parent", {"parent_id": None})
+        for child_id in child_ids:
+            self._enqueue(project, child_id, "parent", {"parent_id": None})
         if remotes:
             # After hard_delete, which clears the task's own outbox rows. The
             # children's cards ride along so the flusher can promote them again

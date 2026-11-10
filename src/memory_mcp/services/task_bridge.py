@@ -370,6 +370,67 @@ def plan_time_import(
     return TimeImportPlan(imported=tuple(imported), matched=tuple(matched))
 
 
+#: Ops a held archive must be sent before: their effect is not limited to the
+#: row's own task (a delete removes a tree, a move carries one).
+_BATCH_BARRIER_OPS = frozenset({"delete", "move", "parent"})
+
+
+@dataclass
+class _FlushTally:
+    """What one flush pass did, row by row."""
+
+    flushed: int = 0
+    failed: int = 0
+    skipped: int = 0
+    abandoned: int = 0
+    reason: str | None = None
+
+    def result(self, remaining: int) -> dict:
+        answer: dict = {
+            "flushed": self.flushed, "failed": self.failed, "skipped": self.skipped,
+            "abandoned": self.abandoned, "remaining": remaining,
+        }
+        if self.reason:
+            answer["reason"] = self.reason
+        return answer
+
+
+@dataclass(frozen=True)
+class _BatchedArchive:
+    """One archive row's place in a bulk archive call."""
+
+    link_id: int
+    archived: bool
+    remote_id: str
+    provider: TaskProvider
+
+
+class _ArchiveBatch:
+    """Archive rows held back to go out as one bulk call per (link, archived).
+
+    Insertion-ordered, so rows settle in the order they were queued.
+    """
+
+    def __init__(self) -> None:
+        self._groups: dict[tuple[int, bool], list[tuple[dict, _BatchedArchive]]] = {}
+        self._task_ids: set[str] = set()
+
+    def add(self, row: dict, entry: _BatchedArchive) -> None:
+        key = (entry.link_id, entry.archived)
+        self._groups.setdefault(key, []).append((row, entry))
+        self._task_ids.add(row["task_id"])
+
+    def holds(self, task_id: str) -> bool:
+        return task_id in self._task_ids
+
+    def groups(self) -> tuple[tuple[tuple[dict, _BatchedArchive], ...], ...]:
+        return tuple(tuple(group) for group in self._groups.values())
+
+    def clear(self) -> None:
+        self._groups.clear()
+        self._task_ids.clear()
+
+
 class TaskBridge:
     def __init__(
         self, project_service, task_service, provider: TaskProvider | None = None,
@@ -1179,45 +1240,141 @@ class TaskBridge:
             return {"flushed": 0, "failed": 0, "skipped": len(pending),
                     "reason": "project is not linked"}
 
-        flushed = failed = skipped = abandoned = 0
+        tally = _FlushTally()
+        batch = _ArchiveBatch()
         for row in pending:
-            try:
-                if self._flush_row(slug, row):
-                    flushed += 1
-                else:
-                    skipped += 1
+            # An archive waiting in the batch must not be overtaken by a later
+            # op for the same task, nor by a delete or a move, whose effects
+            # reach beyond the one card: send what is held first.
+            if batch.holds(row["task_id"]) or row["op"] in _BATCH_BARRIER_OPS:
+                if not self._send_archive_batch(slug, batch, tally):
+                    return tally.result(self._outbox.depth(slug))
+            candidate = self._archive_candidate(slug, row)
+            if candidate is not None:
+                batch.add(row, candidate)
+                continue
+            if not self._flush_one(slug, row, tally):
+                return tally.result(self._outbox.depth(slug))
+        self._send_archive_batch(slug, batch, tally)
+        return tally.result(self._outbox.depth(slug))
+
+    def _flush_one(self, slug: str, row: dict, tally: "_FlushTally") -> bool:
+        """Mirror one row and settle it. False means stop this pass."""
+        try:
+            if self._flush_row(slug, row):
+                tally.flushed += 1
+            else:
+                tally.skipped += 1
+            self._outbox.resolve(slug, row["id"])
+            return True
+        except OutboxDamagedError as e:
+            # The call went out; only the local cleanup failed, and failing
+            # the row would hit the same damage. Stop loudly - the state
+            # guard in _apply_state keeps the retry from re-sending it.
+            logger.error("asoode mirror for %s stopped: %s", slug, e)
+            tally.failed += 1
+            tally.reason = str(e)
+            return False
+        except TransientProviderError as e:
+            # An outage is not the row's fault: keep it, note the error,
+            # spend no attempt - up to a cap, past which it counts.
+            self._fail_row(slug, row, str(e), tally, count=False)
+            return False
+        except ProviderError as e:
+            # Stop at the first failure: the remote is unreachable or the
+            # token is bad, and hammering it with the rest of the queue only
+            # multiplies the wait. The rows are still there for next time.
+            self._fail_row(slug, row, str(e), tally)
+            return False
+        except Exception as e:  # noqa: BLE001
+            self._fail_row(slug, row, f"{type(e).__name__}: {e}", tally)
+            return False
+
+    def _fail_row(self, slug: str, row: dict, error: str, tally: "_FlushTally",
+                  *, count: bool = True) -> None:
+        if self._outbox.fail(slug, row["id"], error, count=count):
+            tally.abandoned += 1
+        tally.failed += 1
+
+    def _archive_candidate(self, slug: str, row: dict) -> "_BatchedArchive | None":
+        """The row as one entry of a bulk archive, or None to send it alone.
+
+        Only an archive of a card that already exists, on a provider with the
+        bulk API, of a task with NO sub-tasks: the bulk route archives every
+        descendant of a card too, which the single-task route - and the local
+        archive - do not, so a parent's archive goes alone and stays exact.
+        """
+        if row["op"] != "archive" or self._outbox is None:
+            return None
+        try:
+            task = self._tasks.get(slug, row["task_id"])
+            link = self.route(slug, task)
+        except Exception:  # noqa: BLE001 - the single path reports it
+            return None
+        if link is None:
+            return None
+        provider = self.provider_for(link)
+        caps = provider.capabilities
+        if not (caps.supports_bulk and caps.supports_archive):
+            return None
+        remote_id = self._outbox.remote_id(slug, task.id, link["id"])
+        if not remote_id or self._tasks.descendant_ids(slug, task.id):
+            return None
+        archived = bool((row.get("payload") or {}).get("archived", True))
+        return _BatchedArchive(
+            link_id=link["id"], archived=archived, remote_id=remote_id, provider=provider,
+        )
+
+    def _send_archive_batch(self, slug: str, batch: "_ArchiveBatch",
+                            tally: "_FlushTally") -> bool:
+        """Send the held archives, one bulk call per (link, archived) group.
+
+        Each row settles on its OWN outcome: an id the platform reported in
+        `failed` fails that row exactly like a single archive that failed, and
+        every other row is acked. False means stop this pass - a call failed,
+        or a row did - with the unsent groups still queued.
+        """
+        try:
+            for group in batch.groups():
+                if not self._send_archive_group(slug, group, tally):
+                    return False
+            return True
+        finally:
+            batch.clear()
+
+    def _send_archive_group(self, slug: str, group: tuple, tally: "_FlushTally") -> bool:
+        first = group[0][1]
+        remote_ids = tuple(entry.remote_id for _, entry in group)
+        for remote_id in remote_ids:
+            self.echo.note(remote_id)
+        try:
+            result = first.provider.archive_many(remote_ids, first.archived)
+        except TransientProviderError as e:
+            for row, _ in group:
+                self._fail_row(slug, row, str(e), tally, count=False)
+            return False
+        except Exception as e:  # noqa: BLE001 - every row of the call failed alike
+            for row, _ in group:
+                self._fail_row(slug, row, f"{type(e).__name__}: {e}", tally)
+            return False
+        skipped = frozenset(result.failed)
+        try:
+            for row, entry in group:
+                if entry.remote_id in skipped:
+                    self._fail_row(
+                        slug, row,
+                        f"the board did not archive card {entry.remote_id}: it is "
+                        "gone, or the token lacks admin access to it", tally,
+                    )
+                    continue
                 self._outbox.resolve(slug, row["id"])
-            except OutboxDamagedError as e:
-                # The call went out; only the local cleanup failed, and failing
-                # the row would hit the same damage. Stop loudly - the state
-                # guard in _apply_state keeps the retry from re-sending it.
-                logger.error("asoode mirror for %s stopped: %s", slug, e)
-                return {"flushed": flushed, "failed": failed + 1, "skipped": skipped,
-                        "abandoned": abandoned, "reason": str(e)}
-            except TransientProviderError as e:
-                # An outage is not the row's fault: keep it, note the error,
-                # spend no attempt - up to a cap, past which it counts.
-                if self._outbox.fail(slug, row["id"], str(e), count=False):
-                    abandoned += 1
-                failed += 1
-                break
-            except ProviderError as e:
-                given_up = self._outbox.fail(slug, row["id"], str(e))
-                failed += 1
-                if given_up:
-                    abandoned += 1
-                # Stop at the first failure: the remote is unreachable or the
-                # token is bad, and hammering it with the rest of the queue only
-                # multiplies the wait. The rows are still there for next time.
-                break
-            except Exception as e:  # noqa: BLE001
-                given_up = self._outbox.fail(slug, row["id"], f"{type(e).__name__}: {e}")
-                failed += 1
-                if given_up:
-                    abandoned += 1
-                break
-        return {"flushed": flushed, "failed": failed, "skipped": skipped,
-                "abandoned": abandoned, "remaining": self._outbox.depth(slug)}
+                tally.flushed += 1
+        except OutboxDamagedError as e:
+            logger.error("asoode mirror for %s stopped: %s", slug, e)
+            tally.failed += 1
+            tally.reason = str(e)
+            return False
+        return not skipped
 
     def _flush_row(self, slug: str, row: dict) -> bool:
         """Mirror one outbox row. False when there is nothing to do."""

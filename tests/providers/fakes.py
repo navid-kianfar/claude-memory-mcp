@@ -255,6 +255,7 @@ class FakeProvider:
             raise ProviderError(f"unknown state {state!r}")
         task["state"] = state
         self.states.append((task_id, state))
+        self.calls.append(("set_state", task_id, state))
 
     def move(self, task_id, group_id):
         self._require_task(task_id)["group"] = group_id
@@ -263,6 +264,7 @@ class FakeProvider:
     def comment(self, task_id, body):
         self._require_task(task_id)
         self.comments.append((task_id, body))
+        self.calls.append(("comment", task_id))
 
     def ensure_group(self, container_id, title, color=""):
         """Create the column if missing; colour it only when it has none."""

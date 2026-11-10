@@ -320,3 +320,118 @@ class TestBoardMove:
         assert not bridge.can_move_card(
             project, _link_id(project, "board"), _link_id(project, "elsewhere"),
         )
+
+
+class TestBatchedArchive:
+    def _mirrored(self, tasks, bridge, slug, count):
+        made = [_create(tasks, slug, f"Task {n}") for n in range(count)]
+        bridge.flush(slug)
+        return made
+
+    def test_many_archives_go_out_as_one_bulk_call(self, project):
+        provider = _provider()
+        tasks, bridge, outbox = _stack(provider)
+        made = self._mirrored(tasks, bridge, project, 3)
+
+        for task in made:
+            tasks.archive(project, task.id)
+        result = bridge.flush(project)
+
+        assert provider.bulk_calls == [("archive", ("r1", "r2", "r3"))]
+        assert not [c for c in provider.calls if c[0] == "archive"], "no single archive"
+        assert result["flushed"] == 3
+        assert outbox.depth(project) == 0
+
+    def test_a_card_the_board_skipped_fails_only_its_own_row(self, project):
+        provider = _provider()
+        tasks, bridge, outbox = _stack(provider)
+        made = self._mirrored(tasks, bridge, project, 3)
+        provider._tasks.pop("r2")  # gone from the board
+
+        for task in made:
+            tasks.archive(project, task.id)
+        result = bridge.flush(project)
+
+        assert result["failed"] == 1 and result["flushed"] == 2
+        left = outbox.pending(project)
+        assert [r["task_id"] for r in left] == [made[1].id]
+        assert "did not archive card r2" in left[0]["last_error"]
+
+    def test_an_earlier_state_change_is_sent_before_the_archive(self, project):
+        provider = _provider()
+        tasks, bridge, _ = _stack(provider)
+        made = self._mirrored(tasks, bridge, project, 2)
+
+        for task in made:
+            tasks.done(project, task.id)
+            tasks.archive(project, task.id)
+        bridge.flush(project)
+
+        bulk_at = provider.calls.index(("bulk", "archive", ("r1", "r2")))
+        states_at = [i for i, c in enumerate(provider.calls) if c[0] == "set_state"]
+        assert states_at and max(states_at) < bulk_at
+
+    def test_a_later_op_for_the_same_task_waits_for_its_archive(self, project):
+        provider = _provider()
+        tasks, bridge, _ = _stack(provider)
+        task = self._mirrored(tasks, bridge, project, 1)[0]
+
+        tasks.archive(project, task.id)
+        tasks.comment(project, task.id, "after the archive")
+        bridge.flush(project)
+
+        assert provider.calls.index(("bulk", "archive", ("r1",))) < provider.calls.index(
+            ("comment", "r1"))
+
+    def test_a_parent_is_archived_alone_so_its_sub_tasks_are_untouched(self, project):
+        """The bulk route archives every descendant; the local archive does not."""
+        provider = _provider()
+        tasks, bridge, _ = _stack(provider)
+        parent = _create(tasks, project, "Parent")
+        _create(tasks, project, "Child", parent_id=parent.id)
+        bridge.flush(project)
+
+        tasks.archive(project, parent.id)
+        bridge.flush(project)
+
+        assert provider.bulk_calls == []
+        assert provider.archived == [("r1", True)]
+        assert not provider._tasks["r2"].get("archived")
+
+    def test_archive_and_restore_are_separate_calls(self, project):
+        provider = _provider()
+        tasks, bridge, outbox = _stack(provider)
+        a, b = self._mirrored(tasks, bridge, project, 2)
+
+        outbox.enqueue(project, a.id, "archive", {"archived": True})
+        outbox.enqueue(project, b.id, "archive", {"archived": False})
+        bridge.flush(project)
+
+        assert sorted(provider.bulk_calls) == [("archive", ("r1",)), ("unarchive", ("r2",))]
+
+    def test_an_outage_keeps_every_row_without_spending_attempts(self, project):
+        from memory_mcp.providers import TransientProviderError
+
+        provider = _provider()
+        tasks, bridge, outbox = _stack(provider)
+        made = self._mirrored(tasks, bridge, project, 2)
+        for task in made:
+            tasks.archive(project, task.id)
+        provider.fail = TransientProviderError("502")
+
+        bridge.flush(project)
+
+        rows = outbox.pending(project)
+        assert len(rows) == 2
+        assert all(r["attempts"] == 0 for r in rows)
+
+    def test_without_bulk_each_archive_is_its_own_call(self, project):
+        provider = _provider(with_bulk=False)
+        tasks, bridge, _ = _stack(provider)
+        made = self._mirrored(tasks, bridge, project, 2)
+
+        for task in made:
+            tasks.archive(project, task.id)
+        bridge.flush(project)
+
+        assert provider.archived == [("r1", True), ("r2", True)]

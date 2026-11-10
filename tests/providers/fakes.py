@@ -17,6 +17,7 @@ from memory_mcp.providers import (
     ContainerRef,
     Group,
     ProviderError,
+    ProviderNotFoundError,
     RemoteTask,
     RemoteTimeEntry,
     SpaceRef,
@@ -137,7 +138,7 @@ class FakeProvider:
         self._boom()
         t = self._tasks.get(task_id)
         if t is None:
-            raise ProviderError(f"no task {task_id}")
+            raise ProviderNotFoundError(f"no task {task_id}")
         return t
 
     # ---------- protocol ----------

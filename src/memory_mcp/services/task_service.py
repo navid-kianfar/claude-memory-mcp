@@ -1453,21 +1453,34 @@ class TaskService:
             {"title": task.title, "state": task.state.value},
         )
         # Where the card lives, read BEFORE the delete takes the mapping with
-        # it. asoode has no delete route, so the card is archived - it must not
-        # stay on the board as a live task nobody has locally.
+        # it: the card must not stay on the board as a live task nobody has
+        # locally. The flusher deletes it where the platform can, and closes
+        # and archives it where it cannot.
         remotes = self._outbox.remote_ids_for(project, task_id) if self._outbox else {}
         children = self._task_repo.children_of(project, task_id)
+        child_ids = tuple(child.id for child in children)
+        child_remotes = (
+            self._outbox.remote_ids_by_link(project, child_ids) if self._outbox else {}
+        )
         self._task_repo.hard_delete(project, task_id)
-        if remotes:
-            # After the delete: hard_delete clears the task's outbox rows.
-            self._enqueue(project, task_id, "delete", {
-                "remote": {str(link_id): rid for link_id, rid in remotes.items()},
-                "title": task.title,
-            })
-        # hard_delete promoted the children locally; the board must see the same
-        # or they stay nested under a card that has just been archived.
+        # hard_delete promoted the children locally; the board must see the same.
+        # Queued BEFORE the delete, and the order is load-bearing: a platform
+        # delete takes the card's whole sub-task tree with it, so a promote that
+        # reached the board after the remove would have nothing left to promote.
         for child in children:
             self._enqueue(project, child.id, "parent", {"parent_id": None})
+        if remotes:
+            # After hard_delete, which clears the task's own outbox rows. The
+            # children's cards ride along so the flusher can promote them again
+            # right before the remove - the guard for a promote row that was
+            # given up on or could not be routed.
+            self._enqueue(project, task_id, "delete", {
+                "remote": {str(link_id): rid for link_id, rid in remotes.items()},
+                "children": {
+                    str(link_id): list(ids) for link_id, ids in child_remotes.items()
+                },
+                "title": task.title,
+            })
         return {"status": "ok", "deleted": task_id, "title": task.title}
 
     def archive(self, project: str, task_id: str) -> Task:

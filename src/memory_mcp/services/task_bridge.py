@@ -57,7 +57,8 @@ from datetime import datetime, timedelta, timezone
 from memory_mcp.asoode import get_endpoints
 from memory_mcp.exceptions import MemoryMCPError
 from memory_mcp.providers import (
-    Container, ProviderAuthError, ProviderError, RemoteTimeEntry, TaskProvider,
+    Container, ProviderAuthError, ProviderError, ProviderNotFoundError, RemoteTimeEntry,
+    TaskProvider,
     TransientProviderError,
 )
 from memory_mcp.repositories.task_repository import OutboxDamagedError
@@ -1269,7 +1270,12 @@ class TaskBridge:
             if not caps.supports_subtasks or created_here:
                 return created_here
             if payload.get("parent_id") is None:
-                provider.promote(remote_id)
+                try:
+                    provider.promote(remote_id)
+                except ProviderNotFoundError:
+                    # The card is gone from the board: nothing to promote, and
+                    # retrying would hold a parent's delete queued behind it.
+                    return False
                 return True
             return False  # re-parenting an existing card has no route yet
         if op == "update" and not created_here:
@@ -1419,10 +1425,20 @@ class TaskBridge:
         return True
 
     def _flush_delete(self, slug: str, payload: dict) -> bool:
-        """A task deleted locally: close its card(s), then archive them.
+        """A task deleted locally: delete its card(s) - or, on a platform that
+        cannot delete, close and archive them.
 
-        asoode has no delete route, and a card that stays live for a task
-        nobody has is the shape that re-imports itself.
+        A card that stays live for a task nobody has is the shape that
+        re-imports itself.
+
+        WITH `supports_delete` the card is removed for good. The platform takes
+        the card's whole sub-task tree with it, while the local delete PROMOTED
+        the children, so each child card is promoted first - the payload's
+        `children` - and only then is the parent removed. A child already gone
+        is fine; any other failure to promote stops the delete, because removing
+        the parent then would destroy a task that still exists locally.
+
+        WITHOUT it, the close-and-archive below.
 
         THE STATE MATTERS TOO, and used to be skipped. Archiving alone left the
         card at whatever state it held, so every task deleted while todo or
@@ -1444,6 +1460,11 @@ class TaskBridge:
             if link is None or not remote_id:
                 continue
             provider = self.provider_for(link)
+            if provider.capabilities.supports_delete:
+                children = (payload.get("children") or {}).get(str(link_id)) or ()
+                self._delete_card(provider, remote_id, children)
+                sent = True
+                continue
             if not provider.capabilities.supports_archive:
                 continue
             self.echo.note(remote_id)
@@ -1457,6 +1478,28 @@ class TaskBridge:
             provider.archive(remote_id, True)
             sent = True
         return sent
+
+    def _delete_card(self, provider, remote_id: str, child_ids: Sequence[str]) -> None:
+        """Promote the card's children, then delete the card.
+
+        Raises ProviderError when the platform skipped the card, so the row
+        retries and its error surfaces like any other failed mirror: `failed`
+        means gone OR not enough access, and the second must not be silent.
+        """
+        if provider.capabilities.supports_subtasks:
+            for child_id in child_ids:
+                self.echo.note(child_id)
+                try:
+                    provider.promote(child_id)
+                except ProviderNotFoundError:
+                    continue  # nothing left to protect
+        self.echo.note(remote_id)
+        result = provider.delete((remote_id,))
+        if remote_id in result.failed:
+            raise ProviderError(
+                f"the board did not delete card {remote_id}: it is already gone, "
+                "or the token lacks admin access to it"
+            )
 
     # ---------- inbound ----------
 

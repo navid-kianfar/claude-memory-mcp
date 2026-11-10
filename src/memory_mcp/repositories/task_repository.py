@@ -1774,6 +1774,33 @@ class OutboxRepository:
             return {}
         return {int(r[0]): r[1] for r in rows}
 
+    def remote_ids_by_link(
+        self, project: str, task_ids: Sequence[str],
+    ) -> dict[int, tuple[str, ...]]:
+        """The remote tasks several local ones map to, grouped by link id.
+
+        One query for the set. A parent's delete carries its children's cards
+        in its payload this way, so the flusher can promote them before the
+        platform deletes the parent's tree.
+        """
+        if not task_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in task_ids)
+        try:
+            with connect(project) as conn:
+                rows = conn.execute(
+                    "SELECT link_id, remote_task_id FROM task_sync "
+                    f"WHERE task_id IN ({placeholders}) AND remote_task_id IS NOT NULL "
+                    "ORDER BY link_id, remote_task_id",
+                    list(task_ids),
+                ).fetchall()
+        except Exception:
+            return {}
+        grouped: dict[int, list[str]] = {}
+        for link_id, remote_task_id in rows:
+            grouped.setdefault(int(link_id), []).append(remote_task_id)
+        return {link_id: tuple(ids) for link_id, ids in grouped.items()}
+
     def remote_id(self, project: str, task_id: str, link_id: int) -> str | None:
         try:
             with connect(project) as conn:

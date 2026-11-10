@@ -2071,8 +2071,10 @@ def memory_task_delete(task_id: str, project: str | None = None) -> dict:
     yet mirrored is lost with it. Prefer memory_task_archive, which takes a
     task out of the list but keeps it findable; use this only when the user
     asks for the task to be removed for good. Any sub-tasks are promoted to
-    top-level rather than deleted along with it. On a bound project the card is
-    archived on the board (asoode has no delete), so it cannot come back.
+    top-level rather than deleted along with it - on the board too: their cards
+    are promoted before the parent's card is deleted. On a bound project the
+    card is DELETED on a board that supports it (asoode's bulk remove) and
+    cancelled and archived on one that does not, so it cannot come back.
     """
     def _run():
         slug = _resolve(project)

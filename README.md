@@ -31,12 +31,24 @@ hooks it offers, where agent definitions go — and `memory-mcp-setup` configure
 | **ZCode** | `~/.zcode/cli/config.json` → `mcp.servers` | full (same events; no `SubagentStop`) | `~/.zcode/agents/` |
 | **Codex** | `~/.codex/config.toml` → `[mcp_servers.memory]` | `notify` at turn end (export + update) | not supported by Codex |
 | **OpenCode** | `opencode.jsonc` → `mcp` (comments preserved) | a small plugin (session start/end) | not verified; briefs ride MCP |
+| **DeepSeek Harness** (`dsh`, preview) | `$DSH_HOME/cordis.patch.yml` → an inserted `dsh-mcp-client` row | via the `dsh-hooks-claude-code` bridge plugin (installed per profile): per-turn rules, session start, edit gate, dispatch ledger; no `SessionEnd`, no attachment inbox | none (no file-based definitions); role briefs ride the dispatch prompt |
 
 The core — memory, tasks, the asoode board mirror, the digest — is identical for
 every harness, because it lives in the daemon, not in the client. A task created
 from ZCode mirrors to the board exactly like one created from Claude. What a
 harness cannot carry (OpenCode has no per-turn hook; Codex has no subagents) is
 declared by its adapter and degrades by design; nothing pretends.
+
+**DeepSeek Harness (developer preview).** dsh has no hooks of its own; setup
+writes a Claude-format hooks file and mounts the experimental
+`@deepseek-ai/dsh-hooks-claude-code` bridge, installing it with
+`dsh plugin --profile <p> add …` for each existing profile (a failed install is
+a warning with the command to rerun). Session start, per-turn rules, the edit
+gate (`edit|write|apply_patch`) and the dispatch ledger (`subagent|subagent_fork`)
+work. Not supported: `SessionEnd` (the session closes on `Stop`), the
+attachment inbox (dsh sends no transcript path), and installed agent
+definitions. The lead hands a child its role brief in the prompt instead, and
+uses `subagent_fork` when the child needs what the lead already has.
 
 ![Claude Memory MCP management UI](screenshots/memory-browser.png)
 
@@ -84,7 +96,7 @@ cd claude-memory-mcp
 
 `install.sh` installs dependencies, builds the UI, downloads the embedding
 model, installs a launchd agent so the daemon auto-starts, and wires every AI
-harness it detects (Claude Code, ZCode, Codex, OpenCode) to the daemon
+harness it detects (Claude Code, ZCode, Codex, OpenCode, DeepSeek Harness) to the daemon
 the daemon, installs the rule-enforcement hooks, and installs the sixteen agents.
 It prints a one-time `sudo` command to add a `claude-memory-mcp` entry to
 `/etc/hosts` so the UI resolves at <http://claude-memory-mcp:8765/>.
@@ -98,6 +110,7 @@ claude mcp add --transport http memory http://localhost:8765/mcp   # Claude Code
 # ZCode: 'memory' under mcp.servers in ~/.zcode/cli/config.json
 # Codex: 'memory' under [mcp_servers] in ~/.codex/config.toml
 # OpenCode: 'memory' under mcp in ~/.config/opencode/opencode.jsonc
+# DeepSeek Harness: a 'memory-mcp' row inside '- insert:' in ~/.dsh/cordis.patch.yml
 ```
 
 **3. Open the UI** at <http://localhost:8765/> and create a project — or do it

@@ -15,11 +15,13 @@ from memory_mcp.harnesses.base import (
 )
 from memory_mcp.harnesses.claude import ClaudeHarness
 from memory_mcp.harnesses.codex import CodexHarness
+from memory_mcp.harnesses.deepseek import DeepSeekHarness
 from memory_mcp.harnesses.opencode import OpenCodeHarness
 from memory_mcp.harnesses.zcode import ZCodeHarness
 
 ADAPTERS: list[Harness] = [
     ClaudeHarness(), ZCodeHarness(), OpenCodeHarness(), CodexHarness(),
+    DeepSeekHarness(),
 ]
 
 __all__ = [

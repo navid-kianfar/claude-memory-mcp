@@ -466,7 +466,7 @@ def main() -> None:
     parser.add_argument(
         "--harness", default="auto",
         help="which harness(es) to wire: auto (every detected), all, or a "
-             "comma-separated list of names (claude, zcode, codex, opencode)",
+             "comma-separated list of names (claude, zcode, codex, opencode, deepseek)",
     )
     args = parser.parse_args()
 

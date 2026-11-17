@@ -125,6 +125,13 @@ def identity_from_query(request) -> HookIdentity:
     return _identity(request.query_params, lambda q, k: q.get(k, ""))
 
 
+def edited_paths(request) -> tuple[str, ...]:
+    """Every `file_path` the gate was sent. One for Edit/Write; dsh's
+    `apply_patch` touches several, and require-task.sh sends each."""
+    values = request.query_params.getlist("file_path")
+    return tuple(dict.fromkeys(v.strip() for v in values if v and v.strip()))
+
+
 def identity_from_body(body: dict) -> HookIdentity:
     """Parse the identity a POST hook (claim, dispatch) forwarded."""
     return _identity(body or {}, lambda b, k: b.get(k) or "")
@@ -388,6 +395,7 @@ async def _hook_gate(request):
         return JSONResponse({"allow": True, "reason": "unauthorized - failing open"})
     identity = identity_from_query(request)
     cwd = identity.cwd
+    paths = edited_paths(request)
 
     def _decide() -> dict:
         from memory_mcp.context import detect_project_from_cwd
@@ -397,21 +405,23 @@ async def _hook_gate(request):
         _seen(identity, slug)
         if not slug:
             return {"allow": True, "reason": "not a memory project"}
-        if identity.file_path and identity.session_id:
-            try:
-                record_edit(
-                    identity.session_id,
-                    slug=slug,
-                    path=identity.file_path,
-                    tool=identity.tool,
-                    by_agent=identity.by_agent,
-                )
-            except Exception:  # noqa: BLE001 - a lost row, never a changed answer
-                pass
+        if identity.session_id:
+            for path in paths:
+                try:
+                    record_edit(
+                        identity.session_id,
+                        slug=slug,
+                        path=path,
+                        tool=identity.tool,
+                        by_agent=identity.by_agent,
+                    )
+                except Exception:  # noqa: BLE001 - a lost row, never a changed answer
+                    pass
         # An edit outside the project's own root is not work this board can
         # track, and blocking it blocked every scratchpad write of every agent
-        # this gate was installed to help.
-        if _outside_project_root(slug, identity.file_path):
+        # this gate was installed to help. A multi-file patch is exempt only
+        # when EVERY file it touches is outside.
+        if paths and all(_outside_project_root(slug, path) for path in paths):
             return {"allow": True, "reason": "outside the project root"}
         if not get_project_links(slug):
             return {"allow": True, "reason": "project is not bound to a board"}
@@ -537,7 +547,9 @@ async def _hook_dispatch(request):
         # Each gate on its own: one that errors lets the dispatch run, and must
         # not take the other gate's answer down with it.
         gates = () if role is None else (
-            lambda: concurrency_gate(identity.session_id or None, subagent_type),
+            lambda: concurrency_gate(
+                identity.session_id or None, subagent_type, identity.harness,
+            ),
             lambda: dispatch_gate(
                 subagent_type,
                 cwd=identity.cwd or None,

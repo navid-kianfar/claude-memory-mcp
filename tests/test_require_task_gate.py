@@ -46,7 +46,14 @@ class _Req:
     """The slice of a Starlette request the gate actually reads."""
 
     def __init__(self, cwd, **extra):
-        self.query_params = {"cwd": cwd, **extra}
+        from starlette.datastructures import QueryParams
+
+        # A list value repeats the key, as a hook sending several paths does.
+        pairs = [("cwd", cwd)]
+        for key, value in extra.items():
+            values = value if isinstance(value, list) else [value]
+            pairs.extend((key, v) for v in values)
+        self.query_params = QueryParams(pairs)
         self.headers = {}
         self.cookies = {}
         self.scope = {"type": "http", "headers": []}
@@ -211,6 +218,17 @@ class TestScopeIsTheProjectRoot:
                        file_path=str(root))
 
         assert answer["allow"] is False
+
+    def test_a_patch_is_outside_only_when_every_file_is(self, bound):
+        """dsh apply_patch touches several files; one inside keeps the gate."""
+        _, root = bound
+        mixed = _gate(str(root), session_id="s1", tool_name="apply_patch",
+                      file_path=["/private/tmp/x.py", str(root / "a.py")])
+        outside = _gate(str(root), session_id="s1", tool_name="apply_patch",
+                        file_path=["/private/tmp/x.py", "/private/tmp/y.py"])
+
+        assert mixed["allow"] is False
+        assert outside["reason"] == "outside the project root"
 
     def test_a_sibling_folder_sharing_the_roots_name_prefix_is_outside(self, bound):
         """`/x/root-backup` is not under `/x/root`, however much it looks it."""

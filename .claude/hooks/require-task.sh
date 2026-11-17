@@ -30,7 +30,7 @@ INPUT=$(cat)
 # installed CLI (2.1.236). Forwarded when present, empty when not; the daemon
 # reads "absent" as unknown, never as "this is the lead".
 eval "$(printf '%s' "$INPUT" | python3 -c '
-import sys, json, shlex
+import os, sys, json, shlex
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -47,6 +47,26 @@ pairs = (("CWD", d.get("cwd")), ("SID", d.get("session_id")),
          ("DESC", ti.get("description")), ("TOOL_USE_ID", d.get("tool_use_id")))
 for k, v in pairs:
     print(k + "=" + shlex.quote(v if isinstance(v, str) else ""))
+# Every file the call writes. Edit/Write name one in file_path. DeepSeek
+# Harness apply_patch sends the patch text as `input`; its targets are the
+# Add/Update/Delete/Move header lines, relative to the session cwd. No path
+# found sends an empty one, and the gate behaves as it always has.
+paths = []
+if isinstance(ti.get("file_path"), str) and ti["file_path"]:
+    paths.append(ti["file_path"])
+patch = ti.get("input")
+cwd = d.get("cwd") if isinstance(d.get("cwd"), str) else ""
+if d.get("tool_name") == "apply_patch" and isinstance(patch, str):
+    heads = ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: ")
+    for line in patch.splitlines():
+        for head in heads:
+            target = line[len(head):].strip() if line.startswith(head) else ""
+            if target:
+                paths.append(target if os.path.isabs(target) or not cwd else os.path.join(cwd, target))
+args = []
+for path in paths or [""]:
+    args += ["--data-urlencode", "file_path=" + path]
+print("FILE_ARGS=(" + " ".join(shlex.quote(a) for a in args) + ")")
 ' 2>/dev/null)"
 [ -z "$CWD" ] && exit 0
 
@@ -80,7 +100,7 @@ IDENT=(
 ANSWER=$(curl -s -G --max-time 2 "${AUTH[@]}" "${IDENT[@]}" "${BASE}/api/hook/gate" \
   --data-urlencode "cwd=${CWD}" \
   --data-urlencode "tool_name=${TOOL}" \
-  --data-urlencode "file_path=${FILE_PATH}" 2>/dev/null)
+  "${FILE_ARGS[@]}" 2>/dev/null)
 [ -z "$ANSWER" ] && exit 0
 
 REASON=$(printf '%s' "$ANSWER" | python3 -c "

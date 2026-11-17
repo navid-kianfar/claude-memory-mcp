@@ -1013,6 +1013,27 @@ def _owner_for(hit: StackHit, role: str) -> str | None:
     return hit.agent if hit.fallback == "backend" else None
 
 
+def _actor(harness: str) -> str:
+    """Who the user's prompt says is dispatching."""
+    match harness:
+        case "claude":
+            return "Claude"
+        case "zcode":
+            return "the ZCode agent"
+        case "deepseek":
+            return "the DeepSeek Harness agent"
+        case _:
+            raise ValueError(f"no dispatch wording for harness {harness!r}")
+
+
+def _dispatch_cost(harness: str) -> str:
+    """The cost sentence. The token range was measured on Claude Code only
+    (2026-09-13); elsewhere it would be a made-up number."""
+    if harness == HARNESS_CLAUDE:
+        return "Each real dispatch costs 115k-380k tokens."
+    return "Each dispatch is a full agent run, paid in tokens."
+
+
 def dispatch_gate(
     subagent_type: str,
     *,
@@ -1078,13 +1099,15 @@ def dispatch_gate(
         f"this repo is {where} and {carriers} {verb} the stack's conventions "
         f"`{role}` does not."
     )
+    actor = _actor(harness)
     return {
         "decision": "ask",
         "specialists": owners,
         "reason": (
-            f"[Memory MCP] Claude is dispatching the generic `{role}` agent, but "
-            f"{why} Yes runs `{role}` anyway; No stops it, and Claude should "
-            f"dispatch {named} instead. MEMORY_MCP_NO_GATE=1 turns this prompt off."
+            f"[Memory MCP] {actor[0].upper()}{actor[1:]} is dispatching the generic "
+            f"`{role}` agent, but {why} Yes runs `{role}` anyway; No stops it, and "
+            f"{actor} should dispatch {named} instead. MEMORY_MCP_NO_GATE=1 turns "
+            "this prompt off."
         ),
         "context": (
             f"[Memory MCP] Dispatch {named}, not `{role}`: {why} `{role}` is "
@@ -1135,7 +1158,9 @@ def nested_dispatch_denial(agent_id: str | None) -> dict:
     }
 
 
-def concurrency_gate(session_id: str | None, agent_type: str | None) -> dict:
+def concurrency_gate(
+    session_id: str | None, agent_type: str | None, harness: str = HARNESS_CLAUDE,
+) -> dict:
     """`{"decision": "ask", ...}` when this dispatch's kind is already at its
     `running_limit` (two, one for `reviewer`).
 
@@ -1158,9 +1183,10 @@ def concurrency_gate(session_id: str | None, agent_type: str | None) -> dict:
         "agent_type": kind,
         "reason": (
             f"[Memory MCP] {running} `{kind}` {agents} already running in this "
-            f"session and this would start another `{kind}`. Each real dispatch "
-            "costs 115k-380k tokens. Yes starts it anyway; No makes Claude wait for "
-            "one to finish. MEMORY_MCP_NO_GATE=1 turns this prompt off."
+            f"session and this would start another `{kind}`. "
+            f"{_dispatch_cost(harness)} Yes starts it anyway; No makes "
+            f"{_actor(harness)} wait for one to finish. MEMORY_MCP_NO_GATE=1 turns "
+            "this prompt off."
         ),
         "context": (
             f"[Memory MCP] {running} `{kind}` {agents} still running. Wait for "

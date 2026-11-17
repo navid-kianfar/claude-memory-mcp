@@ -216,3 +216,61 @@ class TestTheMcpHeader:
         server._lead_briefing(answer, "p", None)
 
         assert answer["team_instructions"] == agent_team_intro(harness=expected).strip()
+
+
+class TestTheGateScriptReadsApplyPatch:
+    def _gate_query(self, payload):
+        from tests.test_require_task_gate import HOOKS_DIR
+
+        with _stub_daemon('{"allow": true}') as (port, seen):
+            env = {**os.environ, "MEMORY_MCP_DAEMON_PORT": str(port)}
+            env.pop("MEMORY_MCP_NO_GATE", None)
+            subprocess.run(
+                ["bash", str(HOOKS_DIR / "require-task.sh")],
+                input=json.dumps(payload), text=True,
+                capture_output=True, timeout=30, env=env,
+            )
+        return next(r for r in seen if r["path"] == "/api/hook/gate")["query"]
+
+    def test_every_patch_target_is_sent_resolved_against_cwd(self):
+        patch = (
+            "*** Begin Patch\n*** Update File: src/a.py\n*** Move to: src/b.py\n"
+            "@@\n-x\n+y\n*** Add File: /tmp/new.txt\n+hi\n"
+            "*** Delete File: old.md\n*** End Patch\n"
+        )
+        query = self._gate_query({
+            "cwd": "/repo", "session_id": "s1", "tool_name": "apply_patch",
+            "tool_input": {"input": patch},
+        })
+        assert query["file_path"] == [
+            "/repo/src/a.py", "/repo/src/b.py", "/tmp/new.txt", "/repo/old.md",
+        ]
+
+    def test_an_unparseable_patch_sends_an_empty_path(self):
+        query = self._gate_query({
+            "cwd": "/repo", "session_id": "s1", "tool_name": "apply_patch",
+            "tool_input": {"input": "garbage"},
+        })
+        assert query["file_path"] == [""]
+
+    def test_edit_still_sends_its_file_path(self):
+        query = self._gate_query({
+            "cwd": "/repo", "session_id": "s1", "tool_name": "edit",
+            "tool_input": {"file_path": "/repo/x.py"},
+        })
+        assert query["file_path"] == ["/repo/x.py"]
+
+
+class TestGateWordingPerHarness:
+    def test_claude_ask_text_is_unchanged_and_others_do_not_say_claude(self, monkeypatch):
+        monkeypatch.setattr(enforcement, "running_dispatches", lambda s, k: 2)
+        claude = enforcement.concurrency_gate("s1", "python")
+        deepseek = enforcement.concurrency_gate("s1", "python", "deepseek")
+        zcode = enforcement.concurrency_gate("s1", "python", "zcode")
+
+        assert "Each real dispatch costs 115k-380k tokens. Yes starts it anyway; " \
+            "No makes Claude wait for one to finish." in claude["reason"]
+        for answer in (deepseek, zcode):
+            assert "Claude" not in answer["reason"]
+            assert "115k" not in answer["reason"]
+        assert "No makes the DeepSeek Harness agent wait" in deepseek["reason"]

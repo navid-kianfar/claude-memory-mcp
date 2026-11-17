@@ -488,6 +488,7 @@ class TestTheDispatchScript:
 
         with _stub_daemon("{}") as (port, seen):
             env = {**os.environ, "MEMORY_MCP_DAEMON_PORT": str(port)}
+            env.pop("MEMORY_MCP_HARNESS", None)
             result = self._run(
                 {"cwd": "/repo", "session_id": "s1", "tool_use_id": "t1",
                  "agent_id": "a1", "agent_type": "python",
@@ -502,10 +503,13 @@ class TestTheDispatchScript:
             "session_id": "s1",
             "cwd": "/repo",
             "subagent_type": "react",
+            "name": "",
+            "tool_name": "",
             "description": "Build the screen (react)",
             "tool_use_id": "t1",
             "agent_id": "a1",
             "agent_type": "python",
+            "harness": "",
             "event": "PreToolUse",
         }
 

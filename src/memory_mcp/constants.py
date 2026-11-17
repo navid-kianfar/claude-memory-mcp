@@ -70,3 +70,20 @@ SYNC_CATEGORIES = [c.value for c in MemoryCategory if c.value != "session"]
 ASOODE_DEFAULT_APP_URL = "https://app.asoode.com"
 ASOODE_DEFAULT_API_URL = "https://api.asoode.com"
 ASOODE_DEFAULT_SOCKET_URL = "https://socket.asoode.com"
+
+
+# Which harness is calling. Hook commands set MEMORY_MCP_HARNESS and the scripts
+# forward it as `harness`; MCP configs send it as the X-Memory-Harness header.
+# Absent or unknown means Claude Code: every install before this field existed
+# was Claude's, and its wording is the one that must not change.
+HARNESS_CLAUDE = "claude"
+HARNESS_ZCODE = "zcode"
+HARNESS_DEEPSEEK = "deepseek"
+KNOWN_HARNESSES = frozenset({HARNESS_CLAUDE, HARNESS_ZCODE, HARNESS_DEEPSEEK})
+HARNESS_HEADER = "x-memory-harness"
+
+
+def normalize_harness(value: str | None) -> str:
+    """The harness name the guidance is worded for; Claude when unknown."""
+    name = (value or "").strip().lower()
+    return name if name in KNOWN_HARNESSES else HARNESS_CLAUDE

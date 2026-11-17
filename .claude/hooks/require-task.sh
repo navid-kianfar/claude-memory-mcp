@@ -69,6 +69,7 @@ IDENT=(
   --data-urlencode "agent_id=${AGENT_ID}"
   --data-urlencode "agent_type=${AGENT_TYPE}"
   --data-urlencode "transcript_path=${TRANSCRIPT}"
+  --data-urlencode "harness=${MEMORY_MCP_HARNESS:-}"
 )
 
 # Short timeout: this runs before every edit, so it must never be felt. A

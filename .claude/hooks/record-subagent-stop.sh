@@ -22,7 +22,7 @@ INPUT=$(cat)
 # One python3 call parses the payload and builds the JSON body; the values come
 # back shlex.quote'd, so the eval cannot be injected into by a payload.
 eval "$(printf '%s' "$INPUT" | python3 -c '
-import sys, json, shlex
+import os, sys, json, shlex
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -40,6 +40,7 @@ body = {
     "cwd": s(d.get("cwd")),
     "agent_id": s(d.get("agent_id")),
     "agent_type": s(d.get("agent_type")),
+    "harness": os.environ.get("MEMORY_MCP_HARNESS", ""),
     "event": "SubagentStop",
 }
 print("SID=" + shlex.quote(body["session_id"]))

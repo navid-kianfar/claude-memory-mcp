@@ -310,6 +310,7 @@ class TestTheStopScript:
     def test_it_posts_the_stop(self):
         with _stub_daemon("{}") as (port, seen):
             env = {**os.environ, "MEMORY_MCP_DAEMON_PORT": str(port)}
+            env["MEMORY_MCP_HARNESS"] = "deepseek"
             result = _run_stop(
                 {"session_id": "s1", "cwd": "/repo", "agent_id": "a1",
                  "agent_type": "python", "hook_event_name": "SubagentStop"},
@@ -320,7 +321,7 @@ class TestTheStopScript:
         assert seen[0]["path"] == "/api/hook/dispatch"
         assert json.loads(seen[0]["body"]) == {
             "session_id": "s1", "cwd": "/repo", "agent_id": "a1",
-            "agent_type": "python", "event": "SubagentStop",
+            "agent_type": "python", "harness": "deepseek", "event": "SubagentStop",
         }
 
     def test_no_session_means_no_request(self):

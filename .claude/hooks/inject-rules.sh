@@ -64,6 +64,7 @@ IDENT=(
   --data-urlencode "agent_id=${AGENT_ID}"
   --data-urlencode "agent_type=${AGENT_TYPE}"
   --data-urlencode "transcript_path=${TRANSCRIPT}"
+  --data-urlencode "harness=${MEMORY_MCP_HARNESS:-}"
 )
 CONTEXT=$(curl -s -G --max-time 2 "${AUTH[@]}" "${IDENT[@]}" "${BASE}/api/hook/rules" \
   --data-urlencode "cwd=${CWD}" --data-urlencode "mode=rules" 2>/dev/null)

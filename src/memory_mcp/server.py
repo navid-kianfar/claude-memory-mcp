@@ -2199,6 +2199,18 @@ def memory_task_release(
 # ---------- Sessions ----------
 
 
+def _request_harness() -> str:
+    """The harness behind this MCP call, from the X-Memory-Harness header its
+    config sends. No header (Claude Code's config sets none, older installs,
+    stdio) is Claude - the wording that existed before the header did."""
+    from fastmcp.server.dependencies import get_http_headers
+
+    from memory_mcp.constants import HARNESS_HEADER, normalize_harness
+
+    headers = get_http_headers()
+    return normalize_harness(headers.get(HARNESS_HEADER))
+
+
 def _lead_briefing(answer: dict, slug: str, cwd: str | None) -> None:
     """The lead's team contract and the update notice, in the one call every
     harness makes. Claude Code and ZCode also get both from the session-start
@@ -2208,7 +2220,7 @@ def _lead_briefing(answer: dict, slug: str, cwd: str | None) -> None:
     from memory_mcp.enforcement import agent_team_intro, update_intro
 
     try:
-        team = agent_team_intro(cwd=cwd, slug=slug).strip()
+        team = agent_team_intro(cwd=cwd, slug=slug, harness=_request_harness()).strip()
     except Exception:  # noqa: BLE001 - guidance must never fail a session start
         team = ""
     if team:

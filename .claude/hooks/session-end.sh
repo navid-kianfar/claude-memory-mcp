@@ -60,6 +60,7 @@ IDENT=(
   --data-urlencode "agent_id=${AGENT_ID}"
   --data-urlencode "agent_type=${AGENT_TYPE}"
   --data-urlencode "transcript_path=${TRANSCRIPT}"
+  --data-urlencode "harness=${MEMORY_MCP_HARNESS:-}"
 )
 MEMORY_MCP_BIN="${MEMORY_MCP_BIN:-$HOME/.claude-memory-mcp/runtime/bin/memory-mcp}"
 

@@ -30,6 +30,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from memory_mcp.config import settings
+from memory_mcp.constants import HARNESS_CLAUDE, normalize_harness
 from memory_mcp.container import container
 from memory_mcp.db.registry import (
     agent_id_supported, get_setting, note_agent_id, prune_session_ledgers,
@@ -63,6 +64,9 @@ class HookIdentity:
     transcript_path: str = ""
     tool: str = ""
     file_path: str = ""
+    #: Which harness ran the hook (MEMORY_MCP_HARNESS in the hook command).
+    #: Scripts installed before the field existed send nothing: Claude.
+    harness: str = HARNESS_CLAUDE
 
     @property
     def is_subagent(self) -> bool | None:
@@ -109,6 +113,7 @@ def _identity(data, getter) -> HookIdentity:
         transcript_path=s("transcript_path"),
         tool=s("tool_name"),
         file_path=s("file_path"),
+        harness=normalize_harness(s("harness")),
     )
     # Learn from the payload itself whether this build sends agent_id at all.
     note_agent_id(identity.agent_id)
@@ -341,11 +346,13 @@ async def _hook_rules(request):
         if mode == "intro":
             return format_intro(
                 slug, cwd=cwd or None, session_id=identity.session_id or None,
+                harness=identity.harness,
             )
         if mode == "end":
             return format_session_end(slug)
         return rules_text_for_project(
             slug, cwd=cwd or None, session_id=identity.session_id or None,
+            harness=identity.harness,
         )
 
     try:
@@ -505,7 +512,8 @@ async def _hook_dispatch(request):
     def _record() -> dict:
         from memory_mcp.context import detect_project_from_cwd
         from memory_mcp.enforcement import (
-            combine_gates, concurrency_gate, dispatch_gate, nested_dispatch_denial,
+            FORK_AGENT_TYPE, combine_gates, concurrency_gate, dispatch_gate,
+            dispatch_role, nested_dispatch_denial,
         )
 
         # A subagent trying to dispatch is refused before anything is recorded:
@@ -516,22 +524,29 @@ async def _hook_dispatch(request):
 
         slug = detect_project_from_cwd(identity.cwd) if identity.cwd else None
         _seen(identity, slug)
-        raw_type = body.get("subagent_type")
-        subagent_type = (
-            raw_type.strip() if isinstance(raw_type, str) else ""
-        ) or "general-purpose"
+        def text(key: str) -> str:
+            value = body.get(key)
+            return value.strip() if isinstance(value, str) else ""
+
+        # Claude/ZCode name the role in subagent_type; dsh in the child's
+        # `name`. An unnamed dsh fork is the lead's own context continuing:
+        # recorded, never gated.
+        role = dispatch_role(text("subagent_type"), text("name"), identity.tool)
+        subagent_type = role or FORK_AGENT_TYPE
         answers = []
         # Each gate on its own: one that errors lets the dispatch run, and must
         # not take the other gate's answer down with it.
-        for gate in (
+        gates = () if role is None else (
             lambda: concurrency_gate(identity.session_id or None, subagent_type),
             lambda: dispatch_gate(
                 subagent_type,
                 cwd=identity.cwd or None,
                 slug=slug,
                 session_id=identity.session_id or None,
+                harness=identity.harness,
             ),
-        ):
+        )
+        for gate in gates:
             try:
                 answers.append(gate())
             except Exception:  # noqa: BLE001

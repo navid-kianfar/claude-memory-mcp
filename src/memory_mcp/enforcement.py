@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
+from memory_mcp.constants import HARNESS_CLAUDE, HARNESS_DEEPSEEK
 from memory_mcp.container import container
 from memory_mcp.db.registry import (
     dispatches_for, edits_for, get_setting, running_dispatches, set_setting,
@@ -144,17 +145,31 @@ AGENT_TEAM_DIR = Path.home() / ".claude" / "agents"
 LEAD_AGENT = "pm"
 
 
-def installed_agents(include_lead: bool = False) -> list[tuple[str, str]]:
+def _team_dir(harness: str) -> Path:
+    """Where this harness's team lives. dsh installs no definitions, only the
+    role briefs the lead hands a child; elsewhere it is Claude's agents dir."""
+    if harness != HARNESS_DEEPSEEK:
+        return AGENT_TEAM_DIR
+    from memory_mcp.harnesses.deepseek import role_briefs_dir
+
+    briefs = role_briefs_dir()
+    return briefs if briefs.is_dir() else AGENT_TEAM_DIR
+
+
+def installed_agents(
+    include_lead: bool = False, harness: str = HARNESS_CLAUDE,
+) -> list[tuple[str, str]]:
     """(name, description) for every installed agent, from its frontmatter.
 
     Read from disk rather than hardcoded so the brief can never advertise an
     agent that was retired, or miss one that was added. `pm` is excluded unless
     asked for - see LEAD_AGENT.
     """
-    if not AGENT_TEAM_DIR.is_dir():
+    team_dir = _team_dir(harness)
+    if not team_dir.is_dir():
         return []
     found: list[tuple[str, str]] = []
-    for path in sorted(AGENT_TEAM_DIR.glob("*.md")):
+    for path in sorted(team_dir.glob("*.md")):
         if path.name.lower() == "readme.md" or path.stem.startswith("_"):
             continue
         try:
@@ -243,6 +258,23 @@ _STACK_CONVENTIONS = (
     "top for screens and components."
 )
 
+_ONLY_YOU_DISPATCH = (
+    "  - ONLY YOU DISPATCH, AND AT MOST TWO AGENTS OF A KIND AT ONCE. No installed "
+    "agent has the Agent tool, so none can fan out - a reviewer splitting itself "
+    "into 'angles' is how one review became eleven agents. A third agent of a kind "
+    "(a third `python`) while two are running puts a prompt in front of the user; "
+    "different kinds may run side by side. `reviewer` is ONE at a time, and it "
+    "reviews and tests as a single agent - a second reviewer prompts too."
+)
+_SHARED_CHECKOUT = (
+    "  - Agents run at once only when their file sets are disjoint: name each "
+    "agent's files in its brief. They share this one checkout. NEVER pass "
+    "`isolation` to the Agent tool and never ask for a worktree: whether a dispatch "
+    "runs isolated is the user's choice in the Claude interface, and a worktree "
+    "sits at the last commit, so an agent sent to verify uncommitted work would see "
+    "a tree without it."
+)
+
 _DIVISION_OF_WORK = (
     "HOW THE WORK IS DIVIDED - this is the contract, not advice:",
     "  - Implementation is DISPATCHED. A task on the board with a role is "
@@ -289,12 +321,7 @@ _DIVISION_OF_WORK = (
     "concurrency bug, a migration that must not lose data - and say why in the "
     "brief. Never raise it by habit; reasoning depth is the largest lever on "
     "what an agent costs.",
-    "  - ONLY YOU DISPATCH, AND AT MOST TWO AGENTS OF A KIND AT ONCE. No installed "
-    "agent has the Agent tool, so none can fan out - a reviewer splitting itself "
-    "into 'angles' is how one review became eleven agents. A third agent of a kind "
-    "(a third `python`) while two are running puts a prompt in front of the user; "
-    "different kinds may run side by side. `reviewer` is ONE at a time, and it "
-    "reviews and tests as a single agent - a second reviewer prompts too.",
+    _ONLY_YOU_DISPATCH,
     "  - Sequence: a stack expert before `backend` when the structure is undecided; "
     "`designer` before `frontend`/`react`/`app`; `reviewer` after an "
     "implementation, never instead of one; `test` ONCE PER HANDOVER: when an "
@@ -303,12 +330,7 @@ _DIVISION_OF_WORK = (
     "took, and otherwise only when the user asks. It runs against the RUNNING "
     "instance (daemon, UI, board) - the repo's suite proves the code, the "
     "test agent proves the product.",
-    "  - Agents run at once only when their file sets are disjoint: name each "
-    "agent's files in its brief. They share this one checkout. NEVER pass "
-    "`isolation` to the Agent tool and never ask for a worktree: whether a dispatch "
-    "runs isolated is the user's choice in the Claude interface, and a worktree "
-    "sits at the last commit, so an agent sent to verify uncommitted work would see "
-    "a tree without it.",
+    _SHARED_CHECKOUT,
     "  - A subagent cannot see this conversation. Give it the goal, the constraint "
     "that shapes it, the files involved, and what done looks like - an "
     "under-specified brief buys a second dispatch.",
@@ -328,6 +350,135 @@ _DIVISION_OF_WORK = (
     "memory_task_claim_next and memory_session_end, and to pass agent=<its type> to "
     "memory_session_start, or its session displaces yours.",
 )
+
+
+# ---------- the same contract, worded for each harness ----------
+#
+# The text above names Claude Code's dispatch surface (the Agent tool,
+# `isolation`, subagent_type) and was shown unchanged on every harness. The
+# contract is the same everywhere; only the HOW differs, so each harness swaps
+# the Claude-specific bullets and adds one saying how to dispatch there. Claude's
+# text is the tuple above, byte for byte.
+
+_SHARED_CHECKOUT_PLAIN = (
+    "  - Agents run at once only when their file sets are disjoint: name each "
+    "agent's files in its brief. They share this one checkout."
+)
+
+_ZCODE_ONLY_YOU_DISPATCH = (
+    _ONLY_YOU_DISPATCH + " ZCode reports no agent finishing, so the running count "
+    "is approximate: a prompt can appear after one has already reported - say so "
+    "and let the user decide."
+)
+_ZCODE_HOW_TO_DISPATCH = (
+    "  - HOW TO DISPATCH IN ZCODE: the `Agent` tool with `description`, `prompt` "
+    "and `subagent_type` set to the role (`python`, `reviewer`, ...); "
+    "`run_in_background` for work that runs beside you. For a read-only lookup use "
+    "the built-in `Explore` or `Code Search` type, not a specialist - it costs a "
+    "fraction and needs no task. There is no fork mode: every agent starts from "
+    "your brief alone."
+)
+
+_DEEPSEEK_ONLY_YOU_DISPATCH = (
+    "  - ONLY YOU DISPATCH, AND AT MOST TWO AGENTS OF A KIND AT ONCE. Tell every "
+    "child it must not start agents itself - a reviewer splitting itself into "
+    "'angles' is how one review became eleven agents. A third agent of a kind "
+    "(a third `python`) while two are running puts a prompt in front of the user; "
+    "the count is approximate here, because dsh does not report which role "
+    "finished. `reviewer` is ONE at a time."
+)
+
+
+def _deepseek_how_to_dispatch() -> tuple[str, ...]:
+    from memory_mcp.harnesses.deepseek import role_briefs_dir
+
+    briefs = role_briefs_dir()
+    return (
+        "  - HOW TO DISPATCH IN DEEPSEEK HARNESS: no agent definitions are "
+        "installed, so the role travels in the call. Set `name` to the role "
+        "(`python`; a second one `python-2`) - the gates read the role from it - "
+        f"and open the `prompt` with: 'You are the <role> agent. Read "
+        f"{briefs}/<role>.md first and follow it.', then the brief.",
+        "  - REUSE CONTEXT, DO NOT BUY IT TWICE: `subagent_fork` starts the child "
+        "with your whole conversation - nothing is re-read and the cache is "
+        "reused. Use it when the work leans on what you already read or decided "
+        "(implementing the plan you just made). It is one-shot and takes no model "
+        "choice, and the child inherits your session id: tell it to call "
+        "memory_session_start(agent=<role>) and use the id IT gets. `subagent` "
+        "starts clean: use it for independent work that should not carry your "
+        "context (a cold review, an unrelated area). Follow up with `send_message` "
+        "instead of spawning again. Never spawn a fresh `subagent` to re-read what "
+        "you already hold.",
+    )
+
+
+def division_of_work(harness: str = HARNESS_CLAUDE) -> tuple[str, ...]:
+    """The division-of-work contract in the words of `harness`."""
+    match harness:
+        case "claude":
+            return _DIVISION_OF_WORK
+        case "zcode":
+            swap = {
+                _ONLY_YOU_DISPATCH: _ZCODE_ONLY_YOU_DISPATCH,
+                _SHARED_CHECKOUT: _SHARED_CHECKOUT_PLAIN,
+            }
+            extra: tuple[str, ...] = (_ZCODE_HOW_TO_DISPATCH,)
+        case "deepseek":
+            swap = {
+                _ONLY_YOU_DISPATCH: _DEEPSEEK_ONLY_YOU_DISPATCH,
+                _SHARED_CHECKOUT: _SHARED_CHECKOUT_PLAIN,
+            }
+            extra = _deepseek_how_to_dispatch()
+        case _:
+            raise ValueError(f"no dispatch wording for harness {harness!r}")
+    swapped = tuple(swap.get(bullet, bullet) for bullet in _DIVISION_OF_WORK)
+    # The how-to goes right after the header line, where the lead reads first.
+    return swapped[:1] + extra + swapped[1:]
+
+
+def _name_sentence(harness: str) -> str:
+    """The per-turn reminder of how a dispatch names its role."""
+    match harness:
+        case "claude":
+            return _NAME_SENTENCE
+        case "zcode":
+            return "Set subagent_type to the role; Explore/Code Search for lookups."
+        case "deepseek":
+            return (
+                "Set name=<role> on each dispatch; subagent_fork when the child "
+                "needs your context."
+            )
+        case _:
+            raise ValueError(f"no dispatch wording for harness {harness!r}")
+
+
+#: A trailing `-2`, `-3` on a dsh child's `name`: the second agent of a role.
+_ROLE_ORDINAL_RE = re.compile(r"-\d+$")
+DEFAULT_AGENT_TYPE = "general-purpose"
+#: Recorded for a `subagent_fork` with no name: a helper carrying the lead's
+#: own context, not a role. It is never gated.
+FORK_AGENT_TYPE = "subagent_fork"
+
+
+def dispatch_role(
+    subagent_type: str | None, name: str | None, tool: str | None,
+) -> str | None:
+    """The role a dispatch is for, or None for an unnamed fork.
+
+    Claude/ZCode name it in `subagent_type`. dsh has none: its `subagent` and
+    `subagent_fork` carry an optional `name`, which the guidance tells the lead
+    to set to the role (`python`, `python-2`). An unnamed fork is the lead's own
+    context continuing, not a role's work, so it has no role to gate.
+    """
+    explicit = (subagent_type or "").strip()
+    if explicit:
+        return explicit
+    named = (name or "").strip().lower()
+    if named:
+        return _ROLE_ORDINAL_RE.sub("", named) or named
+    if (tool or "").strip() == FORK_AGENT_TYPE:
+        return None
+    return DEFAULT_AGENT_TYPE
 
 
 @dataclass(frozen=True)
@@ -386,7 +537,11 @@ def _installed_names(agents: list[tuple[str, str]]) -> set[str]:
 
 
 def agent_team_line(
-    *, cwd: str | None = None, slug: str | None = None, session_id: str | None = None,
+    *,
+    cwd: str | None = None,
+    slug: str | None = None,
+    session_id: str | None = None,
+    harness: str = HARNESS_CLAUDE,
 ) -> str:
     """One line, every turn. Enough to keep delegation in mind, and no more.
 
@@ -397,11 +552,12 @@ def agent_team_line(
     never dispatched), the repo's own specialists by path, or - with no stack
     detected - the roster.
     """
-    agents = installed_agents()
+    agents = installed_agents(harness=harness)
     if not agents:
         return ""
     installed = _installed_names(agents)
     profile = _stack_profile(cwd, slug)
+    name_sentence = _name_sentence(harness)
 
     if session_id and slug:
         try:
@@ -415,13 +571,13 @@ def agent_team_line(
 
     specialists = [h for h in _stack_hits(profile) if h.agent not in GENERIC_ROLES]
     if specialists:
-        line = _stack_line(specialists, installed)
+        line = _stack_line(specialists, installed, name_sentence)
         if line:
             return line
-    return _roster_line([name for name, _ in agents])
+    return _roster_line([name for name, _ in agents], name_sentence)
 
 
-def _roster_line(names: list[str]) -> str:
+def _roster_line(names: list[str], name_sentence: str = _NAME_SENTENCE) -> str:
     """State 1: nothing detected. Names drop off the end, never the rule."""
     shown = list(names)
     while True:
@@ -430,7 +586,7 @@ def _roster_line(names: list[str]) -> str:
         line = (
             f"{_LEAD_SENTENCE} Available: {', '.join(shown)}{more}. Dispatch the "
             "stack's own expert over generic backend/frontend; designer before UI; "
-            f"test once per handover. {_NAME_SENTENCE}"
+            f"test once per handover. {name_sentence}"
         )
         if len(line) <= _LINE_BUDGET or len(shown) <= 1:
             return line
@@ -445,7 +601,9 @@ def _line_hit(hit: StackHit, installed: set[str]) -> str:
     return f"{where}={hit.agent}{co}"
 
 
-def _stack_line(hits: list[StackHit], installed: set[str]) -> str:
+def _stack_line(
+    hits: list[StackHit], installed: set[str], name_sentence: str = _NAME_SENTENCE,
+) -> str:
     """States 2-3. Deterministic shrink: three hits, then two, then one, the rest
     folded into "+N more"; empty when even one hit does not fit."""
     rendered = [_line_hit(h, installed) for h in hits]
@@ -457,7 +615,7 @@ def _stack_line(hits: list[StackHit], installed: set[str]) -> str:
         more = f" (+{dropped} more, see session intro)" if dropped else ""
         line = (
             f"{_LEAD_SENTENCE} This repo: {'; '.join(shown)}{more} - dispatch "
-            f"those, never generic backend/frontend.{also_sentence} {_NAME_SENTENCE}"
+            f"those, never generic backend/frontend.{also_sentence} {name_sentence}"
         )
         if len(line) <= _LINE_BUDGET:
             return line
@@ -691,9 +849,11 @@ def _inferred_owner(
 # ---------- the session-start brief ----------
 
 
-def agent_team_intro(*, cwd: str | None = None, slug: str | None = None) -> str:
+def agent_team_intro(
+    *, cwd: str | None = None, slug: str | None = None, harness: str = HARNESS_CLAUDE,
+) -> str:
     """The full orchestration brief, at session start only."""
-    agents = installed_agents()
+    agents = installed_agents(harness=harness)
     if not agents:
         return ""
     installed = _installed_names(agents)
@@ -723,7 +883,7 @@ def agent_team_intro(*, cwd: str | None = None, slug: str | None = None) -> str:
         lines.extend(["", "Available specialists:"])
         lines.extend(f"  - {name}: {desc}" for name, desc in agents)
     lines.append("")
-    lines.extend(_DIVISION_OF_WORK)
+    lines.extend(division_of_work(harness))
     return "\n".join(lines)
 
 
@@ -859,6 +1019,7 @@ def dispatch_gate(
     cwd: str | None,
     slug: str | None,
     session_id: str | None,
+    harness: str = HARNESS_CLAUDE,
 ) -> dict:
     """`{}` to let a dispatch through, or `{"decision": "ask", ...}`.
 
@@ -879,7 +1040,7 @@ def dispatch_gate(
     role = (subagent_type or "").strip()
     if role not in GENERIC_ROLES or not slug or not session_id:
         return {}
-    installed = _installed_names(installed_agents())
+    installed = _installed_names(installed_agents(harness=harness))
     if not installed:
         return {}
     profile = _stack_profile(cwd, slug)
@@ -1173,6 +1334,7 @@ def format_rules_block(
     *,
     cwd: str | None = None,
     session_id: str | None = None,
+    harness: str = HARNESS_CLAUDE,
 ) -> str:
     """Render rules as an injectable text block. Empty string when there are none.
 
@@ -1180,7 +1342,9 @@ def format_rules_block(
     without them it is the roster line, which is what the CLI path gets.
     """
     asoode = asoode_line(slug)
-    team = agent_team_line(cwd=cwd, slug=slug, session_id=session_id)
+    team = agent_team_line(
+        cwd=cwd, slug=slug, session_id=session_id, harness=harness,
+    )
     if not mandatory and not forbidden:
         # A bound project still gets its asoode line: the workflow must not
         # depend on the project happening to have rules. Same for the team
@@ -1215,7 +1379,11 @@ def format_rules_block(
 
 
 def format_intro(
-    slug: str, *, cwd: str | None = None, session_id: str | None = None,
+    slug: str,
+    *,
+    cwd: str | None = None,
+    session_id: str | None = None,
+    harness: str = HARNESS_CLAUDE,
 ) -> str:
     """Session-start nudge text for a detected memory project."""
     text = (
@@ -1244,7 +1412,7 @@ def format_intro(
             f"them unless the user asks."
         )
     text += asoode_intro(slug)
-    text += agent_team_intro(cwd=cwd, slug=slug)
+    text += agent_team_intro(cwd=cwd, slug=slug, harness=harness)
     text += update_intro(session_id)
     return text
 
@@ -1322,13 +1490,17 @@ def never_started_warning(title: str, time_note: dict | None) -> str | None:
 
 
 def rules_text_for_project(
-    slug: str, *, cwd: str | None = None, session_id: str | None = None,
+    slug: str,
+    *,
+    cwd: str | None = None,
+    session_id: str | None = None,
+    harness: str = HARNESS_CLAUDE,
 ) -> str:
     """Fetch and format the rules block for a project (empty string if none)."""
     rules = container.rules_service.get_rules(slug)
     return format_rules_block(
         slug, rules.mandatory_rules, rules.forbidden_rules,
-        cwd=cwd, session_id=session_id,
+        cwd=cwd, session_id=session_id, harness=harness,
     )
 
 

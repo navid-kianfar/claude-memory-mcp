@@ -25,10 +25,12 @@ open, so an unverified payload shape degrades to silence, never to a block.
 
 import json
 import os
+import shlex
 import shutil
 from pathlib import Path
 
 from memory_mcp.config import settings
+from memory_mcp.constants import HARNESS_ZCODE
 from memory_mcp.harnesses.base import ChangeReport, HarnessCapabilities
 from memory_mcp.harnesses.claude import (
     AGENTS_DIR,
@@ -97,14 +99,16 @@ class ZCodeHarness:
         if config is None:
             return report
 
+        # The harness header lets memory_session_start word the team brief
+        # for ZCode's `Agent` tool rather than Claude Code's.
+        headers = {"X-Memory-Harness": HARNESS_ZCODE}
         if remote_url:
             url = f"{remote_url.rstrip('/')}/mcp"
-            entry: dict = {"type": "http", "url": url}
             if token:
-                entry["headers"] = {"Authorization": f"Bearer {token}"}
+                headers["Authorization"] = f"Bearer {token}"
         else:
             url = server_url
-            entry = {"type": "http", "url": url}
+        entry: dict = {"type": "http", "url": url, "headers": headers}
 
         servers = config.setdefault("mcp", {}).setdefault("servers", {})
         previous = servers.get("memory")
@@ -175,14 +179,15 @@ class ZCodeHarness:
             else:
                 events.pop(event, None)
 
-        env_prefix = ""
+        # MEMORY_MCP_HARNESS tells the daemon which harness's dispatch wording
+        # to use. It is not `claude`, so the scripts never add the top-level
+        # `systemMessage` ZCode's strict output schema rejects.
+        parts = ["env", f"MEMORY_MCP_HARNESS={HARNESS_ZCODE}"]
         if remote_url:
-            import shlex
-
-            parts = ["env", f"MEMORY_MCP_URL={shlex.quote(remote_url.rstrip('/'))}"]
+            parts.append(f"MEMORY_MCP_URL={shlex.quote(remote_url.rstrip('/'))}")
             if token:
                 parts.append(f"MEMORY_MCP_TOKEN={shlex.quote(token)}")
-            env_prefix = " ".join(parts) + " "
+        env_prefix = " ".join(parts) + " "
 
         installed_events = []
         for event, script_names in HOOK_EVENTS.items():

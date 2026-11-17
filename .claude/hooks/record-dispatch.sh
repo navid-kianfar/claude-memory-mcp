@@ -1,6 +1,7 @@
 #!/bin/bash
-# PreToolUse hook on the Agent tool: tell the daemon a subagent is being
-# dispatched, so the session has a ledger of who it handed work to.
+# PreToolUse hook on the dispatch tool (Claude/ZCode `Agent`, DeepSeek Harness
+# `subagent`/`subagent_fork`): tell the daemon a subagent is being dispatched,
+# so the session has a ledger of who it handed work to.
 #
 # WHY A SECOND PreToolUse SCRIPT. require-task.sh matches Edit|Write|NotebookEdit
 # and must not run on anything else; this one matches Agent|Task. Claude Code
@@ -38,7 +39,7 @@ INPUT=$(cat)
 # installed CLI (2.1.236). Sent when present, empty when not; the daemon reads
 # "absent" as unknown, never as "this is the lead".
 eval "$(printf '%s' "$INPUT" | python3 -c '
-import sys, json, shlex
+import os, sys, json, shlex
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -54,16 +55,25 @@ def s(value):
     return value if isinstance(value, str) else ""
 
 
-# An Agent call with no subagent_type is the default agent; the ledger records
-# what actually ran, so it records that name.
+# The daemon derives the role (enforcement.dispatch_role): Claude Code
+# and ZCode name it in subagent_type, DeepSeek Harness in the child `name`,
+# and an unnamed dsh `subagent_fork` has none. An Agent call with neither is
+# the default agent, and the ledger records what actually ran.
+name = s(ti.get("name"))
+tool = s(d.get("tool_name"))
+unnamed_default = not name and tool != "subagent_fork"
 body = {
     "session_id": s(d.get("session_id")),
     "cwd": s(d.get("cwd")),
-    "subagent_type": s(ti.get("subagent_type")) or "general-purpose",
+    "subagent_type": s(ti.get("subagent_type"))
+    or ("general-purpose" if unnamed_default else ""),
+    "name": name,
+    "tool_name": tool,
     "description": s(ti.get("description")),
     "tool_use_id": s(d.get("tool_use_id")),
     "agent_id": s(d.get("agent_id")),
     "agent_type": s(d.get("agent_type")),
+    "harness": os.environ.get("MEMORY_MCP_HARNESS", ""),
     "event": "PreToolUse",
 }
 print("CWD=" + shlex.quote(body["cwd"]))

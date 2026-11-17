@@ -58,6 +58,7 @@ class TestMCP:
         config = json.loads(cfg.read_text())
         assert config["mcp"]["servers"]["memory"] == {
             "type": "http", "url": "http://127.0.0.1:8765/mcp",
+            "headers": {"X-Memory-Harness": "zcode"},
         }
         assert config["plugins"] == {"some-plugin": True}
 
@@ -77,7 +78,7 @@ class TestMCP:
         entry = json.loads((zcode_home / "cli" / "config.json").read_text())
         entry = entry["mcp"]["servers"]["memory"]
         assert entry["url"] == "https://r.example.com/mcp"
-        assert entry["headers"] == {"Authorization": "Bearer t"}
+        assert entry["headers"] == {"X-Memory-Harness": "zcode", "Authorization": "Bearer t"}
 
 
 class TestHooks:

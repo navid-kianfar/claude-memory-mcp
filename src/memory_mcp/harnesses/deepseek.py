@@ -41,6 +41,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from memory_mcp.config import settings
+from memory_mcp.constants import HARNESS_DEEPSEEK
 from memory_mcp.harnesses.base import ChangeReport, HarnessCapabilities
 from memory_mcp.harnesses.claude import (
     AGENTS_DIR,
@@ -50,7 +51,7 @@ from memory_mcp.harnesses.claude import (
     is_abstract_agent,
 )
 
-HARNESS_NAME = "deepseek"
+HARNESS_NAME = HARNESS_DEEPSEEK
 #: The header every harness's MCP config sends so the daemon can tell which
 #: harness a `memory_session_start` came from (server.py reads it).
 HARNESS_HEADER = "X-Memory-Harness"

@@ -340,7 +340,7 @@ class TestHonestLimits:
 
 
 class TestRegistration:
-    def test_four_adapters_in_order(self):
+    def test_adapters_in_order(self):
         assert [a.name for a in registry.ADAPTERS] == [
-            "claude", "zcode", "opencode", "codex",
+            "claude", "zcode", "opencode", "codex", "deepseek",
         ]

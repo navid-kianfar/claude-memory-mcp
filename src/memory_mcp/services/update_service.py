@@ -61,8 +61,13 @@ def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
         return 1, "", str(e)
 
 
-def _fetch_github_json(path: str) -> dict | None:
-    """GET a GitHub API endpoint. Returns parsed JSON or None on failure."""
+def _fetch_github(path: str) -> tuple[int, dict | None]:
+    """GET a GitHub API endpoint. Returns (HTTP status, parsed JSON or None).
+
+    Status 0 means no answer at all (network, timeout, bad JSON). The status is
+    kept because a 404 is an ANSWER for /compare: GitHub does not know the
+    commit, which is not the same as "could not ask".
+    """
     url = f"{GITHUB_API_BASE}{path}"
     req = Request(url, headers={
         "Accept": "application/vnd.github.v3+json",
@@ -71,10 +76,17 @@ def _fetch_github_json(path: str) -> dict | None:
     try:
         with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             if resp.status != 200:
-                return None
-            return json.loads(resp.read().decode())
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
-        return None
+                return resp.status, None
+            return 200, json.loads(resp.read().decode())
+    except HTTPError as e:
+        return e.code, None
+    except (URLError, TimeoutError, json.JSONDecodeError):
+        return 0, None
+
+
+def _fetch_github_json(path: str) -> dict | None:
+    """GET a GitHub API endpoint. Returns parsed JSON or None on failure."""
+    return _fetch_github(path)[1]
 
 
 def _parse_semver(tag: str) -> tuple[int, int, int] | None:
@@ -122,9 +134,31 @@ class UpdateService:
         if latest.startswith(installed) or installed.startswith(latest[:7]):
             return {"update_available": False, "latest_version": latest[:7]}
 
+        # How far behind, and what changed. Also the guard against a false
+        # positive: a different sha is NOT an update when the install is AHEAD
+        # of GitHub. Observed 2026-11-17 on the dev machine: main was 6 commits
+        # ahead of origin, so `git pull` was a no-op, the reinstall recorded the
+        # same commit, and the same "update" came back in every session forever.
+        code, compare = _fetch_github(f"/compare/{installed}...{latest}")
+        if code == 404:
+            # GitHub has never seen the installed commit: an unpushed local
+            # build. Pulling cannot move it forward, so do not offer it.
+            return {
+                "update_available": False,
+                "latest_version": latest[:7],
+                "local_build": True,
+                "warnings": [
+                    f"installed commit {installed[:7]} is not on GitHub "
+                    "(unpushed local build) - no update offered",
+                ],
+            }
+        if compare and (
+            compare.get("status") in ("behind", "identical")
+            or compare.get("ahead_by") == 0
+        ):
+            return {"update_available": False, "latest_version": latest[:7]}
+
         result = {"update_available": True, "latest_version": latest[:7]}
-        # How far behind, and what changed - best effort, never fatal.
-        compare = _fetch_github_json(f"/compare/{installed}...{latest}")
         if compare:
             result["commits_behind"] = compare.get("ahead_by") or 0
             result["recent_commits"] = [

@@ -179,20 +179,25 @@ class TestNetworkOnlyStrategy:
 
         assert service._check_via_github_commits()["update_available"] is False
 
-    def test_a_newer_commit_reports_how_far_behind(self, service, monkeypatch):
+    @staticmethod
+    def _fake_github(monkeypatch, head_sha, compare):
+        """Patch both fetchers: head from /commits, `compare` = (status, json)."""
         from memory_mcp.services import update_service as us
-
-        set_setting("install:commit", "c" * 40)
 
         def fake(path):
             if path.startswith("/commits/"):
-                return {"sha": "d" * 40}
-            return {
-                "ahead_by": 4,
-                "commits": [{"commit": {"message": "fix a thing\n\nbody"}}],
-            }
+                return 200, {"sha": head_sha}
+            return compare
 
-        monkeypatch.setattr(us, "_fetch_github_json", fake)
+        monkeypatch.setattr(us, "_fetch_github", fake)
+        monkeypatch.setattr(us, "_fetch_github_json", lambda path: fake(path)[1])
+
+    def test_a_newer_commit_reports_how_far_behind(self, service, monkeypatch):
+        set_setting("install:commit", "c" * 40)
+        self._fake_github(monkeypatch, "d" * 40, (200, {
+            "status": "ahead", "ahead_by": 4,
+            "commits": [{"commit": {"message": "fix a thing\n\nbody"}}],
+        }))
 
         result = service._check_via_github_commits()
 
@@ -202,12 +207,24 @@ class TestNetworkOnlyStrategy:
 
     def test_a_missing_compare_still_reports_the_update(self, service, monkeypatch):
         """Best effort: how far behind is a nicety, that there IS an update is not."""
-        from memory_mcp.services import update_service as us
-
         set_setting("install:commit", "e" * 40)
-        monkeypatch.setattr(
-            us, "_fetch_github_json",
-            lambda path: {"sha": "f" * 40} if path.startswith("/commits/") else None,
-        )
+        self._fake_github(monkeypatch, "f" * 40, (0, None))
 
         assert service._check_via_github_commits()["update_available"] is True
+
+    def test_an_install_ahead_of_github_is_not_an_update(self, service, monkeypatch):
+        """Regression 2026-11-17: local main ahead of origin nagged forever."""
+        set_setting("install:commit", "1" * 40)
+        self._fake_github(monkeypatch, "2" * 40, (200, {"status": "behind", "ahead_by": 0}))
+
+        assert service._check_via_github_commits()["update_available"] is False
+
+    def test_an_unpushed_install_commit_is_not_an_update(self, service, monkeypatch):
+        """GitHub 404s the compare: it has never seen the commit, pulling cannot help."""
+        set_setting("install:commit", "3" * 40)
+        self._fake_github(monkeypatch, "4" * 40, (404, None))
+
+        result = service._check_via_github_commits()
+
+        assert result["update_available"] is False
+        assert result["local_build"] is True

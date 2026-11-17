@@ -79,7 +79,10 @@ nohup bash -c "
     # FAST-FORWARD ONLY, and never over local work. This repo is where the user
     # develops; silently discarding or merging their changes to install an
     # update would be unforgivable, so anything unexpected aborts and says why.
-    if [ -n \"\$(git status --porcelain 2>/dev/null)\" ]; then
+    # .agent-memory/ is excluded: the daemon rewrites that snapshot on its own
+    # all the time, so counting it made EVERY approved update skip (observed
+    # 2026-11-17). git pull --ff-only still refuses if it would overwrite it.
+    if [ -n \"\$(git status --porcelain -- . ':(exclude).agent-memory' 2>/dev/null)\" ]; then
       echo 'SKIPPED: working tree is dirty - commit or stash, then approve again'
     else
       BRANCH=\$(git rev-parse --abbrev-ref HEAD 2>/dev/null)

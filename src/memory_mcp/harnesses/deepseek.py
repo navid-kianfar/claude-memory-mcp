@@ -11,10 +11,21 @@ Verified against deepseek-ai/deepseek-harness @ ca33fd68:
   row: patching it replaces the user's whole `servers` map.
 - Hooks: none of dsh's own. The `@deepseek-ai/dsh-hooks-claude-code` bridge
   runs Claude-format `command` hooks from one `configPath`, read once at
-  startup. It is NOT bundled: `dsh plugin --profile <p> add <pkg>` installs it
-  per profile. Our inserted rows are optional entries (not in app-boot's
-  required list), so a profile without the plugin warns at startup and carries
-  on - it does not refuse to boot.
+  startup. It is NOT bundled and this adapter NEVER installs it: that is a
+  package download, which needs the user's explicit OK, and setup also runs
+  unattended from the auto-updater. The report carries the exact command. The
+  bridge pins its dsh peers to the EXACT runtime version, so the command pins
+  both packages to `dsh --version` (an unpinned add resolves `latest`, an
+  incompatible 0.0.1 line). Plugins land in `<profile>/node_modules/<pkg>`.
+- The `desktop` profile is Electron-owned: the npm CLI refuses plugin
+  management for it, and only the Desktop-bundled command
+  (`<app>/Contents/Resources/runtime/cli/bin/dsh`) can manage it, with Desktop
+  fully quit.
+- The hooks row goes in the HOME patch, which every profile reads, and only
+  while the bridge is installed in EVERY existing profile. A row naming a
+  package a profile lacks prints an import failure with a stack trace at each
+  boot of that profile. Profile patches are not used: the Desktop app's config
+  editor rewrites its own.
 - Bridged events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
   Stop, SubagentStart, SubagentStop. No SessionEnd. `transcript_path` is
   always "", so the attachment inbox has nothing to read. The Claude matcher
@@ -76,7 +87,19 @@ DSH_HOOK_MATCHERS = {
 #: script already; there is no SessionEnd in either harness's wiring.
 UNSUPPORTED_EVENTS = frozenset({"SessionEnd"})
 
-PLUGIN_TIMEOUT_SECONDS = 300
+#: The bridge's peers are pinned to the dsh runtime version; this package is
+#: the one it names.
+HOOK_PROTOCOL_PACKAGE = "@deepseek-ai/dsh-hook-protocol"
+#: What to pin to when `dsh --version` cannot be read.
+FALLBACK_DIST_TAG = "next"
+DESKTOP_PROFILE = "desktop"
+#: The command Desktop ships, relative to the .app (apps/desktop README,
+#: "Bundled command runtime"). `/usr/local/bin/dsh` links here when the user
+#: registered it from Desktop.
+BUNDLED_DSH_SUFFIX = ("Contents", "Resources", "runtime", "cli", "bin", "dsh")
+DEFAULT_DESKTOP_APP = Path("/Applications/DeepSeek Harness.app")
+VERSION_TIMEOUT_SECONDS = 20
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$")
 
 _BLOCK_BEGIN = "# >>> memory-mcp:"
 _BLOCK_END = "# <<< memory-mcp:"
@@ -113,8 +136,37 @@ def role_briefs_dir() -> Path:
 
 def _default_runner(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
     return subprocess.run(
-        list(argv), capture_output=True, text=True, timeout=PLUGIN_TIMEOUT_SECONDS,
+        list(argv), capture_output=True, text=True, timeout=VERSION_TIMEOUT_SECONDS,
     )
+
+
+def profiles_dir() -> Path:
+    return dsh_home() / "profiles"
+
+
+def existing_profiles() -> tuple[str, ...]:
+    """Initialized profiles. `.<name>.staging-*` dirs are dsh's own scratch."""
+    root = profiles_dir()
+    if not root.is_dir():
+        return ()
+    return tuple(sorted(
+        p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
+    ))
+
+
+def bridge_installed(profile: str) -> bool:
+    """The bridge is importable in `profile`: pnpm (hoisted linker) put it in
+    the profile's own node_modules."""
+    package_json = (
+        profiles_dir() / profile / "node_modules" / HOOKS_PLUGIN_PACKAGE / "package.json"
+    )
+    return package_json.is_file()
+
+
+def is_bundled_dsh(path: str | None) -> bool:
+    if not path:
+        return False
+    return Path(path).resolve().parts[-len(BUNDLED_DSH_SUFFIX):] == BUNDLED_DSH_SUFFIX
 
 
 # ---------- the patch file, as text ----------
@@ -228,6 +280,26 @@ def upsert_block(text: str, name: str, block: Sequence[str]) -> str:
     return "\n".join(new_lines) + "\n"
 
 
+def remove_block(text: str, name: str) -> str:
+    """`text` without the managed block `name`; unchanged when it is absent.
+
+    A file left with no entries gets dsh's own `[]` back, so it stays a list.
+    """
+    lines = text.splitlines()
+    spans = _managed_spans(lines)
+    if name not in spans:
+        return text
+    begin, end = spans[name]
+    lines = lines[:begin] + lines[end + 1:]
+    while begin < len(lines) and begin > 0 and not lines[begin].strip() and not lines[begin - 1].strip():
+        del lines[begin]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not _significant(lines):
+        lines.append("[]")
+    return "\n".join(lines) + "\n"
+
+
 # ---------- the adapter ----------
 
 
@@ -239,7 +311,8 @@ class DeepSeekHarness:
         runner: Runner | None = None,
         which: Callable[[str], str | None] | None = None,
     ) -> None:
-        # Injectable so tests never start a real `dsh` (or pnpm) process.
+        # Injectable so tests never start a real `dsh`. The only process this
+        # adapter ever runs is `dsh --version`; it never installs anything.
         self._run = runner or _default_runner
         self._which = which or shutil.which
 
@@ -279,6 +352,8 @@ class DeepSeekHarness:
     def install_hooks(
         self, remote_url: str | None = None, token: str | None = None
     ) -> ChangeReport:
+        """Write our hooks.json, and mount the bridge row only where the bridge
+        is installed. Installs nothing: the report says what to run."""
         report = ChangeReport(self.name)
         hooks_dest = settings.data_dir / "hooks"
         hooks_dest.mkdir(parents=True, exist_ok=True)
@@ -288,20 +363,27 @@ class DeepSeekHarness:
         path.write_text(json.dumps(config, indent=2) + "\n")
         if remote_url and token:
             os.chmod(path, 0o600)
+        report.ok(f"Hooks config {path}; events wired: {', '.join(config['hooks'])}")
+
+        profiles = existing_profiles()
+        missing = tuple(p for p in profiles if not bridge_installed(p))
+        if not profiles or missing:
+            if self._remove_block(report, "hooks"):
+                report.ok(f"Hooks bridge row {HOOKS_ROW_ID} left out of {patch_path()} "
+                          "until the bridge is installed in every profile")
+            self._report_bridge_commands(report, missing or ("web",))
+            return report
 
         block = _render_block("hooks", HOOKS_ROW_ID, HOOKS_PLUGIN_PACKAGE, {
             "configPath": str(path),
         })
         if not self._write_block(report, "hooks", block, secret=False):
             return report
-        report.ok(
-            f"Hooks config {path}; events wired: {', '.join(config['hooks'])}"
-        )
+        report.ok(f"Hooks bridge mounted for profile(s): {', '.join(profiles)}")
         report.warn(
             "dsh has no SessionEnd and sends an empty transcript_path: session "
             "close rides Stop, and the attachment inbox does not work here"
         )
-        self._install_plugin(report)
         return report
 
     def _hooks_config(
@@ -338,36 +420,73 @@ class DeepSeekHarness:
                 events[event] = groups
         return {"hooks": events}
 
-    def _install_plugin(self, report: ChangeReport) -> None:
-        """Add the hooks bridge to every existing profile. Never fatal: a
-        failure is a warning carrying the exact command to run by hand."""
-        manual = f"dsh plugin --profile <profile> add {HOOKS_PLUGIN_PACKAGE}"
-        dsh = self._which("dsh")
-        if dsh is None:
-            report.warn(f"`dsh` is not on PATH - install the hooks bridge with: {manual}")
-            return
-        profiles_dir = dsh_home() / "profiles"
-        profiles = sorted(
-            p.name for p in profiles_dir.iterdir()
-            if p.is_dir() and not p.name.startswith(".")
-        ) if profiles_dir.is_dir() else []
-        if not profiles:
-            report.warn(f"No dsh profiles under {profiles_dir} yet - after the first run: {manual}")
-            return
+    # ---------- the bridge: commands for the user, never run here ----------
+
+    def _report_bridge_commands(
+        self, report: ChangeReport, profiles: Sequence[str],
+    ) -> None:
+        """One warning per profile with the exact command to install the
+        bridge. Reading `dsh --version` is local; the add itself is a download
+        and is left to the user."""
         for profile in profiles:
-            argv = (dsh, "plugin", "--profile", profile, "add", HOOKS_PLUGIN_PACKAGE)
+            binary = self._binary_for(profile)
+            if binary is None:
+                report.warn(
+                    f"Hooks need the bridge in the Electron-owned {profile!r} profile, "
+                    "which only DeepSeek Harness Desktop's bundled command can manage "
+                    "(Manage dsh Command... in Desktop registers it). Launch Desktop "
+                    "once, quit it fully, then run: dsh plugin --profile desktop add "
+                    f"{HOOKS_PLUGIN_PACKAGE}@<dsh --version> "
+                    f"{HOOK_PROTOCOL_PACKAGE}@<dsh --version>, reopen Desktop and "
+                    "rerun memory-mcp setup"
+                )
+                continue
+            version = self._dsh_version(binary)
+            pin = version or FALLBACK_DIST_TAG
+            argv = (
+                binary, "plugin", "--profile", profile, "add",
+                f"{HOOKS_PLUGIN_PACKAGE}@{pin}", f"{HOOK_PROTOCOL_PACKAGE}@{pin}",
+            )
             command = " ".join(shlex.quote(a) for a in argv)
-            try:
-                result = self._run(argv)
-            except (OSError, subprocess.SubprocessError) as error:
-                report.warn(f"hooks bridge install failed for profile {profile!r} ({error}); run: {command}")
-                continue
-            if result.returncode != 0:
-                detail = (result.stderr or result.stdout or "").strip().splitlines()
-                reason = detail[-1] if detail else f"exit {result.returncode}"
-                report.warn(f"hooks bridge install failed for profile {profile!r} ({reason}); run: {command}")
-                continue
-            report.ok(f"Hooks bridge installed in profile {profile!r}")
+            unpinned = "" if version else (
+                f" (`{binary} --version` was unreadable, so this pins the "
+                f"`{FALLBACK_DIST_TAG}` tag; match it to your dsh version if that fails)"
+            )
+            desktop = (
+                " Quit DeepSeek Harness Desktop first and reopen it after."
+                if profile == DESKTOP_PROFILE else ""
+            )
+            report.warn(
+                f"Hooks are off for dsh profile {profile!r} until its bridge is "
+                f"installed (a package download - run it yourself):{desktop} "
+                f"{command}{unpinned} - then rerun memory-mcp setup"
+            )
+
+    def _binary_for(self, profile: str) -> str | None:
+        """The `dsh` that may manage `profile`, as the user would type it.
+        Only Desktop's bundled command manages `desktop` (None when it cannot
+        be found); it also manages ordinary profiles, as npm dsh does."""
+        on_path = self._which("dsh")
+        if profile != DESKTOP_PROFILE:
+            return "dsh"
+        if is_bundled_dsh(on_path):
+            return "dsh"
+        bundled = DEFAULT_DESKTOP_APP.joinpath(*BUNDLED_DSH_SUFFIX)
+        return str(bundled) if bundled.exists() else None
+
+    def _dsh_version(self, binary: str) -> str | None:
+        resolved = self._which(binary) if binary == "dsh" else binary
+        if resolved is None:
+            return None
+        try:
+            result = self._run((resolved, "--version"))
+        except (OSError, subprocess.SubprocessError):
+            return None
+        version = (result.stdout or "").strip().splitlines()
+        if result.returncode != 0 or not version:
+            return None
+        candidate = version[-1].strip()
+        return candidate if _VERSION_RE.match(candidate) else None
 
     # ---------- agents ----------
 
@@ -399,6 +518,23 @@ class DeepSeekHarness:
     def _write_block(
         self, report: ChangeReport, name: str, block: Sequence[str], *, secret: bool,
     ) -> bool:
+        return self._edit_patch(
+            report, name, lambda text: upsert_block(text, name, block), secret=secret,
+        )
+
+    def _remove_block(self, report: ChangeReport, name: str) -> bool:
+        """True when the block was there and is now gone."""
+        path = patch_path()
+        if not path.exists():
+            return False
+        before = path.read_text()
+        if not self._edit_patch(report, name, lambda text: remove_block(text, name), secret=False):
+            return False
+        return path.read_text() != before
+
+    def _edit_patch(
+        self, report: ChangeReport, name: str, edit: Callable[[str], str], *, secret: bool,
+    ) -> bool:
         path = patch_path()
         try:
             current = path.read_text() if path.exists() else ""
@@ -406,9 +542,9 @@ class DeepSeekHarness:
             report.conflict(f"{path} could not be read ({error}); nothing written")
             return False
         try:
-            updated = upsert_block(current, name, block)
+            updated = edit(current)
         except PatchConflict as error:
-            report.conflict(f"{path}: {error}; row {name!r} not written - edit it by hand")
+            report.conflict(f"{path}: {error}; row {name!r} not changed - edit it by hand")
             return False
         if updated == current:
             return True

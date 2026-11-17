@@ -14,10 +14,13 @@ import pytest
 import yaml
 
 import memory_mcp.harnesses as registry
+import memory_mcp.harnesses.deepseek as deepseek_mod
 from memory_mcp.harnesses.deepseek import (
+    HOOK_PROTOCOL_PACKAGE,
     HOOKS_PLUGIN_PACKAGE,
     DeepSeekHarness,
     hooks_config_path,
+    remove_block,
 )
 
 URL = "http://127.0.0.1:8765/mcp"
@@ -36,30 +39,45 @@ USER_PATCH = """\
 
 
 class FakeRunner:
-    def __init__(self, returncode: int = 0, stderr: str = "", raises: Exception | None = None):
+    """Stands in for `dsh --version`, the only process the adapter runs."""
+
+    def __init__(self, stdout: str = "0.2.2-rc.3\n", returncode: int = 0,
+                 raises: Exception | None = None):
         self.calls: list[tuple[str, ...]] = []
+        self.stdout = stdout
         self.returncode = returncode
-        self.stderr = stderr
         self.raises = raises
 
     def __call__(self, argv):
         self.calls.append(tuple(argv))
         if self.raises:
             raise self.raises
-        return subprocess.CompletedProcess(list(argv), self.returncode, "", self.stderr)
+        return subprocess.CompletedProcess(list(argv), self.returncode, self.stdout, "")
 
 
 @pytest.fixture
 def dsh_home(tmp_path, monkeypatch):
     home = tmp_path / "dsh-home"
     monkeypatch.setenv("DSH_HOME", str(home))
+    # The machine running this suite may have the real Desktop app.
+    monkeypatch.setattr(deepseek_mod, "DEFAULT_DESKTOP_APP", tmp_path / "No Such.app")
     return home
+
+
+def add_profile(home, name, bridge=False):
+    profile = home / "profiles" / name
+    profile.mkdir(parents=True)
+    if bridge:
+        package = profile / "node_modules" / HOOKS_PLUGIN_PACKAGE
+        package.mkdir(parents=True)
+        (package / "package.json").write_text("{}")
+    return profile
 
 
 def harness(runner=None, on_path=True):
     return DeepSeekHarness(
         runner=runner or FakeRunner(),
-        which=lambda name: "/usr/local/bin/dsh" if on_path else None,
+        which=lambda name: "/opt/no-such-npm/bin/dsh" if on_path else None,
     )
 
 
@@ -125,7 +143,7 @@ class TestMCPRow:
         assert set(inserted(patch)) == {"my-plugin", "memory-mcp"}
 
     def test_rerun_changes_nothing(self, dsh_home):
-        dsh_home.mkdir()
+        add_profile(dsh_home, "web", bridge=True)
         patch = dsh_home / "cordis.patch.yml"
         patch.write_text(USER_PATCH)
         harness().configure_mcp(URL)
@@ -138,6 +156,7 @@ class TestMCPRow:
         assert patch.read_text() == first
 
     def test_repointing_replaces_only_our_block_in_place(self, dsh_home):
+        add_profile(dsh_home, "web", bridge=True)
         harness().configure_mcp(URL)
         harness().install_hooks()
         harness().configure_mcp("http://127.0.0.1:9999/mcp")
@@ -215,49 +234,112 @@ class TestHooks:
         for group in by_script.values():
             assert group["hooks"][0]["command"].startswith("env MEMORY_MCP_HARNESS=deepseek ")
 
-    def test_bridge_row_points_at_the_hooks_json(self, dsh_home):
-        harness().install_hooks()
+    def test_bridge_row_mounted_when_every_profile_has_the_bridge(self, dsh_home):
+        add_profile(dsh_home, "web", bridge=True)
+        add_profile(dsh_home, "headless", bridge=True)
+        runner = FakeRunner()
+
+        report = harness(runner).install_hooks()
+
         row = inserted(dsh_home / "cordis.patch.yml")["memory-mcp-hooks"]
         assert row["name"] == HOOKS_PLUGIN_PACKAGE
         assert row["config"] == {"configPath": str(hooks_config_path())}
-
-    def test_plugin_installed_into_each_existing_profile(self, dsh_home):
-        for name in ("web", "headless", ".web.staging-x"):
-            (dsh_home / "profiles" / name).mkdir(parents=True)
-        runner = FakeRunner()
-
-        report = harness(runner).install_hooks()
-
-        assert runner.calls == [
-            ("/usr/local/bin/dsh", "plugin", "--profile", p, "add", HOOKS_PLUGIN_PACKAGE)
-            for p in ("headless", "web")
-        ]
         assert not report.conflicts
+        assert runner.calls == [], "nothing to report, so not even --version runs"
 
-    def test_plugin_failure_is_a_warning_with_the_command(self, dsh_home):
-        (dsh_home / "profiles" / "web").mkdir(parents=True)
-        runner = FakeRunner(returncode=1, stderr="ERR_PNPM_NO_MATCHING_VERSION")
+    def test_no_row_and_a_pinned_command_when_the_bridge_is_missing(self, dsh_home):
+        add_profile(dsh_home, "web")
+        runner = FakeRunner()
 
         report = harness(runner).install_hooks()
 
-        warning = next(a for a in report.actions if "failed for profile 'web'" in a)
-        assert "ERR_PNPM_NO_MATCHING_VERSION" in warning
-        assert f"plugin --profile web add {HOOKS_PLUGIN_PACKAGE}" in warning
-        assert hooks_config_path().exists()
+        assert not (dsh_home / "cordis.patch.yml").exists()
+        assert runner.calls == [("/opt/no-such-npm/bin/dsh", "--version")]
+        warning = next(a for a in report.actions if "profile 'web'" in a)
+        assert (
+            f"dsh plugin --profile web add {HOOKS_PLUGIN_PACKAGE}@0.2.2-rc.3 "
+            f"{HOOK_PROTOCOL_PACKAGE}@0.2.2-rc.3"
+        ) in warning
 
-    def test_plugin_runner_crash_is_a_warning(self, dsh_home):
-        (dsh_home / "profiles" / "web").mkdir(parents=True)
-        report = harness(FakeRunner(raises=subprocess.TimeoutExpired("dsh", 1))).install_hooks()
-        assert any("failed for profile 'web'" in a for a in report.actions)
-
-    def test_no_dsh_on_path_runs_nothing(self, dsh_home):
-        (dsh_home / "profiles" / "web").mkdir(parents=True)
+    def test_never_runs_a_plugin_install(self, dsh_home):
+        add_profile(dsh_home, "web")
+        add_profile(dsh_home, "headless")
         runner = FakeRunner()
 
-        report = harness(runner, on_path=False).install_hooks()
+        harness(runner).install_hooks()
 
-        assert runner.calls == []
-        assert any("not on PATH" in a for a in report.actions)
+        assert all("plugin" not in call for call in runner.calls)
+
+    def test_an_existing_row_is_removed_when_a_profile_lacks_the_bridge(self, dsh_home):
+        add_profile(dsh_home, "web", bridge=True)
+        harness().configure_mcp(URL)
+        harness().install_hooks()
+        add_profile(dsh_home, "headless")
+
+        report = harness().install_hooks()
+
+        patch = dsh_home / "cordis.patch.yml"
+        assert set(inserted(patch)) == {"memory-mcp"}
+        assert "memory-mcp:hooks" not in patch.read_text()
+        assert any("profile 'headless'" in a for a in report.actions)
+        assert not any("profile 'web'" in a for a in report.actions)
+
+    def test_unreadable_version_falls_back_to_the_next_tag(self, dsh_home):
+        add_profile(dsh_home, "web")
+        report = harness(FakeRunner(stdout="dsh: oops\n", returncode=1)).install_hooks()
+        warning = next(a for a in report.actions if "profile 'web'" in a)
+        assert f"{HOOKS_PLUGIN_PACKAGE}@next {HOOK_PROTOCOL_PACKAGE}@next" in warning
+        assert "unreadable" in warning
+
+    def test_version_runner_crash_is_not_fatal(self, dsh_home):
+        add_profile(dsh_home, "web")
+        report = harness(FakeRunner(raises=subprocess.TimeoutExpired("dsh", 1))).install_hooks()
+        assert any("@next" in a for a in report.actions)
+
+    def test_desktop_profile_names_the_bundled_command(self, dsh_home, tmp_path, monkeypatch):
+        add_profile(dsh_home, "desktop")
+        app = tmp_path / "DeepSeek Harness.app"
+        bundled = app.joinpath(*deepseek_mod.BUNDLED_DSH_SUFFIX)
+        bundled.parent.mkdir(parents=True)
+        bundled.write_text("#!/bin/sh\n")
+        monkeypatch.setattr(deepseek_mod, "DEFAULT_DESKTOP_APP", app)
+        runner = FakeRunner()
+
+        # PATH dsh is an npm install: it cannot manage desktop.
+        report = harness(runner).install_hooks()
+
+        warning = next(a for a in report.actions if "profile 'desktop'" in a)
+        assert f"'{bundled}' plugin --profile desktop add" in warning
+        assert "Quit DeepSeek Harness Desktop first" in warning
+        assert runner.calls == [(str(bundled), "--version")]
+
+    def test_desktop_via_the_registered_bundled_link(self, dsh_home, tmp_path):
+        add_profile(dsh_home, "desktop")
+        app_bin = tmp_path / "X.app" / "Contents" / "Resources" / "runtime" / "cli" / "bin"
+        app_bin.mkdir(parents=True)
+        (app_bin / "dsh").write_text("")
+        link = tmp_path / "dsh"
+        link.symlink_to(app_bin / "dsh")
+        h = DeepSeekHarness(runner=FakeRunner(), which=lambda name: str(link))
+
+        report = h.install_hooks()
+
+        assert any("dsh plugin --profile desktop add" in a for a in report.actions)
+
+    def test_desktop_without_a_bundled_command_says_how_to_get_one(self, dsh_home):
+        add_profile(dsh_home, "desktop")
+        report = harness().install_hooks()
+        warning = next(a for a in report.actions if "'desktop'" in a)
+        assert "Manage dsh Command" in warning
+
+
+class TestRemoveBlock:
+    def test_a_file_left_empty_becomes_a_list_again(self):
+        text = "# header\n# >>> memory-mcp:hooks (x)\n- insert: []\n# <<< memory-mcp:hooks\n"
+        assert yaml.safe_load(remove_block(text, "hooks")) == []
+
+    def test_absent_block_is_a_no_op(self):
+        assert remove_block(USER_PATCH, "hooks") == USER_PATCH
 
 
 class TestRoleBriefs:

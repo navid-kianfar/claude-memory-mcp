@@ -31,7 +31,7 @@ hooks it offers, where agent definitions go — and `memory-mcp-setup` configure
 | **ZCode** | `~/.zcode/cli/config.json` → `mcp.servers` | full (same events; no `SubagentStop`) | `~/.zcode/agents/` |
 | **Codex** | `~/.codex/config.toml` → `[mcp_servers.memory]` | `notify` at turn end (export + update) | not supported by Codex |
 | **OpenCode** | `opencode.jsonc` → `mcp` (comments preserved) | a small plugin (session start/end) | not verified; briefs ride MCP |
-| **DeepSeek Harness** (`dsh`, preview) | `$DSH_HOME/cordis.patch.yml` → an inserted `dsh-mcp-client` row | via the `dsh-hooks-claude-code` bridge plugin (installed per profile): per-turn rules, session start, edit gate, dispatch ledger; no `SessionEnd`, no attachment inbox | none (no file-based definitions); role briefs ride the dispatch prompt |
+| **DeepSeek Harness** (`dsh`, preview) | `$DSH_HOME/cordis.patch.yml` → an inserted `dsh-mcp-client` row | via the `dsh-hooks-claude-code` bridge plugin (you install it; setup prints the command): per-turn rules, session start, edit gate, dispatch ledger; no `SessionEnd`, no attachment inbox | none (no file-based definitions); role briefs ride the dispatch prompt |
 
 The core — memory, tasks, the asoode board mirror, the digest — is identical for
 every harness, because it lives in the daemon, not in the client. A task created
@@ -39,11 +39,13 @@ from ZCode mirrors to the board exactly like one created from Claude. What a
 harness cannot carry (OpenCode has no per-turn hook; Codex has no subagents) is
 declared by its adapter and degrades by design; nothing pretends.
 
-**DeepSeek Harness (developer preview).** dsh has no hooks of its own; setup
-writes a Claude-format hooks file and mounts the experimental
-`@deepseek-ai/dsh-hooks-claude-code` bridge, installing it with
-`dsh plugin --profile <p> add …` for each existing profile (a failed install is
-a warning with the command to rerun). Session start, per-turn rules, the edit
+**DeepSeek Harness (developer preview).** dsh has no hooks of its own. Setup
+writes a Claude-format hooks file for the experimental
+`@deepseek-ai/dsh-hooks-claude-code` bridge, but never downloads the bridge
+itself: it prints the exact `dsh plugin --profile <p> add …@<dsh version>`
+command for each profile that lacks it (the `desktop` profile only through the
+Desktop app's bundled `dsh`). The bridge row is mounted once every profile has
+it, so a rerun of setup after you install it turns hooks on. Session start, per-turn rules, the edit
 gate (`edit|write|apply_patch`) and the dispatch ledger (`subagent|subagent_fork`)
 work. Not supported: `SessionEnd` (the session closes on `Stop`), the
 attachment inbox (dsh sends no transcript path), and installed agent

@@ -1,6 +1,6 @@
 [project]
 name = "memory-mcp"
-version = "0.21.2"
+version = "0.22.0"
 description = "Production-grade vector memory MCP server with DuckDB + semantic search"
 readme = "README.md"
 license = { text = "MIT" }

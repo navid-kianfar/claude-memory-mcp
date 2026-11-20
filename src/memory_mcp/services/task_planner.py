@@ -34,7 +34,10 @@ from memory_mcp.db.connection import transaction
 from memory_mcp.exceptions import MemoryMCPError
 from memory_mcp.utils.decomposition import decomposition_hint
 from memory_mcp.models import CreateTaskRequest, Task, TaskSource
-from memory_mcp.services.task_service import PLAN_REQUEST_COMMENT_PREFIX
+from memory_mcp.services.task_service import (
+    PLAN_REQUEST_COMMENT_PREFIX,
+    UnknownRoleError,
+)
 
 # A plan is for a request with several deliverables. One task is not a plan - it
 # is memory_task_add - and thirty is not a plan either, it is noise.
@@ -126,6 +129,7 @@ class TaskPlanner:
         """
         text = (request or "").strip()
         self._validate(text, items)
+        self._validate_roles(items)
         titles = tuple(item["title"].strip() for item in items)
         fingerprint = plan_fingerprint(project, text, titles)
 
@@ -176,6 +180,16 @@ class TaskPlanner:
                     f"{items[parent]['parent_index'] + 1} instead, or make it a "
                     "task of its own."
                 )
+
+    def _validate_roles(self, items: Sequence[dict]) -> None:
+        """Check every item's role before anything is created, so the error
+        names the item and the whole plan is refused, not its tail."""
+        for index, item in enumerate(items):
+            role = (item.get("role") or "").strip() or None
+            try:
+                self._tasks.check_role(role)
+            except UnknownRoleError as e:
+                raise PlanError(f"task {index + 1} ({item['title']!r}): {e}") from e
 
     def _plan_once(
         self, project: str, text: str, items: Sequence[dict], path: str | None,

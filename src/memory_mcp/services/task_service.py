@@ -24,9 +24,10 @@ explicit `stop` could close was how a finished task kept ticking for hours.
 
 import contextlib
 import contextvars
+import logging
 import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -77,6 +78,28 @@ _MAX_RECONSTRUCTED_MINUTES = 240
 
 # The closed states as the provenance log spells them, for the evidence lookup.
 _CLOSED_STATE_VALUES = tuple(sorted(state.value for state in _CLOSED_STATES))
+
+logger = logging.getLogger(__name__)
+
+# What a role check says when no team exists on this machine at all, so every
+# role is accepted rather than every role refused.
+NO_TEAM_ROLE_WARNING = (
+    "No agent team was found on this machine (no installed agents and no "
+    "shipped agents/ folder), so role {role!r} was accepted unchecked."
+)
+
+
+def _installed_roles() -> frozenset[str] | None:
+    # Imported here: enforcement pulls in the container, which builds this
+    # service, so a module-level import would be circular.
+    from memory_mcp.enforcement import known_roles
+
+    return known_roles()
+
+
+class UnknownRoleError(ValidationError):
+    """A task write named a role no installed or shipped agent carries."""
+
 
 # How memory_task_plan opens the comment that copies the request onto every task
 # it creates. That comment is written in the plan's own transaction, so it is no
@@ -222,8 +245,13 @@ class TaskService:
         attachment_repo=None,
         path_resolver=None,
         board_mover=None,
+        role_roster: Callable[[], frozenset[str] | None] | None = None,
     ):
         self._task_repo = task_repo
+        # The roles a task may be routed to, read at write time so an agent
+        # installed mid-session is accepted at once. Injected for tests; the
+        # default is enforcement.known_roles. None from it means "no team".
+        self._role_roster = role_roster or _installed_roles
         self._provenance_repo = provenance_repo
         self._project_repo = project_repo
         self._session_repo = session_repo
@@ -332,6 +360,31 @@ class TaskService:
 
     # ---------- create ----------
 
+    def check_role(self, role: str | None) -> str | None:
+        """Refuse a role no agent on this machine carries.
+
+        Every task write goes through here - MCP tools, the CLI, the web routes
+        and the planner - because a misspelled role is accepted silently
+        otherwise, is claimable by nobody, and reaches the board as a label for
+        an agent that does not exist. None and "" pass (no role, or clearing
+        it). Returns a warning when no team exists anywhere and the role was
+        accepted unchecked; raises UnknownRoleError naming the valid roles.
+        """
+        if not role:
+            return None
+        roster = self._role_roster()
+        if roster is None:
+            warning = NO_TEAM_ROLE_WARNING.format(role=role)
+            logger.warning(warning)
+            return warning
+        if role in roster:
+            return None
+        valid = ", ".join(sorted(roster))
+        raise UnknownRoleError(
+            f"Unknown role {role!r}: no agent on this machine has that name. "
+            f"Valid roles: {valid}. Pass an empty string to clear the role."
+        )
+
     def create(self, request: CreateTaskRequest) -> Task:
         return self.create_routed(request)[0]
 
@@ -406,6 +459,7 @@ class TaskService:
         and a target that disagree) creates nothing.
         """
         task_id = str(uuid.uuid4())
+        self.check_role(request.role)
         if request.parent_id:
             self._check_parentable(request.project, request.parent_id)
         routing, _ = self._resolve_path(request.project, request.path, request.target)
@@ -711,6 +765,7 @@ class TaskService:
         owner of the clock it starts, so memory_session_end can stop it.
         """
         before = self._require(request.project, request.task_id)
+        self.check_role(request.role)
 
         reroute = _Reroute()
         if request.path is not None or request.target is not None:

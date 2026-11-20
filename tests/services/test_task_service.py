@@ -1409,3 +1409,93 @@ def _backdate_creation(slug, task_id, *, minutes):
     created_at = datetime.now() - timedelta(minutes=minutes)
     with get_connection(slug) as conn:
         conn.execute("UPDATE tasks SET created_at = ? WHERE id = ?", [created_at, task_id])
+
+
+class TestRoleValidation:
+    """A task's role must name an agent this machine has, on every write.
+
+    Each harness's team folder and the shipped `agents/` folder point at temp
+    paths, so the result never depends on what the developer has installed.
+    """
+
+    @pytest.fixture
+    def team(self, tmp_path, monkeypatch):
+        from memory_mcp import enforcement
+        from memory_mcp.harnesses import claude as claude_mod
+        from memory_mcp.harnesses import zcode as zcode_mod
+
+        claude_agents = tmp_path / "claude-home" / "agents"
+        shipped = tmp_path / "shipped"
+        monkeypatch.setattr(enforcement, "AGENT_TEAM_DIR", claude_agents)
+        monkeypatch.setattr(zcode_mod, "zcode_agents_dir", lambda: tmp_path / "zcode")
+        monkeypatch.setattr(claude_mod, "AGENTS_DIR", shipped)
+
+        def install(directory, *names):
+            directory.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                (directory / f"{name}.md").write_text(
+                    f"---\nname: {name}\ndescription: The {name} agent.\n---\n"
+                )
+
+        return {"claude": claude_agents, "shipped": shipped, "install": install}
+
+    def test_an_unknown_role_is_refused_with_the_valid_list(self, container, team):
+        team["install"](team["claude"], "backend", "pm")
+        slug = _project(container, "t-role-unknown")
+
+        with pytest.raises(ValidationError) as caught:
+            _add(container, slug, role="bakcend")
+
+        message = str(caught.value)
+        assert "'bakcend'" in message
+        assert "backend, pm" in message
+        assert container.task_service.list_tasks(slug).tasks == []
+
+    def test_an_installed_role_and_the_lead_are_accepted(self, container, team):
+        team["install"](team["claude"], "backend", "pm")
+        slug = _project(container, "t-role-known")
+
+        assert _add(container, slug, role="backend").role == "backend"
+        assert _add(container, slug, title="Plan", role="pm").role == "pm"
+
+    def test_an_update_to_an_unknown_role_is_refused_and_changes_nothing(
+        self, container, team,
+    ):
+        team["install"](team["claude"], "backend")
+        slug = _project(container, "t-role-update")
+        task = _add(container, slug, role="backend")
+
+        with pytest.raises(ValidationError):
+            container.task_service.update(
+                UpdateTaskRequest(project=slug, task_id=task.id, role="fronted")
+            )
+
+        assert container.task_service.get(slug, task.id).role == "backend"
+
+    def test_an_empty_role_still_clears_it(self, container, team):
+        team["install"](team["claude"], "backend")
+        slug = _project(container, "t-role-clear")
+        task = _add(container, slug, role="backend")
+
+        updated, changed = container.task_service.update(
+            UpdateTaskRequest(project=slug, task_id=task.id, role="")
+        )
+
+        assert updated.role is None
+        assert "role" in changed
+
+    def test_no_installed_team_falls_back_to_the_shipped_folder(self, container, team):
+        team["claude"].parent.mkdir(parents=True)
+        team["install"](team["shipped"], "rust")
+        slug = _project(container, "t-role-shipped")
+
+        assert _add(container, slug, role="rust").role == "rust"
+        with pytest.raises(ValidationError, match="Valid roles: rust"):
+            _add(container, slug, title="Other", role="elixir")
+
+    def test_no_team_anywhere_accepts_any_role_with_a_warning(self, container, team):
+        team["claude"].parent.mkdir(parents=True)
+        slug = _project(container, "t-role-none")
+
+        assert "accepted unchecked" in container.task_service.check_role("elixir")
+        assert _add(container, slug, role="elixir").role == "elixir"

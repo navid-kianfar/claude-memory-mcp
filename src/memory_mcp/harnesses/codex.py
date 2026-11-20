@@ -41,8 +41,15 @@ from memory_mcp.harnesses.base import (
     HarnessCapabilities,
     HarnessNotSupported,
 )
+from memory_mcp.harnesses.claude import (
+    copy_hook_scripts,
+    hook_scripts_dir,
+    missing_hooks_message,
+)
 
 NOTIFY_WRAPPER_NAME = "codex-notify.sh"
+#: The shared hook script the notify wrapper runs at every turn end.
+SESSION_END_SCRIPT = "session-end.sh"
 #: Second element of our `notify` command. Marks the entry as ours, and in the
 #: wrapper separates it from a chained user command that follows.
 NOTIFY_MARKER = "memory-mcp"
@@ -164,7 +171,22 @@ class CodexHarness:
                 "local daemon only"
             )
 
-        wrapper_dest = settings.data_dir / "hooks" / NOTIFY_WRAPPER_NAME
+        # The wrapper runs the shared session-end.sh; wiring it with no script
+        # behind it would turn every turn end into a silent no-op.
+        hooks_dest = settings.data_dir / "hooks"
+        source = hook_scripts_dir()
+        if source is None:
+            report.conflict(missing_hooks_message(self.name, codex_config_path()))
+            return report
+        present = copy_hook_scripts(source, hooks_dest)
+        if SESSION_END_SCRIPT not in present:
+            report.conflict(
+                f"{SESSION_END_SCRIPT} was not found in {source}; "
+                f"{codex_config_path()} was left unchanged"
+            )
+            return report
+
+        wrapper_dest = hooks_dest / NOTIFY_WRAPPER_NAME
         wrapper_src = Path(__file__).parent / "codex" / NOTIFY_WRAPPER_NAME
         if not wrapper_src.is_file():
             report.warn(f"notify wrapper missing at {wrapper_src} - skipping.")

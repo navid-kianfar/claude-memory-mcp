@@ -1147,15 +1147,16 @@ class AttachmentRepository:
                 "SELECT count(*) FROM task_attachments WHERE sha256 = ?",
                 [attachment.sha256],
             ).fetchone()[0]
-        # A parked compose-box file points at the same blob until it is bound.
-        # Deleting the blob out from under it would make the later bind fail on
-        # "the bytes are gone" for a file the user did hand over.
+        # A parked compose-box file points at the same blob until it is bound
+        # or dismissed. Deleting the blob out from under it would make the later
+        # bind fail on "the bytes are gone" for a file the user did hand over.
         if not still_used:
             try:
                 with connect(project) as conn:
                     still_used = conn.execute(
                         "SELECT count(*) FROM attachment_inbox "
-                        "WHERE sha256 = ? AND bound_task_id IS NULL",
+                        "WHERE sha256 = ? AND bound_task_id IS NULL "
+                        "AND dismissed_at IS NULL",
                         [attachment.sha256],
                     ).fetchone()[0]
             except Exception:  # noqa: BLE001 - a DB older than v15 has no inbox
@@ -1237,12 +1238,18 @@ class AttachmentInboxRepository:
             )
 
     def undelivered(self, project: str, claude_session_id: str) -> list[tuple[str, str]]:
-        """`(pending_id, notice)` not yet put in this session's context, oldest first."""
+        """`(pending_id, notice)` not yet put in this session's context, oldest first.
+
+        A dismissed row is never announced: the user has already said no. A
+        bound one still is, because an automatic bind rewrites its notice to say
+        where the file went and how to undo it.
+        """
         with connect(project) as conn:
             rows = conn.execute(
                 "SELECT id, notice FROM attachment_inbox "
                 "WHERE claude_session_id = ? AND notice IS NOT NULL "
-                "AND notified_at IS NULL ORDER BY created_at ASC, id ASC",
+                "AND notified_at IS NULL AND dismissed_at IS NULL "
+                "ORDER BY created_at ASC, id ASC",
                 [claude_session_id],
             ).fetchall()
         return [(r[0], r[1]) for r in rows]
@@ -1257,6 +1264,62 @@ class AttachmentInboxRepository:
                 f"WHERE id IN ({placeholders})",
                 list(pending_ids),
             )
+
+    def parked(
+        self, project: str, *, limit: int, offset: int = 0,
+    ) -> list[PendingAttachment]:
+        """Rows still waiting for an answer - neither bound nor dismissed - newest
+        first, one page of them."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"SELECT {_INBOX_COLUMNS} FROM attachment_inbox "
+                f"WHERE bound_task_id IS NULL AND dismissed_at IS NULL "
+                f"ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?",
+                [limit, offset],
+            ).fetchall()
+        return [_row_to_pending(r)[0] for r in rows]
+
+    def count_parked(self, project: str) -> int:
+        with connect(project) as conn:
+            row = conn.execute(
+                "SELECT count(*) FROM attachment_inbox "
+                "WHERE bound_task_id IS NULL AND dismissed_at IS NULL"
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def dismissed_at(self, project: str, pending_id: str):
+        """When the row was dismissed, or None while it is not."""
+        with connect(project) as conn:
+            row = conn.execute(
+                "SELECT dismissed_at FROM attachment_inbox WHERE id = ?", [pending_id],
+            ).fetchone()
+        return row[0] if row else None
+
+    def mark_dismissed(self, project: str, pending_id: str) -> None:
+        """Set `dismissed_at` once; a row already bound or dismissed is left alone."""
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE attachment_inbox SET dismissed_at = current_timestamp::TIMESTAMP "
+                "WHERE id = ? AND bound_task_id IS NULL AND dismissed_at IS NULL",
+                [pending_id],
+            )
+
+    def blob_in_use(self, project: str, sha256: str) -> bool:
+        """Whether anything still needs the stored bytes for this hash: a task
+        attachment (the store is shared by content, so another task's copy of
+        the same screenshot counts), or a parked row nobody has dismissed yet."""
+        with connect(project) as conn:
+            attached = conn.execute(
+                "SELECT count(*) FROM task_attachments WHERE sha256 = ?", [sha256],
+            ).fetchone()[0]
+            if attached:
+                return True
+            waiting = conn.execute(
+                "SELECT count(*) FROM attachment_inbox WHERE sha256 = ? "
+                "AND bound_task_id IS NULL AND dismissed_at IS NULL",
+                [sha256],
+            ).fetchone()[0]
+        return bool(waiting)
 
     def candidates(self, project: str) -> list[dict]:
         """Tasks this project is demonstrably working on right now.

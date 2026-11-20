@@ -82,17 +82,15 @@ class TestMCP:
 
 
 class TestHooks:
-    def test_enabled_true_and_six_events_wired(self, harness, zcode_home):
+    def test_enabled_true_and_supported_events_wired(self, harness, zcode_home):
         report = harness.install_hooks()
         cfg = json.loads((zcode_home / "cli" / "config.json").read_text())
         hooks = cfg["hooks"]
 
         assert hooks["enabled"] is True, "ZCode config hooks are disabled by default"
         assert set(hooks["events"]) == {
-            "SessionStart", "UserPromptSubmit", "PreToolUse", "Stop",
-        } or set(hooks["events"]) == {
-            "SessionStart", "UserPromptSubmit", "PreToolUse", "Stop",
-        } | {"PostToolUse", "PostToolUseFailure"}
+            "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop",
+        }
         assert "SubagentStop" not in hooks["events"]
         assert any("no SubagentStop" in w for w in report.actions)
 

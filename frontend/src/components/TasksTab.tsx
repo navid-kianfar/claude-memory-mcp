@@ -12,6 +12,7 @@ import { TaskBoardView } from "./TaskBoardView";
 import { TaskDialog } from "./TaskDialog";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SyncPausedHint } from "./SyncPausedHint";
+import { ParkedAttachmentsPanel } from "./ParkedAttachmentsPanel";
 import { useSyncState } from "../hooks/useSyncState";
 
 export interface TasksTabProps {
@@ -42,6 +43,7 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
   const [collapsed, setCollapsed] = useState<Set<TaskState>>(new Set());
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [parkedReloadSignal, setParkedReloadSignal] = useState(0);
   const [confirmClear, setConfirmClear] = useState(false);
   // link id -> board name, and EMPTY whenever the project mirrors to fewer than
   // two boards: with one board every task goes there, so the chip would be a
@@ -124,6 +126,7 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
   }, [projectSlug]);
 
   const refresh = useCallback(async () => {
+    setParkedReloadSignal((previous) => previous + 1);
     await Promise.all([load(), reloadSync()]);
     onChanged?.();
   }, [load, reloadSync, onChanged]);
@@ -336,6 +339,8 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
           <RefreshCw className="size-4" />
         </Button>
       </div>
+
+      <ParkedAttachmentsPanel projectSlug={projectSlug} reloadSignal={parkedReloadSignal} />
 
       {loading && <p className="text-sm text-muted-foreground">Loading tasks…</p>}
       {error && <p className="text-sm text-destructive">{error}</p>}

@@ -580,7 +580,31 @@ async def _hook_dispatch(request):
                 pass
         return answer
 
-    handler = _stopped if body.get("event") == "SubagentStop" else _record
+    def _confirmed() -> dict:
+        # PostToolUse: the dispatch tool actually ran, so a prompted dispatch
+        # was accepted. Confirmed, never gated (enforcement.confirm_dispatch).
+        from memory_mcp.context import detect_project_from_cwd
+        from memory_mcp.enforcement import confirm_dispatch, dispatch_role
+
+        def text(key: str) -> str:
+            value = body.get(key)
+            return value.strip() if isinstance(value, str) else ""
+
+        role = dispatch_role(text("subagent_type"), text("name"), identity.tool)
+        if not identity.session_id or role is None:
+            return {}
+        slug = detect_project_from_cwd(identity.cwd) if identity.cwd else None
+        confirm_dispatch(
+            identity.session_id,
+            agent_type=role,
+            slug=slug,
+            tool_use_id=text("tool_use_id") or None,
+            description=text("description") or None,
+        )
+        return {}
+
+    handlers = {"SubagentStop": _stopped, "PostToolUse": _confirmed}
+    handler = handlers.get(body.get("event"), _record)
     try:
         return JSONResponse(await to_thread.run_sync(handler))
     except Exception:  # noqa: BLE001 - never deny a dispatch because of a ledger

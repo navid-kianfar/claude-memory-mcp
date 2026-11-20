@@ -57,9 +57,13 @@ from memory_mcp.harnesses.base import ChangeReport, HarnessCapabilities
 from memory_mcp.harnesses.claude import (
     AGENTS_DIR,
     HOOK_EVENTS,
-    HOOKS_DIR,
+    agents_source_dir,
+    all_hook_scripts,
+    copy_hook_scripts,
+    hook_scripts_dir,
     installable_agent_text,
     is_abstract_agent,
+    missing_hooks_message,
 )
 
 HARNESS_NAME = HARNESS_DEEPSEEK
@@ -82,6 +86,7 @@ FOREIGN_ROW_IDS = frozenset({"mcp-manager"})
 DSH_HOOK_MATCHERS = {
     "require-task.sh": "edit|write|apply_patch",
     "record-dispatch.sh": "subagent|subagent_fork",
+    "confirm-dispatch.sh": "subagent|subagent_fork",
 }
 #: Claude events the bridge does not deliver. Stop carries our session-end
 #: script already; there is no SessionEnd in either harness's wiring.
@@ -356,9 +361,19 @@ class DeepSeekHarness:
         is installed. Installs nothing: the report says what to run."""
         report = ChangeReport(self.name)
         hooks_dest = settings.data_dir / "hooks"
-        hooks_dest.mkdir(parents=True, exist_ok=True)
-        config = self._hooks_config(hooks_dest, remote_url, token)
         path = hooks_config_path()
+        source = hook_scripts_dir()
+        if source is None:
+            report.conflict(missing_hooks_message(self.name, path))
+            return report
+        present = set(copy_hook_scripts(source, hooks_dest))
+        missing = [name for name in all_hook_scripts() if name not in present]
+        if missing:
+            report.warn(
+                f"hook script(s) not found in {source}: {', '.join(missing)} - "
+                "those events are not wired"
+            )
+        config = self._hooks_config(hooks_dest, present, remote_url, token)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(config, indent=2) + "\n")
         if remote_url and token:
@@ -387,7 +402,8 @@ class DeepSeekHarness:
         return report
 
     def _hooks_config(
-        self, hooks_dest: Path, remote_url: str | None, token: str | None,
+        self, hooks_dest: Path, present: set[str],
+        remote_url: str | None, token: str | None,
     ) -> dict:
         parts = ["env", f"MEMORY_MCP_HARNESS={HARNESS_NAME}"]
         if remote_url:
@@ -402,12 +418,9 @@ class DeepSeekHarness:
                 continue
             groups = []
             for script in script_names:
-                src = HOOKS_DIR / script
-                if not src.exists():
+                if script not in present:
                     continue
                 dst = hooks_dest / script
-                shutil.copy2(src, dst)
-                os.chmod(dst, 0o755)
                 group: dict = {"hooks": [{
                     "type": "command",
                     "command": f"{env_prefix}{shlex.quote(str(dst))}",
@@ -494,11 +507,12 @@ class DeepSeekHarness:
         """Write the composed role briefs as plain files - NOT agent
         definitions. dsh cannot load them; the lead tells a child to read one."""
         report = ChangeReport(self.name)
-        if not AGENTS_DIR.is_dir():
+        source = agents_source_dir()
+        if source is None:
             report.warn(f"No agents/ directory at {AGENTS_DIR} - nothing to write.")
             return report
         by_stem = {
-            p.stem: p for p in AGENTS_DIR.glob("*.md") if p.name.lower() != "readme.md"
+            p.stem: p for p in source.glob("*.md") if p.name.lower() != "readme.md"
         }
         sources = sorted(p for p in by_stem.values() if not is_abstract_agent(p))
         dest = role_briefs_dir()

@@ -596,3 +596,28 @@ class TestAnExistingDatabaseUpgradesIntoIt:
         assert ids_of(again) == ids_of(first)
         assert container.task_service.get(project, kept.id).title == "Made before the upgrade"
         assert container.task_service.list_tasks(project, limit=50).total == 4
+
+
+class TestPlanRoles:
+    def test_an_unknown_role_refuses_the_whole_plan_naming_the_item(
+        self, planner, project, monkeypatch,
+    ):
+        from memory_mcp import enforcement
+
+        monkeypatch.setattr(enforcement, "known_roles", lambda: frozenset({"backend"}))
+        items = [dict(ITEMS[0], role="backend"), dict(ITEMS[1], role="frontnd"), ITEMS[2]]
+
+        with pytest.raises(PlanError, match=r"task 2 \('Wire the UI'\).*Valid roles: backend"):
+            planner.plan(project, REQUEST, items)
+
+        assert container.task_service.list_tasks(project, limit=50).tasks == []
+
+    def test_known_roles_are_planned(self, planner, project, monkeypatch):
+        from memory_mcp import enforcement
+
+        monkeypatch.setattr(enforcement, "known_roles", lambda: frozenset({"backend"}))
+        items = [dict(ITEMS[0], role="backend"), ITEMS[1], ITEMS[2]]
+
+        result = planner.plan(project, REQUEST, items)
+
+        assert [t["role"] for t in result["tasks"]] == ["backend", None, None]

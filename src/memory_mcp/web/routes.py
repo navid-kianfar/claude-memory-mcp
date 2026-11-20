@@ -859,8 +859,10 @@ def _asoode_sync_status(params, body, query):
 def _asoode_pause(params, body, query):
     """POST {until?: "YYYY-MM-DD", reason?: str} -> the sync state.
 
-    400 for an unlinked project, a malformed or past `until`, or a reason over
-    500 characters. Pausing again updates until/reason and keeps `since`.
+    A full ISO timestamp in `until` is kept as its date, and the answer then
+    carries `note` (a sentence to show the user). 400 for an unlinked project,
+    a malformed or past `until`, or a reason over 500 characters. Pausing again
+    updates until/reason and keeps `since`.
     """
     until = body.get("until")
     reason = body.get("reason")
@@ -878,6 +880,43 @@ def _asoode_resume(params, body, query):
     poll GET .../asoode/sync while `drain.state` is "running".
     """
     return container.sync_pause_service.resume(params["slug"])
+
+
+def _attachment_inbox(params, body, query):
+    """GET the project's parked compose-box files, newest first.
+
+    Query: `limit` (1-200, default 50), `offset` (default 0).
+    -> {project, items: [{pending_id, filename, content_type, size_bytes,
+    source, created_at}], total, limit, offset}. 404 for an unknown project,
+    400 for a bad limit or offset.
+    """
+    slug = params["slug"]
+    container.project_service.get(slug)
+    limit = int(query.get("limit") or 50)
+    offset = int(query.get("offset") or 0)
+    return container.attachment_inbox_service.inbox(slug, limit=limit, offset=offset)
+
+
+def _attachment_dismiss(params, body, query):
+    """POST {} -> {pending_id, filename, dismissed_at, already_dismissed,
+    blob_deleted}.
+
+    404 when no parked file has that id in this project, 409 when it is already
+    bound to a task (detach it from the task instead). Dismissing twice is a 200
+    with `already_dismissed: true`.
+    """
+    from memory_mcp.services.attachment_inbox import (
+        PendingAttachmentBoundError, PendingAttachmentNotFoundError,
+    )
+
+    slug = params["slug"]
+    container.project_service.get(slug)
+    try:
+        return container.attachment_inbox_service.dismiss(slug, params["pending_id"])
+    except PendingAttachmentNotFoundError as e:
+        return {"error": str(e), "type": type(e).__name__}, 404
+    except PendingAttachmentBoundError as e:
+        return {"error": str(e), "type": type(e).__name__}, 409
 
 
 def _asoode_links(params, body, query):
@@ -1591,6 +1630,8 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/tasks/{tid}/activity", _api(_task_activity), methods=["GET"]),
         Route("/api/projects/{slug}/tasks/{tid}/release", _api(_task_release), methods=["POST"]),
         Route("/api/projects/{slug}/tasks/{tid}/archive", _api(_task_archive), methods=["POST"]),
+        Route("/api/projects/{slug}/attachments/inbox", _api(_attachment_inbox), methods=["GET"]),
+        Route("/api/projects/{slug}/attachments/inbox/{pending_id}/dismiss", _api(_attachment_dismiss), methods=["POST"]),
         Route("/api/projects/{slug}/asoode/links", _api(_asoode_links), methods=["GET"]),
         Route("/api/projects/{slug}/asoode/links/{link_id:int}", _api(_asoode_link_update), methods=["PATCH"]),
         Route("/api/projects/{slug}/asoode/links/{link_id:int}", _api(_asoode_link_delete), methods=["DELETE"]),

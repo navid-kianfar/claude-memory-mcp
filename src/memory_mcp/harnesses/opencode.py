@@ -24,13 +24,21 @@ import json
 import shutil
 from pathlib import Path
 
+from memory_mcp.config import settings
 from memory_mcp.harnesses.base import (
     ChangeReport,
     HarnessCapabilities,
     HarnessNotSupported,
 )
+from memory_mcp.harnesses.claude import (
+    copy_hook_scripts,
+    hook_scripts_dir,
+    missing_hooks_message,
+)
 
 PLUGIN_SOURCE = Path(__file__).parent / "opencode-plugin" / "memory-mcp.js"
+#: The shared hook scripts memory-mcp.js runs (session.created, session.idle).
+PLUGIN_SCRIPTS = ("session-start.sh", "session-end.sh")
 
 
 def opencode_config_dir() -> Path:
@@ -229,6 +237,21 @@ class OpenCodeHarness:
 
         if not PLUGIN_SOURCE.is_file():
             report.warn(f"plugin source missing at {PLUGIN_SOURCE} - skipping.")
+            return report
+
+        # The plugin runs the shared scripts from the data dir; installing it
+        # with none there would wire two events that silently do nothing.
+        source = hook_scripts_dir()
+        if source is None:
+            report.conflict(missing_hooks_message(self.name, opencode_plugins_dir()))
+            return report
+        present = copy_hook_scripts(source, settings.data_dir / "hooks")
+        missing = [name for name in PLUGIN_SCRIPTS if name not in present]
+        if missing:
+            report.conflict(
+                f"{', '.join(missing)} not found in {source}; the OpenCode "
+                "plugin was not installed"
+            )
             return report
 
         dest = opencode_plugins_dir()

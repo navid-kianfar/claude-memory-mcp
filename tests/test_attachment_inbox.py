@@ -31,8 +31,8 @@ from memory_mcp.repositories import (
 )
 from memory_mcp.services import attachment_inbox as inbox_mod
 from memory_mcp.services.attachment_inbox import (
-    AttachmentInboxService, PendingAttachmentNotFoundError, decoded_size,
-    user_supplied_blocks,
+    AttachmentInboxService, PendingAttachmentBoundError,
+    PendingAttachmentNotFoundError, decoded_size, user_supplied_blocks,
 )
 from memory_mcp.services.task_bridge import TaskBridge
 from memory_mcp.services.task_service import TaskService
@@ -854,3 +854,219 @@ class TestTheTools:
         answer = server.memory_task_detach("no-such-attachment", project=project)
 
         assert answer["error"] == "Attachment not found: no-such-attachment"
+
+
+# ---------- listing and dismissing ----------
+
+
+class TestTheInbox:
+    def test_it_lists_what_is_parked_newest_first(self, service, project, transcript):
+        write(transcript, paste(png(1)), paste(png(2)))
+        first, second = scan(service, project, transcript)
+
+        listed = service.inbox(project)
+
+        assert [i["pending_id"] for i in listed["items"]] == [second.id, first.id]
+        assert listed["total"] == 2
+        item = listed["items"][0]
+        assert set(item) == {
+            "pending_id", "filename", "content_type", "size_bytes", "source", "created_at",
+        }, "no blob path and no notice text leave the service"
+        assert item["filename"] == second.filename
+        assert item["size_bytes"] == len(png(2))
+
+    def test_bound_and_dismissed_files_are_not_listed(self, stack, project, transcript):
+        tasks, _, _, inbox = stack
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        write(transcript, paste(png(1)), paste(png(2)), paste(png(3)))
+        bound, dismissed, waiting = scan(inbox, project, transcript)
+        inbox.bind(project, bound.id, task.id)
+        inbox.dismiss(project, dismissed.id)
+
+        listed = inbox.inbox(project)
+
+        assert [i["pending_id"] for i in listed["items"]] == [waiting.id]
+        assert listed["total"] == 1
+
+    def test_it_pages(self, service, project, transcript):
+        write(transcript, paste(png(1)), paste(png(2)), paste(png(3)))
+        scan(service, project, transcript)
+
+        page = service.inbox(project, limit=2, offset=2)
+
+        assert len(page["items"]) == 1
+        assert page["total"] == 3
+
+    @pytest.mark.parametrize("limit", [0, 201])
+    def test_an_unbounded_page_is_refused(self, service, project, limit):
+        with pytest.raises(ValueError):
+            service.inbox(project, limit=limit)
+
+
+class TestDismissing:
+    def test_a_dismissed_file_is_never_announced(self, service, project, transcript):
+        write(transcript, paste(png(1)))
+        [pending] = scan(service, project, transcript)
+
+        service.dismiss(project, pending.id)
+        body = service.undelivered_notices(project, SID, deliver=True)
+
+        assert body == ""
+
+    def test_a_dismissed_file_is_not_parked_again_on_a_rescan(
+        self, service, project, transcript,
+    ):
+        write(transcript, paste(png(1)))
+        [pending] = scan(service, project, transcript)
+        service.dismiss(project, pending.id)
+        from memory_mcp.db.registry import delete_setting
+
+        delete_setting(service._offset_key(SID, transcript.resolve()))
+        again = scan(service, project, transcript)
+
+        assert again == []
+        assert service.undelivered_notices(project, SID, deliver=True) == ""
+
+    def test_an_unreferenced_blob_is_deleted(self, service, project, transcript):
+        write(transcript, paste(png(1)))
+        [pending] = scan(service, project, transcript)
+
+        result = service.dismiss(project, pending.id)
+
+        assert result["blob_deleted"] is True
+        assert result["already_dismissed"] is False
+        assert result["dismissed_at"]
+        assert store_files(project) == []
+
+    def test_a_blob_another_task_holds_is_kept(self, stack, project, transcript, tmp_path):
+        tasks, _, _, inbox = stack
+        task = tasks.create(CreateTaskRequest(project=project, title="Has the same bytes"))
+        same = tmp_path / "same.png"
+        same.write_bytes(png(1))
+        tasks.attach(project, task.id, str(same))
+        write(transcript, paste(png(1)))
+        [pending] = scan(inbox, project, transcript)
+
+        result = inbox.dismiss(project, pending.id)
+
+        assert result["blob_deleted"] is False
+        assert len(store_files(project)) == 1
+        assert len(tasks.attachments(project, task.id)) == 1
+
+    def test_a_blob_another_parked_file_waits_on_is_kept_until_both_go(
+        self, service, project, transcript, home,
+    ):
+        other = home / ".claude" / "projects" / "-repo" / "other.jsonl"
+        write(transcript, paste(png(1)))
+        write(other, paste(png(1)))
+        [mine] = scan(service, project, transcript)
+        [theirs] = service.scan_transcript(project, "other-session", other.resolve())
+
+        first = service.dismiss(project, mine.id)
+        second = service.dismiss(project, theirs.id)
+
+        assert first["blob_deleted"] is False
+        assert second["blob_deleted"] is True
+        assert store_files(project) == []
+
+    def test_dismissing_twice_is_harmless(self, service, project, transcript):
+        write(transcript, paste(png(1)))
+        [pending] = scan(service, project, transcript)
+        first = service.dismiss(project, pending.id)
+
+        second = service.dismiss(project, pending.id)
+
+        assert second["already_dismissed"] is True
+        assert second["dismissed_at"] == first["dismissed_at"]
+
+    def test_a_bound_file_cannot_be_dismissed(self, stack, project, transcript):
+        tasks, _, _, inbox = stack
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        write(transcript, paste(png(1)))
+        [pending] = scan(inbox, project, transcript)
+        inbox.bind(project, pending.id, task.id)
+
+        with pytest.raises(PendingAttachmentBoundError):
+            inbox.dismiss(project, pending.id)
+        assert len(store_files(project)) == 1
+
+    def test_an_unknown_pending_id_is_refused(self, service, project):
+        with pytest.raises(PendingAttachmentNotFoundError):
+            service.dismiss(project, "no-such-pending")
+
+    def test_detaching_a_task_copy_frees_a_blob_whose_parked_row_was_dismissed(
+        self, stack, project, transcript, tmp_path,
+    ):
+        tasks, _, _, inbox = stack
+        task = tasks.create(CreateTaskRequest(project=project, title="X"))
+        same = tmp_path / "same.png"
+        same.write_bytes(png(1))
+        attachment = tasks.attach(project, task.id, str(same))
+        write(transcript, paste(png(1)))
+        [pending] = scan(inbox, project, transcript)
+        inbox.dismiss(project, pending.id)
+
+        tasks.detach(project, attachment.id)
+
+        assert store_files(project) == []
+
+
+class TestTheRoutes:
+    """What the UI calls: status codes and shapes over HTTP."""
+
+    @pytest.fixture
+    def client(self):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        from memory_mcp.web.routes import build_routes
+
+        return TestClient(Starlette(routes=build_routes()))
+
+    def test_list_then_dismiss(self, client, service, project, transcript):
+        write(transcript, paste(png(1)))
+        [pending] = scan(service, project, transcript)
+
+        listed = client.get(f"/api/projects/{project}/attachments/inbox")
+        dismissed = client.post(
+            f"/api/projects/{project}/attachments/inbox/{pending.id}/dismiss", json={},
+        )
+        after = client.get(f"/api/projects/{project}/attachments/inbox")
+
+        assert listed.status_code == 200
+        assert listed.json()["items"][0]["pending_id"] == pending.id
+        assert dismissed.status_code == 200
+        assert dismissed.json()["pending_id"] == pending.id
+        assert dismissed.json()["blob_deleted"] is True
+        assert after.json()["items"] == []
+        assert after.json()["total"] == 0
+
+    def test_an_unknown_pending_id_is_a_404(self, client, project):
+        response = client.post(
+            f"/api/projects/{project}/attachments/inbox/nope/dismiss", json={},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["type"] == "PendingAttachmentNotFoundError"
+
+    def test_a_bound_file_is_a_409(self, client, service, project, transcript):
+        task = container.task_service.create(CreateTaskRequest(project=project, title="X"))
+        write(transcript, paste(png(1)))
+        [pending] = scan(service, project, transcript)
+        service.bind(project, pending.id, task.id)
+
+        response = client.post(
+            f"/api/projects/{project}/attachments/inbox/{pending.id}/dismiss", json={},
+        )
+
+        assert response.status_code == 409
+
+    def test_a_bad_limit_is_a_400(self, client, project):
+        response = client.get(f"/api/projects/{project}/attachments/inbox?limit=0")
+
+        assert response.status_code == 400
+
+    def test_an_unknown_project_is_a_404(self, client):
+        response = client.get("/api/projects/no-such-project/attachments/inbox")
+
+        assert response.status_code == 404

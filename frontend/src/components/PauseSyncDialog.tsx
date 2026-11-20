@@ -5,7 +5,7 @@ import { Input } from "./ui/Input";
 import { Label } from "./ui/Label";
 import { Textarea } from "./ui/Textarea";
 import type { PauseSyncInput } from "../types";
-import { MAX_PAUSE_REASON_LENGTH, todayIsoDate } from "../lib/syncPause";
+import { MAX_PAUSE_REASON_LENGTH, formatPauseDate, todayIsoDate } from "../lib/syncPause";
 
 /** Mount this only while it is open; its fields are seeded on mount. */
 export interface PauseSyncDialogProps {
@@ -30,16 +30,23 @@ export function PauseSyncDialog({
 }: PauseSyncDialogProps) {
   // Seeded once per mount: the parent mounts the dialog only while it is open,
   // so the first frame already shows the current pause, never empty fields.
-  const [until, setUntil] = useState(initialUntil ?? "");
+  const today = todayIsoDate();
+  // An overdue pause's date cannot be saved again (the server refuses a past
+  // date), so it starts cleared rather than making the user fix it first.
+  // ISO dates compare correctly as strings.
+  const [expiredUntil] = useState(
+    initialUntil !== null && initialUntil < today ? initialUntil : null
+  );
+  const [until, setUntil] = useState(expiredUntil === null ? initialUntil ?? "" : "");
   const [reason, setReason] = useState(initialReason ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const today = todayIsoDate();
-  // ISO dates compare correctly as strings.
   const isUntilPast = until !== "" && until < today;
   const isReasonTooLong = reason.trim().length > MAX_PAUSE_REASON_LENGTH;
   const canSubmit = !busy && !isUntilPast && !isReasonTooLong;
+
+  const expiredLabel = expiredUntil === null ? null : formatPauseDate(expiredUntil);
 
   const title = isEditing ? "Change the pause" : "Pause sync with asoode";
   const submitLabel = isEditing ? "Save changes" : "Pause sync";
@@ -91,6 +98,11 @@ export function PauseSyncDialog({
               </Button>
             )}
           </div>
+          {expiredUntil !== null && until === "" && (
+            <p className="text-xs text-amber-700 dark:text-amber-300">
+              The previous end date, {expiredLabel}, has passed, so it was cleared.
+            </p>
+          )}
           <p
             id="pause-sync-until-help"
             className={isUntilPast ? "text-xs text-destructive" : "text-xs text-muted-foreground"}

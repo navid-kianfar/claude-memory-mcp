@@ -1,6 +1,8 @@
 import type {
   AsoodeStatus,
   AsoodeSyncState,
+  DismissParkedAttachmentResult,
+  ParkedAttachmentsResponse,
   PauseSyncInput,
   BoardRef,
   ProjectLink,
@@ -763,6 +765,27 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     });
+  },
+
+  // ---------- parked attachments ----------
+
+  /** Files pasted into a session and never attached to a task, newest first.
+      `limit` is 1-200 on the server. */
+  listParkedAttachments(
+    slug: string,
+    params: { limit?: number; offset?: number } = {}
+  ): Promise<ParkedAttachmentsResponse> {
+    const query = qs({ limit: params.limit, offset: params.offset });
+    return request(`/api/projects/${encodeURIComponent(slug)}/attachments/inbox${query}`);
+  },
+
+  /** Drop one parked file. 404 for an unknown id, 409 once it is bound to a task. */
+  dismissParkedAttachment(
+    slug: string,
+    pendingId: string
+  ): Promise<DismissParkedAttachmentResult> {
+    const path = `/api/projects/${encodeURIComponent(slug)}/attachments/inbox/${encodeURIComponent(pendingId)}/dismiss`;
+    return request(path, { method: "POST", body: JSON.stringify({}) });
   },
 
   // ---------- self-update ----------

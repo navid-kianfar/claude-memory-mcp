@@ -21,6 +21,7 @@ from memory_mcp.enforcement import (
     MAX_RUNNING_PER_KIND, agent_team_intro, agent_team_line, dispatch_role,
     division_of_work,
 )
+from memory_mcp.harnesses import zcode as zcode_mod
 from memory_mcp.web.hooks import identity_from_body
 from tests.test_dispatch_limits import _dispatch
 from tests.test_require_task_gate import DISPATCH_HOOK, _stub_daemon
@@ -35,6 +36,9 @@ def roster(tmp_path, monkeypatch):
             f"---\nname: {name}\ndescription: The {name} agent.\n---\nbody\n"
         )
     monkeypatch.setattr(enforcement, "AGENT_TEAM_DIR", directory)
+    # ZCode reads its own team folder; point it at the same roster so these
+    # tests never read the developer's real ~/.zcode/agents.
+    monkeypatch.setattr(zcode_mod, "zcode_agents_dir", lambda: directory)
     return directory
 
 

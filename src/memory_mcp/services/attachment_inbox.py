@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memory_mcp.config import settings
-from memory_mcp.db.registry import get_setting, set_setting
+from memory_mcp.db.registry import ATTACH_OFFSET_KEY_PREFIX, get_setting, set_setting
 from memory_mcp.exceptions import MemoryMCPError
 from memory_mcp.models import PendingAttachment, TaskAttachment
 
@@ -71,7 +71,8 @@ LINE_ENVELOPE_BYTES = 1024 * 1024
 _FINGERPRINT_TAIL_BYTES = 4096
 _FINGERPRINT_HEAD_BYTES = 1024
 _READ_CHUNK = 1024 * 1024
-_OFFSET_KEY_PREFIX = "attach:offset:"
+# Shared with the registry, which prunes these rows with the session ledgers.
+_OFFSET_KEY_PREFIX = ATTACH_OFFSET_KEY_PREFIX
 _TITLE_MAX = 80
 _CANDIDATES_LISTED = 5
 
@@ -91,8 +92,17 @@ _EXTENSIONS = {
 }
 
 
+#: Page size for the parked list, and the most one call may ask for.
+INBOX_DEFAULT_LIMIT = 50
+INBOX_MAX_LIMIT = 200
+
+
 class PendingAttachmentNotFoundError(MemoryMCPError):
     """No parked file has this pending_id in this project."""
+
+
+class PendingAttachmentBoundError(MemoryMCPError):
+    """The parked file is already on a task, so there is nothing to dismiss."""
 
 
 # ---------- the untrusted edge ----------
@@ -257,6 +267,10 @@ class AttachmentInboxService:
         self._tasks = task_service
         self._scan_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        # Held while a blob is written and its inbox row inserted, and while a
+        # dismiss decides whether a blob is orphaned and removes it - so a paste
+        # of the same bytes cannot land between the check and the unlink.
+        self._blob_lock = threading.Lock()
 
     # ---------- the hook ----------
 
@@ -504,17 +518,23 @@ class AttachmentInboxService:
             found = candidates() if candidates is not None else self.candidates(project)
         except Exception:  # noqa: BLE001 - unknown reads as none: "start or pick a task"
             found = []
-        blob = self._store(project, sha, content)
         pending = PendingAttachment(
             id=str(uuid.uuid4()), claude_session_id=claude_session_id, sha256=sha,
             filename=filename, content_type=content_type, size_bytes=size,
             source=source,
         )
         pending.notice = self.notice_for(pending, found)
-        self._inbox.add(project, pending, str(blob))
+        with self._blob_lock:
+            blob = self._store(project, sha, content)
+            self._inbox.add(project, pending, str(blob))
         if AUTO_BIND_SINGLE_CANDIDATE and len(found) == 1:
             self._auto_bind(project, pending, found[0])
         return pending
+
+    @staticmethod
+    def _blob_path(project: str, sha: str) -> Path:
+        """Where the content-addressed store keeps these bytes for this project."""
+        return Path(settings.data_dir) / "attachments" / project / sha[:2] / sha
 
     @staticmethod
     def _store(project: str, sha: str, content: bytes) -> Path:
@@ -612,6 +632,96 @@ class AttachmentInboxService:
         if deliver and ids:
             self._inbox.mark_notified(project, ids)
         return "\n".join(lines)
+
+    # ---------- listing and dismissing ----------
+
+    def inbox(
+        self, project: str, *, limit: int = INBOX_DEFAULT_LIMIT, offset: int = 0,
+    ) -> dict:
+        """What is parked and still waiting for an answer, newest first.
+
+        `{project, items: [{pending_id, filename, content_type, size_bytes,
+        source, created_at}], total, limit, offset}`. `total` counts every
+        waiting row, so a caller can tell there is another page.
+        """
+        if not isinstance(limit, int) or not 1 <= limit <= INBOX_MAX_LIMIT:
+            raise ValueError(f"limit must be between 1 and {INBOX_MAX_LIMIT}")
+        if not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be 0 or more")
+        rows = self._inbox.parked(project, limit=limit, offset=offset)
+        items = tuple(self._public(row) for row in rows)
+        return {
+            "project": project,
+            "items": list(items),
+            "total": self._inbox.count_parked(project),
+            "limit": limit,
+            "offset": offset,
+        }
+
+    @staticmethod
+    def _public(pending: PendingAttachment) -> dict:
+        """The fields a person deciding about a parked file needs. The blob path
+        and the notice text stay inside."""
+        created = pending.created_at.isoformat() if pending.created_at else None
+        return {
+            "pending_id": pending.id,
+            "filename": pending.filename,
+            "content_type": pending.content_type,
+            "size_bytes": pending.size_bytes,
+            "source": pending.source,
+            "created_at": created,
+        }
+
+    def dismiss(self, project: str, pending_id: str) -> dict:
+        """Mark a parked file as answered "no": it leaves the inbox and is never
+        announced again.
+
+        `{pending_id, filename, dismissed_at, already_dismissed, blob_deleted}`.
+        Dismissing twice is harmless and reports `already_dismissed`. A file
+        already on a task cannot be dismissed - memory_task_detach removes it.
+
+        The stored bytes are deleted only when nothing else needs them: no task
+        attachment with the same hash (the store is shared by content), and no
+        other parked row still waiting for an answer.
+        """
+        found = self._inbox.get(project, pending_id)
+        if found is None:
+            raise PendingAttachmentNotFoundError(f"No parked attachment: {pending_id}")
+        pending, path = found
+        if pending.bound_task_id:
+            raise PendingAttachmentBoundError(
+                f"The file parked as {pending_id} is already on task "
+                f"{pending.bound_task_id}; use memory_task_detach to remove it."
+            )
+        already = self._inbox.dismissed_at(project, pending_id) is not None
+        blob_deleted = False
+        with self._blob_lock:
+            if not already:
+                self._inbox.mark_dismissed(project, pending_id)
+            if not self._inbox.blob_in_use(project, pending.sha256):
+                blob_deleted = self._delete_blob(project, pending.sha256, path)
+        stamp = self._inbox.dismissed_at(project, pending_id)
+        return {
+            "pending_id": pending_id,
+            "filename": pending.filename,
+            "dismissed_at": stamp.isoformat() if stamp else None,
+            "already_dismissed": already,
+            "blob_deleted": blob_deleted,
+        }
+
+    def _delete_blob(self, project: str, sha: str, recorded: str) -> bool:
+        """Remove the blob, but only at the path the store itself would use: a
+        row whose recorded path points anywhere else is left alone."""
+        expected = self._blob_path(project, sha)
+        if Path(recorded) != expected or not expected.is_file():
+            return False
+        try:
+            expected.unlink(missing_ok=True)
+        except OSError:
+            # The dismiss is already recorded; a blob that could not be removed
+            # costs disk space only, and the next dismiss of these bytes retries.
+            return False
+        return True
 
     # ---------- binding ----------
 

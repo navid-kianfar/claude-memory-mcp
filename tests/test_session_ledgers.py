@@ -17,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 
 from memory_mcp.db.registry import (
     client_session, dispatches_for, edits_for, prune_session_ledgers,
-    record_dispatch, record_edit, registry_conn, touch_client_session,
+    get_setting, record_dispatch, record_edit, registry_conn, set_setting,
+    touch_client_session,
 )
 
 
@@ -213,3 +214,50 @@ class TestFailingSoft:
 
 def _exploding_conn(*_args, **_kwargs):
     raise sqlite3.OperationalError("database is locked")
+
+
+class TestPruningAttachmentOffsets:
+    """The compose-box scanner's `attach:offset:*` rows share the ledger retention."""
+
+    def test_offsets_of_a_session_past_retention_go(self):
+        touch_client_session("old_session", cwd="/repo")
+        _age_row("client_sessions", "last_seen", days=30)
+        set_setting("attach:offset:old_session:abc", '{"offset": 1}')
+
+        prune_session_ledgers(days=7)
+
+        assert get_setting("attach:offset:old_session:abc") is None
+
+    def test_offsets_of_a_session_never_recorded_go(self):
+        set_setting("attach:offset:ghost:abc", '{"offset": 1}')
+
+        assert prune_session_ledgers(days=7) == 1
+        assert get_setting("attach:offset:ghost:abc") is None
+
+    def test_offsets_of_a_live_session_stay(self):
+        touch_client_session("live", cwd="/repo")
+        set_setting("attach:offset:live:abc", '{"offset": 1}')
+        set_setting("attach:offset:live:def", '{"offset": 2}')
+
+        prune_session_ledgers(days=7)
+
+        assert get_setting("attach:offset:live:abc") is not None
+        assert get_setting("attach:offset:live:def") is not None
+
+    def test_an_underscore_in_another_session_id_does_not_shield_an_offset(self):
+        """`live_1` must not keep `liveX1`'s offset, as a LIKE pattern would."""
+        touch_client_session("live_1", cwd="/repo")
+        set_setting("attach:offset:liveX1:abc", '{"offset": 1}')
+
+        prune_session_ledgers(days=7)
+
+        assert get_setting("attach:offset:liveX1:abc") is None
+
+    def test_other_settings_are_untouched(self):
+        set_setting("asoode_pause:proj", "{}")
+        set_setting("attach:other:ghost", "x")
+
+        prune_session_ledgers(days=7)
+
+        assert get_setting("asoode_pause:proj") == "{}"
+        assert get_setting("attach:other:ghost") == "x"

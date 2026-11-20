@@ -230,6 +230,7 @@ class TestHooks:
         }
         assert by_script["require-task.sh"]["matcher"] == "edit|write|apply_patch"
         assert by_script["record-dispatch.sh"]["matcher"] == "subagent|subagent_fork"
+        assert by_script["confirm-dispatch.sh"]["matcher"] == "subagent|subagent_fork"
         assert "matcher" not in by_script["record-subagent-stop.sh"]
         for group in by_script.values():
             assert group["hooks"][0]["command"].startswith("env MEMORY_MCP_HARNESS=deepseek ")

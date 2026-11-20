@@ -10,10 +10,13 @@ from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path, PurePosixPath
 
-from memory_mcp.constants import HARNESS_CLAUDE, HARNESS_DEEPSEEK
+from memory_mcp.constants import (
+    HARNESS_CLAUDE, HARNESS_DEEPSEEK, HARNESS_ZCODE, KNOWN_HARNESSES,
+)
 from memory_mcp.container import container
 from memory_mcp.db.registry import (
-    dispatches_for, edits_for, get_setting, running_dispatches, set_setting,
+    dispatches_for, edits_for, get_setting, record_dispatch, running_dispatches,
+    set_setting,
 )
 from memory_mcp.models import TaskFilter, TaskState
 from memory_mcp.services import stack_detect
@@ -193,15 +196,41 @@ AGENT_TEAM_DIR = Path.home() / ".claude" / "agents"
 LEAD_AGENT = "pm"
 
 
-def _team_dir(harness: str) -> Path:
-    """Where this harness's team lives. dsh installs no definitions, only the
-    role briefs the lead hands a child; elsewhere it is Claude's agents dir."""
-    if harness != HARNESS_DEEPSEEK:
-        return AGENT_TEAM_DIR
-    from memory_mcp.harnesses.deepseek import role_briefs_dir
+def _shipped_agents_dir() -> Path | None:
+    """The repo's own `agents/` definitions, when this machine has them."""
+    from memory_mcp.harnesses.claude import agents_source_dir
 
-    briefs = role_briefs_dir()
-    return briefs if briefs.is_dir() else AGENT_TEAM_DIR
+    return agents_source_dir()
+
+
+def _has_definitions(directory: Path) -> bool:
+    return directory.is_dir() and any(directory.glob("*.md"))
+
+
+def _team_dir(harness: str) -> Path | None:
+    """Where the calling harness's team is read from, or None for no team.
+
+    - Claude Code and ZCode load definitions from their own folder, so that
+      folder is the truth: a role missing there cannot be dispatched, and
+      advertising it would be wrong. An empty folder means no team.
+    - DeepSeek Harness loads no definitions; the composed role briefs setup
+      writes are its team, and the shipped `agents/` stand in until they exist.
+    - A caller with no Claude home at all is not Claude Code: Codex and
+      OpenCode send no harness name and arrive here as `claude`. They have no
+      agent files of their own, so the shipped definitions are their roster.
+    """
+    if harness == HARNESS_ZCODE:
+        from memory_mcp.harnesses.zcode import zcode_agents_dir
+
+        return zcode_agents_dir()
+    if harness == HARNESS_DEEPSEEK:
+        from memory_mcp.harnesses.deepseek import role_briefs_dir
+
+        briefs = role_briefs_dir()
+        return briefs if _has_definitions(briefs) else _shipped_agents_dir()
+    if AGENT_TEAM_DIR.parent.is_dir():
+        return AGENT_TEAM_DIR
+    return _shipped_agents_dir()
 
 
 def installed_agents(
@@ -211,11 +240,40 @@ def installed_agents(
 
     Read from disk rather than hardcoded so the brief can never advertise an
     agent that was retired, or miss one that was added. `pm` is excluded unless
-    asked for - see LEAD_AGENT.
+    asked for - see LEAD_AGENT. Which folder is read depends on the calling
+    harness - see `_team_dir`.
     """
     team_dir = _team_dir(harness)
-    if not team_dir.is_dir():
+    if team_dir is None or not team_dir.is_dir():
         return []
+    return _read_roster(team_dir, include_lead)
+
+
+def known_roles() -> frozenset[str] | None:
+    """Every role a task may be routed to on this machine, or None when no
+    team can be found at all.
+
+    A task is written by one harness and may be claimed from another, so this
+    is the union of every harness's installed team, the lead included, plus
+    the shipped `agents/` definitions - a role setup would install is never
+    refused. None means neither an installed team nor the shipped folder
+    exists; callers then accept any role rather than refuse them all.
+    """
+    roles: set[str] = set()
+    for harness in sorted(KNOWN_HARNESSES):
+        roles.update(name for name, _ in installed_agents(True, harness))
+    shipped = _shipped_agents_dir()
+    if shipped is not None:
+        roles.update(name for name, _ in _read_roster(shipped, include_lead=True))
+    return frozenset(roles) if roles else None
+
+
+def _read_roster(team_dir: Path, include_lead: bool) -> list[tuple[str, str]]:
+    """(name, description) for every concrete definition in `team_dir`.
+
+    Bases (`_name.md`, or `abstract: true`) are skipped: the shipped folder
+    carries them, and they are composed into others, never dispatched.
+    """
     found: list[tuple[str, str]] = []
     for path in sorted(team_dir.glob("*.md")):
         if path.name.lower() == "readme.md" or path.stem.startswith("_"):
@@ -227,8 +285,14 @@ def installed_agents(
         match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
         if not match:
             continue
+        frontmatter = match.group(1).splitlines()
+        if any(
+            line.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
+            for line in frontmatter if line.startswith("abstract:")
+        ):
+            continue
         desc = ""
-        for line in match.group(1).splitlines():
+        for line in frontmatter:
             if line.startswith("description:"):
                 desc = line.split(":", 1)[1].strip()
                 # A description containing a colon-space has to be quoted in the
@@ -529,6 +593,68 @@ def dispatch_role(
     return DEFAULT_AGENT_TYPE
 
 
+# ---------- which dispatches actually ran ----------
+#
+# record-dispatch.sh writes its row at PreToolUse, BEFORE the user answers a
+# permission prompt. A prompted row (`asked = 1`) therefore says only that a
+# dispatch was attempted. confirm-dispatch.sh, on PostToolUse, confirms it by
+# appending an unprompted row for the same tool call: PostToolUse fires only
+# when the tool actually ran, so a dispatch declined at the prompt is never
+# confirmed. Only unprompted rows count as "dispatched" below.
+#
+# The failure chosen when no PostToolUse ever arrives (an older client, a
+# failed hook): the prompted dispatch stays unconfirmed and the escalation
+# keeps naming the agent. That is a visible, advisory line the lead can clear
+# by dispatching again; the opposite choice - counting the row anyway - tells
+# the lead delegation happened when it may not have, which is the bug itself.
+
+
+def confirmed_dispatches(session_id: str) -> set[str]:
+    """Agent types this session dispatched that are known to have run."""
+    return {
+        row.get("agent_type") for row in dispatches_for(session_id)
+        if not row.get("asked")
+    }
+
+
+def confirm_dispatch(
+    session_id: str,
+    *,
+    agent_type: str,
+    slug: str | None = None,
+    tool_use_id: str | None = None,
+    description: str | None = None,
+) -> bool:
+    """Record that a prompted dispatch ran. True when a confirmation was added.
+
+    Paired by `tool_use_id` when the payload carries one. Without it, the
+    latest row of that agent type is confirmed only if it is a prompted one;
+    when two dispatches of one type interleave this can leave one unconfirmed,
+    which errs towards the escalation still firing. An unprompted dispatch is
+    already counted and gets nothing.
+    """
+    if not session_id or not agent_type:
+        return False
+    rows = dispatches_for(session_id)
+    if tool_use_id:
+        same_call = [r for r in rows if r.get("tool_use_id") == tool_use_id]
+        pending = bool(same_call) and all(r.get("asked") for r in same_call)
+    else:
+        of_type = [r for r in rows if r.get("agent_type") == agent_type]
+        pending = bool(of_type) and bool(of_type[-1].get("asked"))
+    if not pending:
+        return False
+    record_dispatch(
+        session_id,
+        slug=slug,
+        agent_type=agent_type,
+        tool_use_id=tool_use_id,
+        description=description,
+        asked=False,
+    )
+    return True
+
+
 @dataclass(frozen=True)
 class Escalation:
     """The lead is implementing work that belongs to an agent it never dispatched."""
@@ -756,7 +882,7 @@ def delegation_escalation(
     candidates = _in_progress_tasks(slug)
     if not candidates:
         return None
-    dispatched = {row.get("agent_type") for row in dispatches_for(session_id)}
+    dispatched = confirmed_dispatches(session_id)
 
     inferred: tuple[str, str] | None = None
     inferred_done = False
@@ -1123,7 +1249,7 @@ def dispatch_gate(
         owned.append((hit, owner))
     if not owned:
         return {}
-    dispatched = {row.get("agent_type") for row in dispatches_for(session_id)}
+    dispatched = confirmed_dispatches(session_id)
     for hit, owner in owned:
         if owner in dispatched or hit.agent in dispatched or (
             hit.co_agent and hit.co_agent in dispatched

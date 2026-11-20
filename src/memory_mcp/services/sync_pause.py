@@ -14,7 +14,10 @@ While a project is paused:
 
 `until` is a reminder, not a timer. Once the date arrives the brief asks the
 agent to check with the user; sync never resumes on its own, because sending
-two weeks of queued work is a decision for a person.
+two weeks of queued work is a decision for a person. It is a DATE: a full
+timestamp is accepted and kept as its date (in the timestamp's own offset), and
+the reply carries a `note` saying the time was dropped, so nobody believes a
+pause will end at 09:30.
 
 Resuming lifts the pause and drains the queue until it is empty or a send
 fails. A long queue is drained in the caller for a short while and then
@@ -57,16 +60,30 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+@dataclass(frozen=True)
+class ParsedUntil:
+    """A normalised `until`, and whether a time of day was dropped to get it."""
+
+    day: str | None
+    time_dropped: bool = False
+
+
 def parse_until(value: str | None, today: date) -> str | None:
     """Normalise an `until` value to YYYY-MM-DD, or None for no end date.
 
-    A full ISO timestamp is accepted and reduced to its date. A date before
-    today is refused: a pause that is already over on the day it is set is
-    almost certainly a typo.
+    A full ISO timestamp is accepted and reduced to its date; `read_until`
+    also says whether that happened. A date before today is refused: a pause
+    that is already over on the day it is set is almost certainly a typo.
     """
+    return read_until(value, today).day
+
+
+def read_until(value: str | None, today: date) -> ParsedUntil:
+    """`parse_until`, plus whether the value carried a time that was dropped."""
     if value is None or not value.strip():
-        return None
+        return ParsedUntil(day=None)
     text = value.strip()
+    time_dropped = False
     try:
         parsed = date.fromisoformat(text)
     except ValueError:
@@ -76,12 +93,22 @@ def parse_until(value: str | None, today: date) -> str | None:
             raise ValidationError(
                 f"'until' should be an ISO date such as 2026-12-04, not {text[:40]!r}."
             ) from None
+        time_dropped = True
     if parsed < today:
         raise ValidationError(
             f"'until' ({parsed.isoformat()}) is already in the past. Leave it out "
             "for a pause with no end date."
         )
-    return parsed.isoformat()
+    return ParsedUntil(day=parsed.isoformat(), time_dropped=time_dropped)
+
+
+def until_note(day: str) -> str:
+    """What the reply says when a timestamp was cut to its date."""
+    return (
+        f"'until' is a date, so the time was dropped and it was kept as {day}. "
+        "It is a reminder on that day, not a timer: sync stays paused until "
+        "someone resumes it."
+    )
 
 
 def is_overdue(until: str | None, today: date) -> bool:
@@ -152,7 +179,10 @@ class SyncPauseService:
 
     def pause(self, slug: str, until: str | None = None, reason: str | None = None) -> dict:
         """Stop board traffic for a project. Pausing again updates until/reason
-        and keeps the original `since`."""
+        and keeps the original `since`.
+
+        Answers the sync state; a `note` is added only when `until` carried a
+        time of day, to say it was kept as a date."""
         self._projects.get(slug)
         if not get_project_links(slug):
             raise ValidationError(
@@ -163,12 +193,16 @@ class SyncPauseService:
             raise ValidationError(
                 f"Please keep the reason under {MAX_REASON_LENGTH} characters."
             )
-        clean_until = parse_until(until, date.today())
+        parsed_until = read_until(until, date.today())
+        clean_until = parsed_until.day
         existing = get_sync_pause(slug)
         since = (existing or {}).get("since") or _now_iso()
         set_sync_pause(slug, {"since": since, "until": clean_until, "reason": clean_reason})
         logger.info("board sync paused for %s (until %s)", slug, clean_until or "further notice")
-        return self.status(slug)
+        state = self.status(slug)
+        if parsed_until.time_dropped and clean_until:
+            state["note"] = until_note(clean_until)
+        return state
 
     # ---------- resuming ----------
 

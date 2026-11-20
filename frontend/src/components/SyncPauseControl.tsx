@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, Pause, Play, X } from "lucide-react";
-import { useSyncState } from "../hooks/useSyncState";
+import type { SyncStateHandle } from "../hooks/useSyncState";
 import type { AsoodeDrain, AsoodeSyncState, PauseSyncInput } from "../types";
 import { formatDate } from "../lib/utils";
 import { formatPauseDate, pluralize } from "../lib/syncPause";
@@ -9,8 +9,9 @@ import { Badge } from "./ui/Badge";
 import { PauseSyncDialog } from "./PauseSyncDialog";
 
 export interface SyncPauseControlProps {
-  projectSlug: string;
   projectName: string;
+  /** Owned by the parent, so the same state can also gate "Mirror now". */
+  sync: SyncStateHandle;
 }
 
 const WARNING_PANEL =
@@ -23,8 +24,7 @@ const WARNING_PANEL =
  * Renders nothing for an unlinked project: there is no sync to pause, and the
  * server would refuse the request anyway.
  */
-export function SyncPauseControl({ projectSlug, projectName }: SyncPauseControlProps) {
-  const sync = useSyncState(projectSlug);
+export function SyncPauseControl({ projectName, sync }: SyncPauseControlProps) {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);

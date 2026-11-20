@@ -18,6 +18,7 @@ import type { AttachBoardInput } from "./AttachBoardRow";
 import { LinkProposalsCard, proposalKey } from "./LinkProposalsCard";
 import { ProjectLinkRow } from "./ProjectLinkRow";
 import { SyncPauseControl } from "./SyncPauseControl";
+import { useSyncState } from "../hooks/useSyncState";
 
 /**
  * asoode integration: where the server is, the machine-wide credential, and
@@ -352,22 +353,14 @@ export function IntegrationsView({ projects }: { projects: Project[] }) {
         <div className="space-y-3">
           {linked.map((p) => (
             <div key={p.slug} className="rounded-md border border-border/60 p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-sm font-medium">{p.display_name}</span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy === `push:${p.slug}`}
-                  onClick={() =>
-                    run(`push:${p.slug}`, () => api.pushProject(p.slug), `Mirrored ${p.display_name}.`)
-                  }
-                >
-                  <Send className="mr-1 size-3" /> Mirror now
-                </Button>
-              </div>
-              <div className="mb-2.5">
-                <SyncPauseControl projectSlug={p.slug} projectName={p.display_name} />
-              </div>
+              <LinkedProjectSync
+                projectSlug={p.slug}
+                projectName={p.display_name}
+                isMirroring={busy === `push:${p.slug}`}
+                onMirror={() =>
+                  run(`push:${p.slug}`, () => api.pushProject(p.slug), `Mirrored ${p.display_name}.`)
+                }
+              />
               <div className="space-y-1.5">
                 {(links[p.slug] || []).map((l) => (
                   <ProjectLinkRow
@@ -450,5 +443,50 @@ export function IntegrationsView({ projects }: { projects: Project[] }) {
       )}
 
     </div>
+  );
+}
+
+interface LinkedProjectSyncProps {
+  projectSlug: string;
+  projectName: string;
+  isMirroring: boolean;
+  onMirror: () => void;
+}
+
+/**
+ * The project's name, "Mirror now" and the pause control, sharing ONE sync
+ * state: a second fetch here would leave the button disabled after a resume
+ * until the next reload.
+ */
+function LinkedProjectSync({ projectSlug, projectName, isMirroring, onMirror }: LinkedProjectSyncProps) {
+  const sync = useSyncState(projectSlug);
+  const isPaused = sync.state?.paused === true;
+  const hintId = `mirror-paused-hint-${projectSlug}`;
+
+  return (
+    <>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <span className="min-w-0 break-words text-sm font-medium">{projectName}</span>
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
+          {isPaused && (
+            <span id={hintId} className="text-xs text-muted-foreground">
+              Sync is paused. Resume to send changes.
+            </span>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isMirroring || isPaused}
+            aria-describedby={isPaused ? hintId : undefined}
+            onClick={onMirror}
+          >
+            <Send className="mr-1 size-3" /> Mirror now
+          </Button>
+        </div>
+      </div>
+      <div className="mb-2.5">
+        <SyncPauseControl projectName={projectName} sync={sync} />
+      </div>
+    </>
   );
 }

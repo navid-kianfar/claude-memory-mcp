@@ -258,7 +258,7 @@ class TestEscalation:
     def test_a_candidate_whose_owner_cannot_be_named_is_skipped(self, project, repo):
         """pm is the session itself; an uninstalled role cannot be dispatched."""
         _task(project, title="Plan it", role="pm")
-        _task(project, title="Port to elixir", role="elixir")
+        _task(project, title="Port to mobile", role="react-native")
         named = _task(project, title="The real one", role="react")
         _edit(repo, "src/a.py", "src/b.py", "src/c.py")
 
@@ -562,3 +562,126 @@ class TestTheDispatchScript:
 
         assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
         assert time.monotonic() - started < 1.5
+
+
+# ------------------------------------------------- a dispatch the user declined
+#
+# record-dispatch.sh records at PreToolUse, before the user answers a prompt.
+# A prompted dispatch counts only once confirm-dispatch.sh (PostToolUse) says
+# the tool ran; a declined one never gets that call.
+
+CONFIRM_HOOK = DISPATCH_HOOK.parent / "confirm-dispatch.sh"
+
+
+class TestADeclinedDispatch:
+    @pytest.fixture(autouse=True)
+    def _project_of(self, project, monkeypatch):
+        monkeypatch.setattr("memory_mcp.context.detect_project_from_cwd",
+                            lambda cwd: project)
+
+    def _prompted_backend(self, repo, tool_use_id="toolu_1"):
+        answer = _route({"session_id": SID, "cwd": str(repo), "subagent_type": "backend",
+                         "tool_use_id": tool_use_id, "event": "PreToolUse"})
+        assert answer["decision"] == "ask"
+
+    def _ran(self, repo, **extra):
+        body = {"session_id": SID, "cwd": str(repo), "subagent_type": "backend",
+                "event": "PostToolUse", **extra}
+        assert _route(body) == {}
+
+    def test_declined_leaves_the_escalation_firing(self, project, repo):
+        _task(project, title="The endpoint", role="backend")
+        _edit(repo, "src/a.py", "src/b.py", "src/c.py")
+
+        self._prompted_backend(repo)
+
+        assert _escalation(project).role == "backend"
+
+    def test_accepted_clears_it(self, project, repo):
+        _task(project, title="The endpoint", role="backend")
+        _edit(repo, "src/a.py", "src/b.py", "src/c.py")
+
+        self._prompted_backend(repo)
+        self._ran(repo, tool_use_id="toolu_1")
+
+        assert _escalation(project) is None
+
+    def test_accepted_is_confirmed_by_type_when_no_tool_use_id_arrives(self, project, repo):
+        _task(project, title="The endpoint", role="backend")
+        _edit(repo, "src/a.py", "src/b.py", "src/c.py")
+
+        self._prompted_backend(repo)
+        self._ran(repo)
+
+        assert _escalation(project) is None
+
+    def test_an_unprompted_dispatch_is_not_counted_twice(self, repo):
+        assert _route({"session_id": SID, "cwd": str(repo), "subagent_type": "python",
+                       "tool_use_id": "toolu_2", "event": "PreToolUse"}) == {}
+
+        _route({"session_id": SID, "cwd": str(repo), "subagent_type": "python",
+                "tool_use_id": "toolu_2", "event": "PostToolUse"})
+        _route({"session_id": SID, "cwd": str(repo), "subagent_type": "python",
+                "event": "PostToolUse"})
+
+        assert len(dispatches_for(SID)) == 1
+
+    def test_a_confirmation_for_another_call_confirms_nothing(self, project, repo):
+        _task(project, title="The endpoint", role="backend")
+        _edit(repo, "src/a.py", "src/b.py", "src/c.py")
+
+        self._prompted_backend(repo, tool_use_id="toolu_1")
+        self._ran(repo, tool_use_id="toolu_other")
+
+        assert _escalation(project).role == "backend"
+
+    def test_the_confirmation_is_never_gated(self, repo):
+        """A third python at PostToolUse has already run; there is nothing to ask."""
+        for _ in range(3):
+            record_dispatch(SID, agent_type="python")
+
+        assert _route({"session_id": SID, "cwd": str(repo), "subagent_type": "python",
+                       "event": "PostToolUse"}) == {}
+
+    def test_a_declined_specialist_has_not_gone_first(self, project, repo):
+        """`backend` after `python` has planned goes through - but only when the
+        python dispatch ran, not when the user said No to it."""
+        record_dispatch(SID, agent_type="python", asked=True)
+
+        assert _gate("backend", repo)["decision"] == "ask"
+
+
+@pytest.mark.skipif(not CONFIRM_HOOK.exists(), reason="hook script not present")
+class TestTheConfirmScript:
+    def _run(self, payload, port):
+        full = {**os.environ, "MEMORY_MCP_DAEMON_PORT": str(port)}
+        full.pop("MEMORY_MCP_URL", None)
+        full.pop("MEMORY_MCP_HARNESS", None)
+        return subprocess.run(
+            ["bash", str(CONFIRM_HOOK)], input=json.dumps(payload), text=True,
+            capture_output=True, timeout=30, env=full,
+        )
+
+    def test_it_posts_the_tool_call_as_post_tool_use_and_prints_nothing(self):
+        payload = {**PAYLOAD, "tool_use_id": "toolu_9", "hook_event_name": "PostToolUse"}
+        with _daemon('{"decision": "ask", "reason": "ignored"}') as (port, seen):
+            result = self._run(payload, port)
+
+        assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+        assert seen == [{
+            "session_id": SID, "cwd": "/repo", "subagent_type": "backend", "name": "",
+            "tool_name": "Agent", "description": "x (backend)", "tool_use_id": "toolu_9",
+            "agent_id": "", "agent_type": "", "harness": "", "event": "PostToolUse",
+        }]
+
+    def test_no_daemon_and_a_malformed_payload_stay_silent(self):
+        started = time.monotonic()
+        result = self._run({"session_id": SID}, 9)
+        broken = subprocess.run(
+            ["bash", str(CONFIRM_HOOK)], input="not json", text=True,
+            capture_output=True, timeout=30,
+        )
+
+        assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+        assert (broken.returncode, broken.stdout, broken.stderr) == (0, "", "")
+        assert time.monotonic() - started < 3

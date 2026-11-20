@@ -50,6 +50,10 @@ HOOK_EVENTS = {
     # instead of a rule that held about 70% of the time. Two scripts, because
     # they watch different tools: one the edits, one the dispatches.
     "PreToolUse": ["require-task.sh", "record-dispatch.sh"],
+    # Confirms a dispatch record-dispatch.sh had to ask about: PostToolUse
+    # fires only when the tool ran, so a dispatch the user declined at the
+    # prompt never counts as dispatched (enforcement.confirm_dispatch).
+    "PostToolUse": ["confirm-dispatch.sh"],
     # Counts agents OUT, as record-dispatch.sh counts them in: the difference is
     # how many are running, which the dispatch hook needs to ask before a third
     # concurrent agent. Its own script because a matcher is per script, and
@@ -73,12 +77,118 @@ HOOK_EVENTS = {
 HOOK_MATCHERS = {
     "require-task.sh": "Edit|Write|NotebookEdit",
     "record-dispatch.sh": "Agent|Task",
+    "confirm-dispatch.sh": "Agent|Task",
 }
 
 #: Where the source repo lives. The installed hooks run from
 #: ~/.claude-memory-mcp/hooks/, so they cannot infer it from their own path -
 #: they ask the daemon, which reads this.
 REPO_DIR_KEY = "install:repo_dir"
+
+
+# ---------- where the shipped files are read from ----------
+#
+# REPO_DIR is derived from this file's own location, which is the source repo
+# only when setup runs from a checkout (`uv run memory-mcp-setup`). From the
+# installed runtime (`~/.claude-memory-mcp/runtime`, a non-editable install)
+# it lands inside site-packages, where neither `.claude/hooks/` nor `agents/`
+# exists - and install_hooks used to wire nothing and write that emptiness
+# over a working config. So every adapter asks these resolvers instead, which
+# try, in order: the module-level path (a checkout, or a test's patch), the
+# repo path an earlier install recorded in the registry, and - for hooks only -
+# the copies an earlier install already put in the data dir.
+
+def all_hook_scripts() -> tuple[str, ...]:
+    """Every script any HOOK_EVENTS entry names, once each, sorted."""
+    names = {name for names in HOOK_EVENTS.values() for name in names}
+    return tuple(sorted(names))
+
+
+def _recorded_repo_dir() -> Path | None:
+    """The source repo an earlier install recorded, when it still exists."""
+    try:
+        from memory_mcp.db.registry import get_setting
+
+        value = get_setting(REPO_DIR_KEY)
+    except Exception:  # noqa: BLE001 - no registry yet means nothing recorded
+        return None
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_dir() else None
+
+
+def _has_any_script(directory: Path) -> bool:
+    return any((directory / name).is_file() for name in all_hook_scripts())
+
+
+def hook_scripts_dir() -> Path | None:
+    """The first directory holding at least one of our hook scripts, or None.
+
+    None is a refusal signal for the caller: wiring hooks with no scripts
+    behind them would replace a working config with an empty one.
+    """
+    recorded = _recorded_repo_dir()
+    candidates = [HOOKS_DIR]
+    if recorded is not None:
+        candidates.append(recorded / ".claude" / "hooks")
+    candidates.append(settings.data_dir / "hooks")
+    for candidate in candidates:
+        if candidate.is_dir() and _has_any_script(candidate):
+            return candidate
+    return None
+
+
+def agents_source_dir() -> Path | None:
+    """The shipped `agents/` definitions: the checkout's, else the recorded
+    repo's. None when neither exists (an installed runtime on a machine whose
+    checkout has moved)."""
+    if AGENTS_DIR.is_dir():
+        return AGENTS_DIR
+    recorded = _recorded_repo_dir()
+    if recorded is not None and (recorded / "agents").is_dir():
+        return recorded / "agents"
+    return None
+
+
+def source_repo_dir() -> Path | None:
+    """The source checkout setup is running from, or the one recorded by an
+    earlier install. Never a site-packages path."""
+    if (REPO_DIR / ".claude" / "hooks").is_dir():
+        return REPO_DIR
+    return _recorded_repo_dir()
+
+
+def copy_hook_scripts(source: Path, dest: Path) -> tuple[str, ...]:
+    """Copy every hook script present in `source` to `dest`, executable.
+
+    Returns the names now present in `dest`. When `source` IS `dest` (the
+    installed-runtime fallback) nothing is copied - the scripts are already
+    where the harness configs point.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    same_place = source.resolve() == dest.resolve()
+    present: list[str] = []
+    for name in all_hook_scripts():
+        src = source / name
+        if not src.is_file():
+            continue
+        target = dest / name
+        if not same_place:
+            shutil.copy2(src, target)
+        os.chmod(target, 0o755)
+        present.append(name)
+    return tuple(present)
+
+
+def missing_hooks_message(harness: str, config_path: Path) -> str:
+    """The refusal every adapter reports when no hook script can be found."""
+    return (
+        f"no hook scripts were found (looked in {HOOKS_DIR}, the recorded "
+        f"source repo, and {settings.data_dir / 'hooks'}). {config_path} was "
+        f"left unchanged rather than overwritten with an empty {harness} hook "
+        "config. Please run `uv run memory-mcp-setup` from the source checkout."
+    )
 
 
 # ---------- MCP config ----------
@@ -179,7 +289,17 @@ class ClaudeHarness:
                 return report
 
         hooks_dest = settings.data_dir / "hooks"
-        hooks_dest.mkdir(parents=True, exist_ok=True)
+        source = hook_scripts_dir()
+        if source is None:
+            report.conflict(missing_hooks_message(self.name, path))
+            return report
+        present = set(copy_hook_scripts(source, hooks_dest))
+        missing = [name for name in all_hook_scripts() if name not in present]
+        if missing:
+            report.warn(
+                f"hook script(s) not found in {source}: {', '.join(missing)} - "
+                "those events are not wired"
+            )
 
         # Drop any prior memory-mcp hook entries (e.g. stale repo-path ones from an
         # earlier install) so re-running setup stays idempotent.
@@ -198,12 +318,9 @@ class ClaudeHarness:
         added = 0
         for event, script_names in HOOK_EVENTS.items():
             for script in script_names:
-                src = HOOKS_DIR / script
-                if not src.exists():
+                if script not in present:
                     continue
                 dst = hooks_dest / script
-                shutil.copy2(src, dst)
-                os.chmod(dst, 0o755)
                 command = f"{env_prefix}{shlex.quote(str(dst))}"
                 if _add_hook(
                     settings_obj, event, command, HOOK_MATCHERS.get(script),
@@ -213,19 +330,24 @@ class ClaudeHarness:
         # Record the source repo so the installed hooks can find it. They live in
         # ~/.claude-memory-mcp/hooks/ and would otherwise resolve their own path and
         # find no repository at all.
+        # Only a real checkout is recorded: from the installed runtime REPO_DIR
+        # is a site-packages path, and recording it would erase the good value
+        # an earlier install left behind.
+        repo = source_repo_dir()
         try:
             from memory_mcp.db.registry import set_setting
 
-            set_setting(REPO_DIR_KEY, str(REPO_DIR))
-            # The commit this install was built from. The daemon compares it against
-            # GitHub to detect an update without touching the repo, which it cannot
-            # read when the repo lives in a TCC-protected folder.
-            head = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR),
-                capture_output=True, text=True, timeout=10,
-            )
-            if head.returncode == 0 and head.stdout.strip():
-                set_setting("install:commit", head.stdout.strip())
+            if repo is not None:
+                set_setting(REPO_DIR_KEY, str(repo))
+                # The commit this install was built from. The daemon compares it
+                # against GitHub to detect an update without touching the repo,
+                # which it cannot read when it lives in a TCC-protected folder.
+                head = subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=str(repo), check=False,
+                    capture_output=True, text=True, timeout=10,
+                )
+                if head.returncode == 0 and head.stdout.strip():
+                    set_setting("install:commit", head.stdout.strip())
         except Exception:  # noqa: BLE001 - hooks still work, updates just stay manual
             report.warn("could not record the repo path for auto-update.")
 
@@ -239,7 +361,8 @@ class ClaudeHarness:
 
     def install_agents(self) -> ChangeReport:
         report = ChangeReport(self.name)
-        if not AGENTS_DIR.is_dir():
+        source = agents_source_dir()
+        if source is None:
             report.warn(f"No agents/ directory at {AGENTS_DIR} - nothing to install.")
             return report
 
@@ -249,7 +372,7 @@ class ClaudeHarness:
         # README.md documents the folder for maintainers; it is not an agent. A base
         # (`abstract: true`, or `_name.md`) is composed into others, never installed.
         by_stem = {
-            p.stem: p for p in AGENTS_DIR.glob("*.md") if p.name.lower() != "readme.md"
+            p.stem: p for p in source.glob("*.md") if p.name.lower() != "readme.md"
         }
         sources = sorted(p for p in by_stem.values() if not is_abstract_agent(p))
         installed = [p.name for p in sources]

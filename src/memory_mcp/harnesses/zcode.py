@@ -24,9 +24,7 @@ open, so an unverified payload shape degrades to silence, never to a block.
 """
 
 import json
-import os
 import shlex
-import shutil
 from pathlib import Path
 
 from memory_mcp.config import settings
@@ -36,10 +34,14 @@ from memory_mcp.harnesses.claude import (
     AGENTS_DIR,
     HOOK_EVENTS,
     HOOK_MATCHERS,
-    HOOKS_DIR,
     _render_agent,
+    agents_source_dir,
+    all_hook_scripts,
+    copy_hook_scripts,
+    hook_scripts_dir,
     installable_agent_text,
     is_abstract_agent,
+    missing_hooks_message,
     parse_agent,
 )
 
@@ -135,15 +137,17 @@ class ZCodeHarness:
             return report
 
         hooks_dest = settings.data_dir / "hooks"
-        hooks_dest.mkdir(parents=True, exist_ok=True)
-        for script in sorted({
-            name for names in HOOK_EVENTS.values() for name in names
-        }):
-            src = HOOKS_DIR / script
-            if src.exists():
-                dst = hooks_dest / script
-                shutil.copy2(src, dst)
-                os.chmod(dst, 0o755)
+        source = hook_scripts_dir()
+        if source is None:
+            report.conflict(missing_hooks_message(self.name, zcode_config_path()))
+            return report
+        present = set(copy_hook_scripts(source, hooks_dest))
+        missing = [name for name in all_hook_scripts() if name not in present]
+        if missing:
+            report.warn(
+                f"hook script(s) not found in {source}: {', '.join(missing)} - "
+                "those events are not wired"
+            )
 
         hooks = config.get("hooks")
         if not isinstance(hooks, dict):
@@ -195,6 +199,8 @@ class ZCodeHarness:
                 continue
             groups = []
             for script in script_names:
+                if script not in present:
+                    continue
                 command = f"{env_prefix}{hooks_dest / script}"
                 groups.append({
                     "hooks": [{"type": "command", "command": command}],
@@ -206,6 +212,10 @@ class ZCodeHarness:
             # Everyone else's surviving groups come FIRST, ours after - the
             # strip pass ran on the same list, so a re-install cannot
             # duplicate ours and cannot lose theirs.
+            if not groups:
+                if event in kept_by_event:
+                    events[event] = kept_by_event[event]
+                continue
             events[event] = kept_by_event.get(event, []) + groups
             installed_events.append(event)
 
@@ -227,7 +237,8 @@ class ZCodeHarness:
 
     def install_agents(self) -> ChangeReport:
         report = ChangeReport(self.name)
-        if not AGENTS_DIR.is_dir():
+        source = agents_source_dir()
+        if source is None:
             report.warn(f"No agents/ directory at {AGENTS_DIR} - nothing to install.")
             return report
 
@@ -238,7 +249,7 @@ class ZCodeHarness:
         # reads the composed definitions Claude Code reads, from the same
         # agents/ folder - one team, two runtimes.
         by_stem = {
-            p.stem: p for p in AGENTS_DIR.glob("*.md") if p.name.lower() != "readme.md"
+            p.stem: p for p in source.glob("*.md") if p.name.lower() != "readme.md"
         }
         sources = sorted(p for p in by_stem.values() if not is_abstract_agent(p))
 

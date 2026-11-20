@@ -747,6 +747,40 @@ def memory_task_attachments(task_id: str, project: str | None = None) -> dict:
 
 
 @mcp.tool()
+def memory_attachment_inbox(
+    project: str | None = None, limit: int = 50, offset: int = 0,
+) -> dict:
+    """List the files the user attached in the compose box that are still parked:
+    not bound to a task and not dismissed. Newest first.
+
+    Each item has `pending_id`, `filename`, `content_type`, `size_bytes`,
+    `source` and `created_at`; `total` counts every parked file. Bind one with
+    memory_task_attach(task_id=..., pending_id=...), or, when the user said it
+    does not belong on a task, memory_attachment_dismiss(pending_id=...).
+    `limit` is 1 to 200.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.attachment_inbox_service.inbox(slug, limit=limit, offset=offset)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_attachment_dismiss(pending_id: str, project: str | None = None) -> dict:
+    """Dismiss a parked compose-box file the user does not want on a task.
+
+    It leaves the inbox and is never announced again. Dismissing twice is
+    harmless. A file already bound to a task is refused - memory_task_detach
+    removes that. The stored bytes are deleted only when no task attachment and
+    no other parked file still uses them (`blob_deleted` says which happened).
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.attachment_inbox_service.dismiss(slug, pending_id)
+    return _safe(_run)
+
+
+@mcp.tool()
 def memory_task_plan(
     request: str,
     tasks: list[dict],
@@ -860,9 +894,11 @@ def memory_asoode_pause(
     with no retry spent, however long the pause, and goes out on resume. Task
     tools keep working exactly as before.
 
-    `until` is an optional ISO date (2026-12-04). It is a reminder, not a
-    timer: once it arrives the session brief asks you to check with the user,
-    and sync stays paused until they say to resume. `reason` is a short note
+    `until` is an optional ISO date (2026-12-04). A full timestamp is accepted
+    but kept as its date, and the reply then carries a `note` saying so; pass
+    that on to the user. It is a reminder, not a timer: once it arrives the
+    session brief asks you to check with the user, and sync stays paused until
+    they say to resume. `reason` is a short note
     shown with the status. Pausing again updates both and keeps the original
     start. Only pause when the user asks for it.
     """

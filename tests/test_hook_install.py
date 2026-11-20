@@ -44,6 +44,7 @@ class TestTheMatcherTable:
         assert setup_mod.HOOK_MATCHERS == {
             "require-task.sh": "Edit|Write|NotebookEdit",
             "record-dispatch.sh": "Agent|Task",
+            "confirm-dispatch.sh": "Agent|Task",
         }
 
     def test_every_matcher_names_a_script_that_is_actually_installed(self):
@@ -201,3 +202,14 @@ class TestInstalling:
         setup_mod.setup_hooks()
 
         assert settings_file.read_text() == "{ not json"
+
+
+class TestTheDispatchConfirmation:
+    def test_post_tool_use_confirms_dispatches_on_the_dispatch_tool_only(self, settings_file):
+        """PostToolUse fires only when a tool ran; on Agent|Task that is what
+        tells an accepted dispatch from one the user declined at the prompt."""
+        setup_mod.setup_hooks()
+
+        group = _group_for(settings_file, "PostToolUse", "confirm-dispatch.sh")
+        assert group["matcher"] == "Agent|Task"
+

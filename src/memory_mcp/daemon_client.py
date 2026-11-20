@@ -62,6 +62,19 @@ def call(path: str, method: str = "GET", payload: dict | None = None,
     return json.loads(body) if body.strip() else {}
 
 
+def call_text(path: str, timeout: float = 10.0) -> str:
+    """One GET whose answer is plain text (the hook routes). Raises
+    DaemonUnavailable if nothing is listening, DaemonError if it refused."""
+    req = urllib.request.Request(f"{base_url()}{path}", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        raise DaemonError(f"daemon returned {e.code}") from e
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        raise DaemonUnavailable(str(e)) from e
+
+
 def is_running(timeout: float = 2.0) -> bool:
     try:
         return call("/api/health", timeout=timeout).get("status") == "ok"

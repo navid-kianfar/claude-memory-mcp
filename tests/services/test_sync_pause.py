@@ -170,6 +170,22 @@ class TestPausing:
         state = service.pause(project, until=f"{day.isoformat()}T09:30:00")
         assert state["until"] == day.isoformat()
 
+    def test_a_dropped_time_is_said_in_the_reply(self, project):
+        _, _, service, _ = _stack(_provider())
+        day = date.today() + timedelta(days=2)
+
+        state = service.pause(project, until=f"{day.isoformat()}T09:30:00+02:00")
+
+        assert "time was dropped" in state["note"]
+        assert day.isoformat() in state["note"]
+
+    def test_a_plain_date_carries_no_note(self, project):
+        _, _, service, _ = _stack(_provider())
+        day = (date.today() + timedelta(days=2)).isoformat()
+
+        assert "note" not in service.pause(project, until=day)
+        assert "note" not in service.pause(project)
+
     @pytest.mark.parametrize("until", ["next week", "2026-13-45"])
     def test_a_malformed_until_is_refused(self, project, until):
         _, _, service, _ = _stack(_provider())

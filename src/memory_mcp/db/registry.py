@@ -634,11 +634,36 @@ def edits_for(session_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+#: Registry keys the compose-box attachment scanner writes, one per transcript:
+#: `attach:offset:<claude_session_id>:<sha1 of the transcript path>`. The
+#: scanner imports it from here, so writer and pruner cannot drift apart.
+ATTACH_OFFSET_KEY_PREFIX = "attach:offset:"
+
+# An offset row is dropped once its session has no `client_sessions` row - that
+# is, once the ledger retention above has let the session go, or it was never
+# recorded at all. Losing an offset is harmless: the next scan re-reads the
+# transcript tail, and the inbox's (session, sha256) key parks nothing twice.
+# The session id is cut out with substr/instr rather than matched with LIKE,
+# because a session id may contain `_`, which LIKE reads as a wildcard.
+_PRUNE_ATTACH_OFFSETS_SQL = (
+    "DELETE FROM app_settings "
+    "WHERE substr(key, 1, :prefix_len) = :prefix "
+    "AND NOT EXISTS ("
+    "  SELECT 1 FROM client_sessions c WHERE c.session_id = "
+    "  substr(key, :prefix_len + 1, "
+    "         instr(substr(key, :prefix_len + 1), ':') - 1)"
+    ")"
+)
+
+
 def prune_session_ledgers(days: int = 7) -> int:
-    """Drop ledger rows older than `days`. Returns rows deleted (0 on failure).
+    """Drop ledger rows older than `days`, and the attachment scanner's transcript
+    offsets for sessions no longer in the ledger. Returns rows deleted (0 on
+    failure).
 
     Called from the SessionStart path, which is the one hook that fires once per
-    session rather than once per turn.
+    session rather than once per turn. The offsets go after `client_sessions`, in
+    the same transaction, so they share the ledger's retention exactly.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     try:
@@ -651,6 +676,14 @@ def prune_session_ledgers(days: int = 7) -> int:
                 "DELETE FROM client_sessions WHERE last_seen < ?",
             ):
                 deleted += conn.execute(sql, (cutoff,)).rowcount
+            offsets = conn.execute(
+                _PRUNE_ATTACH_OFFSETS_SQL,
+                {
+                    "prefix": ATTACH_OFFSET_KEY_PREFIX,
+                    "prefix_len": len(ATTACH_OFFSET_KEY_PREFIX),
+                },
+            )
+            deleted += offsets.rowcount
             return deleted
     except Exception:  # noqa: BLE001
         return 0

@@ -109,6 +109,8 @@ def _print_sync(state: dict) -> None:
         print(f"{slug}: sync PAUSED since {since}, until {until}.")
         if state.get("reason"):
             print(f"  reason: {state['reason']}")
+        if state.get("note"):
+            print(f"  note: {state['note']}")
         if state.get("overdue"):
             print(f"  The planned end has arrived. Resume with "
                   f"`memory-mcp asoode resume {slug}` when you are ready.")

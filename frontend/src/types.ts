@@ -607,6 +607,36 @@ export interface PauseSyncInput {
   reason?: string;
 }
 
+// ---------- parked attachments ----------
+
+/** A file pasted into a Claude session that was never bound to a task. */
+export interface ParkedAttachment {
+  pending_id: string;
+  filename: string;
+  content_type: string | null;
+  size_bytes: number;
+  source: string;
+  created_at: string;
+}
+
+/** `GET /api/projects/{slug}/attachments/inbox`, newest first. */
+export interface ParkedAttachmentsResponse {
+  project: string;
+  items: readonly ParkedAttachment[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** `POST .../attachments/inbox/{pending_id}/dismiss`. 404 unknown, 409 already bound. */
+export interface DismissParkedAttachmentResult {
+  pending_id: string;
+  filename: string;
+  dismissed_at: string;
+  already_dismissed: boolean;
+  blob_deleted: boolean;
+}
+
 export interface BoardRef {
   id: string;
   title: string;

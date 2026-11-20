@@ -1,7 +1,7 @@
 """Session service - start/end sessions, load context, handle orphans."""
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from memory_mcp.models import SessionContext
 from memory_mcp.services.adaptation import adaptation_brief
@@ -9,8 +9,9 @@ from memory_mcp.repositories import (
     MemoryRepository, ProjectRepository, SessionRepository,
 )
 from memory_mcp.services.rules_service import RulesService
+from memory_mcp.services.sync_pause import is_overdue
 from memory_mcp.services.task_brief import (
-    bound_queue_brief, task_brief, unbound_hint, unreachable_brief,
+    bound_queue_brief, paused_brief, task_brief, unbound_hint, unreachable_brief,
 )
 from memory_mcp.services.task_service import TaskService
 
@@ -171,6 +172,12 @@ class SessionService:
             return None, task_brief(project, queued)
         if status is None:
             return None, self._unbound_instructions(project, queued)
+        pause = status.get("paused")
+        if pause is not None:
+            pause["overdue"] = is_overdue(pause.get("until"), date.today())
+            return status, paused_brief(
+                project, queued, pause, pause.get("queued_ops", 0), pause["overdue"],
+            )
         if not status["reachable"]:
             return status, unreachable_brief(project, status["error"] or "unreachable")
         return status, bound_queue_brief(

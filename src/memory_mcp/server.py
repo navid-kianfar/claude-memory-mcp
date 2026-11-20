@@ -110,6 +110,14 @@ asoode work package (a board), and the binding changes what the task list means.
     are idempotent, so re-running pushes changes rather than duplicating.
   - `memory-mcp asoode open <slug>` opens that board in a browser already signed
     in, via asoode's /auth/token deep link.
+  - SYNC CAN BE PAUSED per project when the user asks to work locally for a
+    while: memory_asoode_pause(project, until?, reason?). While paused nothing
+    is sent to or read from the board; every local change waits in the queue,
+    and task tools work as usual. memory_asoode_resume(project) lifts it and
+    sends the whole queue in one catch-up, reporting what went and what is
+    left. Pause or resume only when the user asks; a passed `until` is a cue to
+    ask them, never to resume on your own. memory_asoode_status(project) shows
+    the pause and the queue.
   - WHEN A PROJECT IS BOUND, ITS BOARD IS THE WORK QUEUE. memory_session_start
     returns an `asoode` block and a brief saying to work it: take the
     highest-priority actionable task, memory_task_start it, mirror the state to
@@ -278,6 +286,9 @@ def _mirror_report(slug: str) -> dict | None:
         if outbox is None or not get_project_links(slug):
             return None
         report: dict = {"pending": outbox.depth(slug)}
+        if container.task_bridge.is_paused(slug):
+            # Says why `pending` is climbing; the brief carries the rest.
+            report["paused"] = True
         failure = outbox.last_failure(slug)
         if failure:
             report["last_error"] = failure
@@ -839,8 +850,54 @@ def _attach_similar(answer: dict, slug: str, created: list[dict]) -> None:
 
 
 @mcp.tool()
-def memory_asoode_status() -> dict:
+def memory_asoode_pause(
+    project: str | None = None, until: str | None = None, reason: str | None = None,
+) -> dict:
+    """Pause board sync for a project, for example "local only for two weeks".
+
+    While paused, nothing is sent to the board and nothing is read from it.
+    Every local change - creates, edits, comments, time - waits in the queue
+    with no retry spent, however long the pause, and goes out on resume. Task
+    tools keep working exactly as before.
+
+    `until` is an optional ISO date (2026-12-04). It is a reminder, not a
+    timer: once it arrives the session brief asks you to check with the user,
+    and sync stays paused until they say to resume. `reason` is a short note
+    shown with the status. Pausing again updates both and keeps the original
+    start. Only pause when the user asks for it.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.sync_pause_service.pause(slug, until=until, reason=reason)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_asoode_resume(project: str | None = None) -> dict:
+    """Resume board sync for a project and send everything queued while paused.
+
+    Drains the queue until it is empty or a send fails, then reads the board
+    once for anything added there in the meantime. A long queue keeps draining
+    in the background after this returns: `drain.state` is "running" until it
+    is done, and memory_asoode_status(project) shows its progress. Report the
+    tally to the user - `drain.flushed`, `drain.failed`, `drain.remaining` and
+    `drain.error` - rather than saying the board is up to date. Only resume
+    when the user asks for it.
+    """
+    def _run():
+        slug = _resolve(project)
+        return container.sync_pause_service.resume(slug)
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_asoode_status(project: str | None = None) -> dict:
     """Show the asoode integration config: which server, and whether a PAT is stored.
+
+    With `project`, also returns `sync` for it: whether board sync is paused,
+    since when, until when, why, how many changes are queued, and how far the
+    latest resume has got. Without it, `paused_projects` lists every project
+    paused on this machine.
 
     The endpoints default to asoode's hosted service, so nothing needs configuring
     unless this is an on-premise install. The PAT is stored once for the whole
@@ -855,11 +912,19 @@ def memory_asoode_status() -> dict:
     from memory_mcp import asoode
     from memory_mcp.providers import available
 
-    status = asoode.status()
-    # Which platforms this build can talk to. A link names one; asoode is the
-    # default for every link written before the column was read.
-    status["providers"] = available()
-    return status
+    def _run():
+        from memory_mcp.db.registry import paused_slugs
+
+        status = asoode.status()
+        # Which platforms this build can talk to. A link names one; asoode is the
+        # default for every link written before the column was read.
+        status["providers"] = available()
+        if project:
+            status["sync"] = container.sync_pause_service.status(_resolve(project))
+        else:
+            status["paused_projects"] = paused_slugs()
+        return status
+    return _safe(_run)
 
 
 @mcp.tool()

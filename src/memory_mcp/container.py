@@ -20,6 +20,7 @@ from memory_mcp.services import (
     ExportImportService, ModelService, UpdateService, ClaudeMdService,
     TaskService, TemplateService, SyncService, TaskBridge, TaskPlanner,
 )
+from memory_mcp.services.sync_pause import SyncPauseService
 
 
 #: How often the daemon looks for outbox rows nobody nudged. Cheap: one depth
@@ -113,6 +114,9 @@ class Container:
             attachment_repo=self.attachment_repo,
         )
         self.task_planner = TaskPlanner(self.task_service, self.task_bridge)
+        self.sync_pause_service = SyncPauseService(
+            self.task_bridge, self.outbox_repo, self.project_service,
+        )
         # Constructed after the bridge: a bound project's session brief tells the
         # agent to work the board, so the session service needs it.
         self.session_service = SessionService(
@@ -206,14 +210,19 @@ class Container:
 
     def sweep_outboxes(self) -> list[str]:
         """Nudge every linked project that has something pending. Returns them."""
-        from memory_mcp.db.registry import linked_slugs
+        from memory_mcp.db.registry import linked_slugs, paused_slugs
 
         nudged = []
         try:
             slugs = linked_slugs()
+            # A paused project's queue is meant to wait; nudging it every
+            # minute would only spin up a flusher that does nothing.
+            paused = frozenset(paused_slugs())
         except Exception:  # noqa: BLE001 - no registry, nothing to sweep
             return nudged
         for slug in slugs:
+            if slug in paused:
+                continue
             try:
                 if self.outbox_repo.sweep_depth(slug) > 0:
                     self._mirror_soon(slug)
@@ -300,6 +309,7 @@ class Container:
         deadline = time.monotonic() + timeout
         self.stop_outbox_sweeper(timeout=max(0.0, deadline - time.monotonic()))
         self.wait_for_mirrors(timeout=max(0.0, deadline - time.monotonic()))
+        self.sync_pause_service.wait_for_drains(max(0.0, deadline - time.monotonic()))
         backfill = self._time_backfill
         if backfill is not None and backfill.is_alive():
             backfill.join(max(0.0, deadline - time.monotonic()))

@@ -1,6 +1,6 @@
 """`memory-mcp asoode ...` - point this machine at an asoode and store the PAT.
 
-  memory-mcp asoode status                 what is configured right now
+  memory-mcp asoode status [slug]          what is configured; with a slug, its sync state
   memory-mcp asoode set-pat [--stdin]      store the token (prompted, not echoed)
   memory-mcp asoode clear-pat              forget it
   memory-mcp asoode set-url --api URL ...  on-premise overrides
@@ -12,6 +12,8 @@
   memory-mcp asoode attach <slug> --ref R  link an EXISTING board
   memory-mcp asoode import <slug>          pull board tasks into the local list
   memory-mcp asoode open [slug]            open the board, already signed in
+  memory-mcp asoode pause <slug>           stop board sync; local changes queue up
+  memory-mcp asoode resume <slug>          restart it and send the queue in one go
 
 The token is read from a no-echo prompt, or from stdin with --stdin. It is
 deliberately NOT a command-line argument: argv lands in shell history and is
@@ -42,7 +44,8 @@ _CLI_ERRORS = (AsoodeConfigError, AsoodeError, MemoryMCPError)
 
 USAGE = (
     "Usage: memory-mcp asoode "
-    "[status|set-pat|clear-pat|set-url|reset-url|check|link|attach|boards|push|open]"
+    "[status|set-pat|clear-pat|set-url|reset-url|check|link|attach|boards|push|import"
+    "|open|pause|resume]"
 )
 
 
@@ -58,6 +61,11 @@ def _route(path: str, method: str, payload: dict | None, local, label: str):
 
     try:
         result, via_daemon = daemon_client.run(path, method, payload, local)
+    except daemon_client.DaemonError as e:
+        # The daemon refused on the merits (a bad date, an unlinked project):
+        # its message is the answer, a traceback is not.
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from e
     except Exception as e:  # noqa: BLE001 - translated below or re-raised
         hint = daemon_client.lock_message(e)
         if hint is None:
@@ -92,6 +100,53 @@ def _print_status() -> None:
         print(f"\n! {warning}")
 
 
+def _print_sync(state: dict) -> None:
+    """One project's sync state, as `status <slug>`, `pause` and `resume` show it."""
+    slug = state["slug"]
+    if state["paused"]:
+        since = (state.get("since") or "")[:10] or "an unknown date"
+        until = state.get("until") or "no end date"
+        print(f"{slug}: sync PAUSED since {since}, until {until}.")
+        if state.get("reason"):
+            print(f"  reason: {state['reason']}")
+        if state.get("overdue"):
+            print(f"  The planned end has arrived. Resume with "
+                  f"`memory-mcp asoode resume {slug}` when you are ready.")
+    else:
+        print(f"{slug}: sync is running." if state["linked"]
+              else f"{slug}: not linked to a board.")
+    print(f"  {state['queued_ops']} change(s) queued for the board.")
+    drain = state.get("drain")
+    if not drain:
+        return
+    progress = "still sending" if drain["state"] == "running" else "finished"
+    print(
+        f"  last resume: {progress} - {drain['flushed']} sent, {drain['failed']} failed, "
+        f"{drain['remaining']} remaining."
+    )
+    if drain.get("imported"):
+        print(f"  {drain['imported']} task(s) came in from the board.")
+    if drain.get("stopped_by_pause"):
+        print("  It stopped because sync was paused again.")
+    if drain.get("error"):
+        print(f"  error: {drain['error']}", file=sys.stderr)
+
+
+def _sync_local(action: str, slug: str, **kwargs):
+    """The no-daemon path. Resume drains to the end here: this process exits
+    when the command does, so a background thread would be cut off."""
+    def _local():
+        from memory_mcp.container import container
+
+        service = container.sync_pause_service
+        if action == "pause":
+            return service.pause(slug, **kwargs)
+        if action == "resume":
+            return service.resume(slug, wait_seconds=None)
+        return service.status(slug)
+    return _local
+
+
 def _read_token(from_stdin: bool) -> str:
     if from_stdin:
         return sys.stdin.read().strip()
@@ -110,7 +165,47 @@ def main(argv: list[str]) -> None:
 
     try:
         if cmd == "status":
+            p = argparse.ArgumentParser(prog="memory-mcp asoode status")
+            p.add_argument("slug", nargs="?", default=None,
+                           help="also show this project's sync state")
+            ns = p.parse_args(rest)
             _print_status()
+            if ns.slug:
+                print()
+                _print_sync(_route(
+                    f"/api/projects/{ns.slug}/asoode/sync", "GET", None,
+                    _sync_local("status", ns.slug), "read the sync state",
+                ))
+
+        elif cmd == "pause":
+            p = argparse.ArgumentParser(prog="memory-mcp asoode pause")
+            p.add_argument("slug")
+            p.add_argument("--until", default=None, metavar="YYYY-MM-DD",
+                           help="when you plan to resume; a reminder, never automatic")
+            p.add_argument("--reason", default=None, help="a short note shown with the status")
+            ns = p.parse_args(rest)
+            _print_sync(_route(
+                f"/api/projects/{ns.slug}/asoode/pause", "POST",
+                {"until": ns.until, "reason": ns.reason},
+                _sync_local("pause", ns.slug, until=ns.until, reason=ns.reason),
+                "pause sync",
+            ))
+
+        elif cmd == "resume":
+            p = argparse.ArgumentParser(prog="memory-mcp asoode resume")
+            p.add_argument("slug")
+            ns = p.parse_args(rest)
+            result = _route(
+                f"/api/projects/{ns.slug}/asoode/resume", "POST", {},
+                _sync_local("resume", ns.slug), "resume sync",
+            )
+            if not result.get("was_paused"):
+                print(f"{ns.slug} was not paused; sending whatever is queued.")
+            _print_sync(result)
+            drain = result.get("drain") or {}
+            if drain.get("state") == "running":
+                print(f"  The rest is being sent in the background. "
+                      f"`memory-mcp asoode status {ns.slug}` shows how it is going.")
 
         elif cmd == "set-pat":
             p = argparse.ArgumentParser(prog="memory-mcp asoode set-pat")

@@ -143,6 +143,53 @@ def bound_queue_brief(
     return "\n".join(lines)
 
 
+def pause_summary(project: str, pause: dict, queued_ops: int, overdue: bool) -> str:
+    """One sentence on a paused sync: since, until, reason and the queue.
+
+    Shared by the session brief and the per-turn line, so both say the same.
+    """
+    since = (pause.get("since") or "")[:10] or "an unknown date"
+    until = pause.get("until")
+    end = f"until {until}" if until else "with no end date"
+    reason = f" Reason: {pause['reason']}." if pause.get("reason") else ""
+    ops = "1 change is" if queued_ops == 1 else f"{queued_ops} changes are"
+    text = (
+        f"Sync between project '{project}' and its asoode board is PAUSED "
+        f"(since {since}, {end}).{reason} {ops} queued locally and will go to the "
+        f"board together when sync is resumed."
+    )
+    if overdue:
+        text += (
+            f" The planned end ({until}) has arrived: ask the user, once, whether "
+            f"to resume now with memory_asoode_resume. Keep it paused until they "
+            f"say so - it never resumes on its own."
+        )
+    return text
+
+
+_PAUSED_WORK = (
+    "Keep working the local task list, one task at a time, exactly as the "
+    "steps below describe - memory_task_start, comment, memory_task_done all "
+    "work and are recorded locally. Wherever a step mentions the board, read it "
+    "as the local list; the board catches up on resume. Do NOT push, import or "
+    "reconcile (memory_asoode_push / _import / _reconcile), and do not resume "
+    "sync unless the user asks."
+)
+
+
+def paused_brief(
+    project: str, tasks: list, pause: dict, queued_ops: int, overdue: bool,
+) -> str:
+    """Instructions for a bound project whose board sync is paused."""
+    count = len(tasks)
+    noun = "task is" if count == 1 else "tasks are"
+    header = (
+        pause_summary(project, pause, queued_ops, overdue)
+        + f" {count} open {noun} waiting. " + _PAUSED_WORK
+    )
+    return "\n".join([header, *_BOUND_STEPS])
+
+
 def unreachable_brief(project: str, error: str) -> str:
     """What to do when the bound board cannot be read. Never a hard failure."""
     return _UNREACHABLE.format(project=project, error=error)

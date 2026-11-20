@@ -845,6 +845,41 @@ def _asoode_import(params, body, query):
     return container.task_bridge.import_all(params["slug"])
 
 
+def _asoode_sync_status(params, body, query):
+    """GET the project's board sync state.
+
+    -> {slug, linked, paused, since, until, reason, overdue, queued_ops, drain}.
+    `drain` is null until a resume has run in this daemon, then {state:
+    running|finished, started_at, finished_at, flushed, failed, skipped,
+    abandoned, remaining, imported, error, stopped_by_pause}.
+    """
+    return container.sync_pause_service.status(params["slug"])
+
+
+def _asoode_pause(params, body, query):
+    """POST {until?: "YYYY-MM-DD", reason?: str} -> the sync state.
+
+    400 for an unlinked project, a malformed or past `until`, or a reason over
+    500 characters. Pausing again updates until/reason and keeps `since`.
+    """
+    until = body.get("until")
+    reason = body.get("reason")
+    if until is not None and not isinstance(until, str):
+        raise ValueError("until must be an ISO date string such as 2026-12-04")
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError("reason must be a string")
+    return container.sync_pause_service.pause(params["slug"], until=until, reason=reason)
+
+
+def _asoode_resume(params, body, query):
+    """POST {} -> the sync state plus `was_paused`.
+
+    Drains for up to RESUME_WAIT_SECONDS, then carries on in the background;
+    poll GET .../asoode/sync while `drain.state` is "running".
+    """
+    return container.sync_pause_service.resume(params["slug"])
+
+
 def _asoode_links(params, body, query):
     """The project's links (each with `match_paths`) and the manifest's proposals.
 
@@ -1563,6 +1598,9 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/asoode/link", _api(_asoode_link), methods=["POST"]),
         Route("/api/projects/{slug}/asoode/push", _api(_asoode_push), methods=["POST"]),
         Route("/api/projects/{slug}/asoode/import", _api(_asoode_import), methods=["POST"]),
+        Route("/api/projects/{slug}/asoode/sync", _api(_asoode_sync_status), methods=["GET"]),
+        Route("/api/projects/{slug}/asoode/pause", _api(_asoode_pause), methods=["POST"]),
+        Route("/api/projects/{slug}/asoode/resume", _api(_asoode_resume), methods=["POST"]),
         Route("/api/asoode", _api(_asoode_status), methods=["GET"]),
         Route("/api/asoode/boards", _api(_asoode_boards), methods=["GET"]),
         Route("/api/asoode/socket", _asoode_socket, methods=["GET"]),

@@ -71,6 +71,7 @@ from memory_mcp.db.registry import (
     get_default_project_link,
     get_project_links,
     get_setting,
+    get_sync_pause,
     set_setting,
     update_project_link,
     upsert_project_link,
@@ -205,6 +206,22 @@ _MAX_PROPOSALS = 200
 
 class LinkNotFoundError(MemoryMCPError):
     """A link id that is not one of this project's links."""
+
+
+class SyncPausedError(MemoryMCPError):
+    """An explicit board call refused because sync is paused for the project.
+
+    Only the calls a person asks for raise it (push, import). The background
+    paths - the flusher, reconcile, the time backfill - simply do nothing while
+    paused, so nothing in the daemon log or a task reply turns into an error.
+    """
+
+    def __init__(self, slug: str) -> None:
+        super().__init__(
+            f"Sync with the board is paused for '{slug}'. Local changes are being "
+            "kept in the queue; resume sync first (memory_asoode_resume or "
+            f"`memory-mcp asoode resume {slug}`) and they will go out together."
+        )
 
 
 class RoutingError(ProviderError, MemoryMCPError):
@@ -1186,7 +1203,7 @@ class TaskBridge:
 
     # ---------- the flusher ----------
 
-    def flush(self, slug: str, *, limit: int = 200) -> dict:
+    def flush(self, slug: str, *, limit: int = 200, passes: int = _MAX_FLUSH_PASSES) -> dict:
         """Drain the outbox: mirror what changed locally, in order, per task.
 
         Incremental by design. `push` re-POSTs every task in the project, which
@@ -1197,16 +1214,26 @@ class TaskBridge:
         A row that fails STAYS in the outbox with attempts incremented, so an
         unreachable asoode is a delay rather than a lost edit. Ordering is
         preserved per task because rows drain oldest-first.
+
+        `passes` and `limit` bound one call; a resume drains in small steps so
+        it can check its deadline between them.
         """
         if self._outbox is None:
             return {"flushed": 0, "failed": 0, "skipped": 0, "reason": "no outbox"}
+        if self.is_paused(slug):
+            return self._paused_flush_result(slug)
         with self._flush_lock(slug):
             # Keep going while there is more and progress is being made. A row
             # enqueued while a batch was in flight used to wait for the NEXT
             # mutation to nudge the flusher - done() queues two rows back to
             # back and hit that every time.
             total: dict = {"flushed": 0, "failed": 0, "skipped": 0, "abandoned": 0}
-            for _ in range(_MAX_FLUSH_PASSES):
+            for _ in range(passes):
+                # Checked between passes as well, so a pause that lands while a
+                # long resume is draining stops it at the next batch.
+                if self.is_paused(slug):
+                    total["paused"] = True
+                    break
                 result = self._flush_locked(slug, limit)
                 for key in ("flushed", "failed", "skipped", "abandoned"):
                     total[key] += result.get(key, 0)
@@ -1216,6 +1243,20 @@ class TaskBridge:
                     break
             total["remaining"] = self._outbox.depth(slug)
             return total
+
+    # ---------- pausing ----------
+
+    def is_paused(self, slug: str) -> bool:
+        """Is board sync paused for this project? A local registry read."""
+        return get_sync_pause(slug) is not None
+
+    def _paused_flush_result(self, slug: str) -> dict:
+        """What a flush reports while paused. No row is read, sent or touched:
+        a paused queue keeps its attempts at zero however long the pause."""
+        return {
+            "flushed": 0, "failed": 0, "skipped": 0, "abandoned": 0,
+            "remaining": self._outbox.depth(slug), "paused": True,
+        }
 
     def _flush_locked(self, slug: str, limit: int) -> dict:
         pending = self._outbox.pending(slug, limit)
@@ -1751,6 +1792,8 @@ class TaskBridge:
         a remote change overwrites the local title/state/description. Two-way
         merge needs a conflict policy, which is its own (still blocked) decision.
         """
+        if self.is_paused(slug):
+            raise SyncPausedError(slug)
         # An import writes through TaskService, which queues a mirror for every
         # write - so importing 35 tasks would immediately push 35 of them back.
         # Suppress mirroring for the duration: these changes CAME FROM asoode.
@@ -1902,6 +1945,11 @@ class TaskBridge:
         behind `import_all` (explicit) until the two-sided conflict policy is
         decided - last-write-wins would silently discard local work.
         """
+        if self.is_paused(slug):
+            # Not an error: the socket and the mirror thread call this on their
+            # own, and a paused project is an ordinary state for them. Resume
+            # runs a full reconcile, which picks up whatever the board gained.
+            return {"slug": slug, "imported": 0, "paused": True}
         links = get_project_links(slug)
         if not links:
             return {"slug": slug, "imported": 0, "reason": "not linked"}
@@ -2004,6 +2052,8 @@ class TaskBridge:
         link is marked only when every card behind was read without failure,
         so a truncated or failed catch-up is resumed by the next call.
         """
+        if self.is_paused(slug):
+            return {"slug": slug, "entries": 0, "failed": [], "paused": True}
         entries, failed = 0, []
         for link in get_project_links(slug):
             setting = f"{TIME_BACKFILL_SETTING_PREFIX}{link['id']}"
@@ -2031,6 +2081,8 @@ class TaskBridge:
 
     def import_all(self, slug: str) -> dict:
         """Pull every linked board into the local store."""
+        if self.is_paused(slug):
+            raise SyncPausedError(slug)
         links = get_project_links(slug)
         if not links:
             raise ProviderError(f"'{slug}' is not linked to any board.")
@@ -2378,6 +2430,14 @@ class TaskBridge:
             "remote_open": [],
             "remote_only": [],
         }
+        pause = get_sync_pause(slug)
+        if pause is not None:
+            # Paused means no inbound reads either, the board fetch included.
+            status["paused"] = {
+                **pause,
+                "queued_ops": self._outbox.depth(slug) if self._outbox is not None else 0,
+            }
+            return status
         try:
             container = self.provider_for(link).fetch_container(
                 link["remote_work_package_id"], with_tasks=True,
@@ -2425,6 +2485,8 @@ class TaskBridge:
                 f"'{slug}' is not linked to an asoode board yet - attach one with "
                 "memory_asoode_attach, or create one with memory_asoode_link."
             )
+        if self.is_paused(slug):
+            raise SyncPausedError(slug)
 
         listing = self._tasks.list_tasks(
             slug,

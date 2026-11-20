@@ -17,6 +17,7 @@ import { AttachBoardRow } from "./AttachBoardRow";
 import type { AttachBoardInput } from "./AttachBoardRow";
 import { LinkProposalsCard, proposalKey } from "./LinkProposalsCard";
 import { ProjectLinkRow } from "./ProjectLinkRow";
+import { SyncPauseControl } from "./SyncPauseControl";
 
 /**
  * asoode integration: where the server is, the machine-wide credential, and
@@ -363,6 +364,9 @@ export function IntegrationsView({ projects }: { projects: Project[] }) {
                 >
                   <Send className="mr-1 size-3" /> Mirror now
                 </Button>
+              </div>
+              <div className="mb-2.5">
+                <SyncPauseControl projectSlug={p.slug} projectName={p.display_name} />
               </div>
               <div className="space-y-1.5">
                 {(links[p.slug] || []).map((l) => (

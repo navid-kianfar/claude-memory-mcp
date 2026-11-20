@@ -562,6 +562,51 @@ export interface ProjectLinksResponse {
   proposals?: LinkProposal[];
 }
 
+/** Progress of the drain a resume starts. Lives in the daemon's memory, so it
+    is null until a resume has run since the daemon started. */
+export type AsoodeDrainState = "running" | "finished";
+
+export interface AsoodeDrain {
+  state: AsoodeDrainState;
+  started_at: string;
+  finished_at: string | null;
+  /** Queued changes sent to the board. */
+  flushed: number;
+  failed: number;
+  skipped: number;
+  abandoned: number;
+  /** Still queued when the drain stopped. */
+  remaining: number;
+  /** Tasks pulled back from the board after the drain; null when none ran. */
+  imported: number | null;
+  error: string | null;
+  /** True when sync was paused again while the drain was running. */
+  stopped_by_pause: boolean;
+}
+
+/** GET/POST /api/projects/{slug}/asoode/sync|pause|resume. */
+export interface AsoodeSyncState {
+  slug: string;
+  linked: boolean;
+  paused: boolean;
+  /** ISO timestamp the pause began; kept when a pause is edited. */
+  since: string | null;
+  /** YYYY-MM-DD, or null for "until resumed by hand". */
+  until: string | null;
+  reason: string | null;
+  /** Paused, and `until` has passed. Sync does not resume on its own. */
+  overdue: boolean;
+  queued_ops: number;
+  drain: AsoodeDrain | null;
+  /** Only on the resume answer. */
+  was_paused?: boolean;
+}
+
+export interface PauseSyncInput {
+  until?: string;
+  reason?: string;
+}
+
 export interface BoardRef {
   id: string;
   title: string;

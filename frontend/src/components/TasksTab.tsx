@@ -11,6 +11,8 @@ import { TaskListView } from "./TaskListView";
 import { TaskBoardView } from "./TaskBoardView";
 import { TaskDialog } from "./TaskDialog";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { SyncPausedHint } from "./SyncPausedHint";
+import { useSyncState } from "../hooks/useSyncState";
 
 export interface TasksTabProps {
   projectSlug: string;
@@ -27,6 +29,9 @@ export interface TasksTabProps {
  */
 export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
   const { toast } = useToast();
+  // Only for the paused hint. A failed load just means no hint.
+  const sync = useSyncState(projectSlug);
+  const reloadSync = sync.reload;
   const [tasks, setTasks] = useState<Task[]>([]);
   const [meta, setMeta] = useState<Record<string, TaskRowMeta>>({});
   const [openCount, setOpenCount] = useState(0);
@@ -119,9 +124,9 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
   }, [projectSlug]);
 
   const refresh = useCallback(async () => {
-    await load();
+    await Promise.all([load(), reloadSync()]);
     onChanged?.();
-  }, [load, onChanged]);
+  }, [load, reloadSync, onChanged]);
 
   /** Dropping a card on a column is the state change - that is what board mode
       is for. Everything else about a task still goes through the dialog. */
@@ -289,6 +294,7 @@ export function TasksTab({ projectSlug, onChanged }: TasksTabProps) {
           {openCount} waiting
           {visible.length !== tasks.length && ` · ${visible.length} shown`}
         </p>
+        <SyncPausedHint state={sync.state} />
         <label className="flex items-center gap-2 whitespace-nowrap text-sm text-muted-foreground">
           <Switch checked={showDone} onCheckedChange={setShowDone} />
           Show finished

@@ -487,3 +487,18 @@ class TestTheTaskTextLine:
         assert "MARKDOWN" in _TASK_TEXT_LINE
         block = format_rules_block("p-no-rules", [], [])
         assert _TASK_TEXT_LINE in block
+
+
+class TestTheWritingStyleLine:
+    def test_present_with_and_without_project_rules(self):
+        """Product-level like the task-text line: polite, human-sounding
+        writing with neutral address must reach projects that have no rules."""
+        from types import SimpleNamespace
+
+        from memory_mcp.enforcement import _WRITING_STYLE_LINE, format_rules_block
+
+        assert "Hello everyone" in _WRITING_STYLE_LINE
+        assert "friends" in _WRITING_STYLE_LINE
+        assert _WRITING_STYLE_LINE in format_rules_block("p-no-rules", [], [])
+        rule = SimpleNamespace(title="t", content="c")
+        assert _WRITING_STYLE_LINE in format_rules_block("p-rules", [rule], [])

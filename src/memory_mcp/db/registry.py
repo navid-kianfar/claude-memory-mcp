@@ -337,6 +337,66 @@ def set_setting(key: str, value: str) -> None:
         )
 
 
+def delete_setting(key: str) -> bool:
+    """Remove one setting. True when there was something to remove."""
+    with registry_conn() as conn:
+        cur = conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+    return cur.rowcount > 0
+
+
+# ---------- board sync pause (per project) ----------
+#
+# A pause is a machine-local choice about this checkout's traffic to the board,
+# so it lives in app_settings next to the link rows and never travels in the
+# committed snapshot. Keyed by slug like `link_proposals:{slug}`: a slug is
+# stable, renaming a project only changes its display name.
+
+SYNC_PAUSE_KEY_PREFIX = "asoode_pause:"
+
+
+def get_sync_pause(slug: str) -> dict | None:
+    """The stored pause for a project ({since, until, reason}), or None."""
+    import json
+
+    raw = get_setting(f"{SYNC_PAUSE_KEY_PREFIX}{slug}")
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        # A record we cannot read still means somebody paused this project.
+        # Reading it as "not paused" would start sending two weeks of queued
+        # work without anyone asking for it.
+        return {"since": None, "until": None, "reason": None}
+    return value if isinstance(value, dict) else {"since": None, "until": None, "reason": None}
+
+
+def set_sync_pause(slug: str, record: dict) -> None:
+    import json
+
+    set_setting(f"{SYNC_PAUSE_KEY_PREFIX}{slug}", json.dumps(record))
+
+
+def clear_sync_pause(slug: str) -> bool:
+    """Lift the pause. True when the project was paused."""
+    return delete_setting(f"{SYNC_PAUSE_KEY_PREFIX}{slug}")
+
+
+def paused_slugs() -> list[str]:
+    """Every project whose board sync is paused on this machine, sorted."""
+    with registry_conn() as conn:
+        rows = conn.execute(
+            "SELECT key FROM app_settings WHERE key LIKE ? ORDER BY key",
+            (f"{SYNC_PAUSE_KEY_PREFIX}%",),
+        ).fetchall()
+    # LIKE treats the underscore in the prefix as a wildcard; the startswith
+    # check keeps the answer exact.
+    return [
+        r[0][len(SYNC_PAUSE_KEY_PREFIX):] for r in rows
+        if r[0].startswith(SYNC_PAUSE_KEY_PREFIX)
+    ]
+
+
 # ---------- hook session ledgers (Claude Code sessions) ----------
 #
 # Every function here is wrapped: a hook runs before an edit, and a registry

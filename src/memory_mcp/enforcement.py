@@ -7,6 +7,7 @@ Claude so they survive context compaction and never get silently dropped.
 import re
 import time
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path, PurePosixPath
 
 from memory_mcp.constants import HARNESS_CLAUDE, HARNESS_DEEPSEEK
@@ -46,6 +47,9 @@ def asoode_line(slug: str) -> str:
     if link is None:
         return ""
     open_count = _queued_task_count(slug)
+    paused = _paused_line(slug, open_count)
+    if paused:
+        return paused
     waiting = f"{open_count} open" if open_count else "empty"
     return (
         f"[Memory MCP] asoode: '{slug}' is bound to a board ({waiting}) - that board "
@@ -55,6 +59,46 @@ def asoode_line(slug: str) -> str:
         f"and mirrors itself. Never leave a task clocking. Do not auto-start "
         f"blocked/blocker/paused/cancelled."
     )
+
+
+def _paused_line(slug: str, open_count: int) -> str:
+    """The per-turn line for a project whose board sync is paused, or "".
+
+    Local reads only (the registry and the outbox count), like the rest of
+    this path.
+    """
+    pause = _sync_pause(slug)
+    if pause is None:
+        return ""
+    from memory_mcp.services.sync_pause import is_overdue
+    from memory_mcp.services.task_brief import pause_summary
+
+    overdue = is_overdue(pause.get("until"), date.today())
+    summary = pause_summary(slug, pause, _queued_op_count(slug), overdue)
+    waiting = f"{open_count} task(s) open" if open_count else "no tasks open"
+    return (
+        f"[Memory MCP] asoode: {summary} {waiting}. Keep working the local list "
+        f"one task at a time - memory_task_start, comment as you go, then "
+        f"memory_task_done or update(state=paused|blocked); each stops the clock. "
+        f"Never leave a task clocking. Do not push, import or resume sync unless "
+        f"the user asks."
+    )
+
+
+def _sync_pause(slug: str) -> dict | None:
+    try:
+        from memory_mcp.db.registry import get_sync_pause
+
+        return get_sync_pause(slug)
+    except Exception:  # noqa: BLE001 - a hook must never fail a turn
+        return None
+
+
+def _queued_op_count(slug: str) -> int:
+    try:
+        return container.outbox_repo.depth(slug)
+    except Exception:  # noqa: BLE001 - a hook must never fail a turn
+        return 0
 
 
 def asoode_intro(slug: str) -> str:
@@ -68,6 +112,10 @@ def asoode_intro(slug: str) -> str:
     if link is not None:
         board = _board_url(link)
         open_count = _queued_task_count(slug)
+        paused = _paused_line(slug, open_count)
+        if paused:
+            # Same words as the per-turn line, minus its prefix.
+            return " " + paused.removeprefix("[Memory MCP] asoode: ")
         return (
             f" This project is bound to an asoode board ({board}) and that board is "
             f"its work queue: {open_count} task(s) open. Take the highest-priority "
@@ -1352,6 +1400,19 @@ _TASK_TEXT_LINE = (
     "What you write renders on the board and is read by the next agent."
 )
 
+#: Product-level, same reach as _TASK_TEXT_LINE (2026-11-20, set by the user):
+#: notes and documents read as machine-written - stock openers, filler, and
+#: casual group address such as "hello friends" - which is not professional.
+_WRITING_STYLE_LINE = (
+    "WRITE LIKE A PERSON, POLITELY: every note, document, comment, task text "
+    "and README is courteous and professional, and reads as written by a "
+    "colleague, not generated - plain words, varied sentences, no stock AI "
+    "phrasing (\"delve\", \"leverage\", \"I hope this helps\", \"great "
+    "question\"), no filler or hype, no emoji. Never address readers as "
+    "friends, guys, folks, buddies or similar - use neutral, inclusive address "
+    "(\"Hello everyone\", not \"Hello friends\"), or none."
+)
+
 
 def format_rules_block(
     slug: str,
@@ -1374,13 +1435,16 @@ def format_rules_block(
     if not mandatory and not forbidden:
         # A bound project still gets its asoode line: the workflow must not
         # depend on the project happening to have rules. Same for the team
-        # line and the task-text line - all three are product-level.
+        # line and the task-text and writing-style lines - all product-level.
         return "\n".join(
-            x for x in (_TASK_TEXT_LINE, asoode, team, update_line()) if x
+            x for x in (
+                _TASK_TEXT_LINE, _WRITING_STYLE_LINE, asoode, team, update_line(),
+            ) if x
         )
     lines = [
         f"[Memory MCP] Binding rules for project '{slug}' — follow every one of these:",
         _TASK_TEXT_LINE,
+        _WRITING_STYLE_LINE,
     ]
     if mandatory:
         lines.append("MANDATORY (must always do):")

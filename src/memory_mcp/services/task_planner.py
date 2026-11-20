@@ -322,6 +322,12 @@ class TaskPlanner:
         except Exception as e:  # noqa: BLE001
             result["mirror_error"] = f"{type(e).__name__}: {e}"
             return
+        if flushed.get("paused"):
+            # Sync is paused for the project: the rows wait in the queue and
+            # go out on resume. Not an error, just not mirrored yet.
+            result["mirrored"] = False
+            result["mirror_paused"] = True
+            return
         result["mirrored"] = True
         result["mirror_counts"] = {
             "flushed": flushed.get("flushed", 0),

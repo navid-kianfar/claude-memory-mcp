@@ -1,5 +1,7 @@
 import type {
   AsoodeStatus,
+  AsoodeSyncState,
+  PauseSyncInput,
   BoardRef,
   ProjectLink,
   ProjectLinkUpdate,
@@ -735,6 +737,29 @@ export const api = {
 
   pushProject(slug: string): Promise<Record<string, unknown>> {
     return request(`/api/projects/${encodeURIComponent(slug)}/asoode/push`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  },
+
+  /** The project's board sync: paused or not, the queue behind it, and the
+      latest resume's drain. Poll it while `drain.state` is "running". */
+  getSyncState(slug: string): Promise<AsoodeSyncState> {
+    return request(`/api/projects/${encodeURIComponent(slug)}/asoode/sync`);
+  },
+
+  /** Pause board sync. Pausing again updates until/reason and keeps `since`.
+      400 for an unlinked project, a past or malformed date, or a long reason. */
+  pauseSync(slug: string, input: PauseSyncInput): Promise<AsoodeSyncState> {
+    return request(`/api/projects/${encodeURIComponent(slug)}/asoode/pause`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** Lift the pause and send what was queued, in one drain on the server. */
+  resumeSync(slug: string): Promise<AsoodeSyncState> {
+    return request(`/api/projects/${encodeURIComponent(slug)}/asoode/resume`, {
       method: "POST",
       body: JSON.stringify({}),
     });

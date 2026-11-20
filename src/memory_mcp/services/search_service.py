@@ -3,7 +3,7 @@
 from memory_mcp.config import settings
 from memory_mcp.embeddings import embed_text
 from memory_mcp.models import (
-    SearchRequest, SearchResponse, SearchResponseTokenBudgeted, SearchHit,
+    MemoryCategory, SearchRequest, SearchResponse, SearchResponseTokenBudgeted, SearchHit,
 )
 from memory_mcp.repositories import MemoryRepository
 from memory_mcp.utils.extraction import estimate_tokens
@@ -20,8 +20,13 @@ class SearchService:
         query_embedding = embed_text(request.query)
         oversample = request.limit * settings.search_oversample
 
+        # Asking for the staging category is asking for staging notes.
+        include_staging = (
+            request.include_staging or request.category == MemoryCategory.STAGING
+        )
         raw = self._memory_repo.vector_search(
             request.project, query_embedding, request.status, oversample,
+            include_staging=include_staging,
         )
 
         # Post-filter and score

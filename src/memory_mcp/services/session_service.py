@@ -42,9 +42,15 @@ class SessionService:
         # which case a session behaves exactly as it always has.
         self._task_bridge = task_bridge
 
-    def start(self, project: str, agent: str | None = None) -> SessionContext:
+    def start(
+        self, project: str, agent: str | None = None, cwd: str | None = None,
+    ) -> SessionContext:
         """Open a session. `agent` is the dispatched agent's type; the lead passes
-        nothing, which is what makes `is_lead_session` answerable at all."""
+        nothing, which is what makes `is_lead_session` answerable at all.
+
+        `cwd` is the folder the session runs in. It is stored so a task state
+        change can be marked with the branch of the worktree it came from - see
+        SyncService.stamp_task_branch."""
         session_id = str(uuid.uuid4())
 
         # Auto-close orphans. Bookkeeping only: a session with no ended_at may
@@ -78,7 +84,10 @@ class SessionService:
 
         self._session_repo.insert(
             project, session_id,
-            metadata={"agent": agent, "mcp_session": current_session_id()},
+            metadata={
+                "agent": agent, "mcp_session": current_session_id(),
+                **({"cwd": cwd} if cwd else {}),
+            },
         )
         self._project_repo.touch(project)
 

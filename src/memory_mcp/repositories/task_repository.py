@@ -26,7 +26,7 @@ TASK_COLUMNS = (
     "id, title, description, state, priority, assignee, labels, due_at, "
     "begin_at, end_at, estimated_minutes, parent_id, position, source, triage, "
     "claimed_by, claimed_at, lease_expires_at, "
-    "created_at, updated_at, done_at, archived_at, link_id, role"
+    "created_at, updated_at, done_at, archived_at, link_id, role, branch"
 )
 
 # A claim is free if nobody holds it, or if the holder's lease has run out. The
@@ -107,6 +107,7 @@ def _row_to_task(row) -> Task:
         archived_at=row[21],
         link_id=row[22],
         role=row[23],
+        branch=row[24],
     )
 
 
@@ -828,6 +829,83 @@ class TaskRepository:
         except Exception:  # noqa: BLE001 - table absent on an old schema
             return False
         return row is not None
+
+    # ---------- worktree branch marks (v21) ----------
+    #
+    # Every linked worktree writes into this one store, so a task finished on a
+    # branch that is not merged yet would read as plainly done on main. These
+    # record which branch set a task's state, and the folder -> branch registry
+    # the Claude-side CLI reports (the daemon cannot run git in a TCC-protected
+    # folder). None of them touches `updated_at`: a mark is bookkeeping about
+    # where a change came from, not a change to the task, and the board bridge
+    # reads `updated_at` as "the task changed here".
+
+    def set_branch(self, project: str, task_id: str, branch: str | None) -> None:
+        """Mark (or, with None, unmark) the branch a task's state was set on."""
+        with connect(project) as conn:
+            conn.execute(
+                "UPDATE tasks SET branch = ? WHERE id = ?", [branch, task_id],
+            )
+
+    def branch_marked(self, project: str, limit: int) -> tuple[Task, ...]:
+        """Live tasks whose state was set on a still-unmerged branch."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {TASK_COLUMNS} FROM tasks
+                WHERE branch IS NOT NULL AND archived_at IS NULL
+                ORDER BY branch, updated_at DESC
+                LIMIT ?
+                """,
+                [limit],
+            ).fetchall()
+        return tuple(_row_to_task(row) for row in rows)
+
+    def clear_branches(self, project: str, branches: Sequence[str]) -> int:
+        """Unmark every task set on one of `branches` - one set-based UPDATE.
+
+        Called once those branches are merged: from then on the state they
+        carry is main's state too.
+        """
+        if not branches:
+            return 0
+        placeholders = ", ".join("?" for _ in branches)
+        with connect(project) as conn:
+            row = conn.execute(
+                f"UPDATE tasks SET branch = NULL WHERE branch IN ({placeholders})",
+                list(branches),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def register_worktree(self, project: str, path: str, branch: str) -> None:
+        """Record that the worktree at `path` has `branch` checked out.
+
+        Delete + insert in one transaction rather than an upsert: the table
+        carries no key to conflict on, by design (see the DDL).
+        """
+        with transaction(project) as conn:
+            conn.execute("DELETE FROM worktrees WHERE path = ?", [path])
+            conn.execute(
+                "INSERT INTO worktrees (path, branch) VALUES (?, ?)", [path, branch],
+            )
+
+    def worktree_branch(self, project: str, folder: str) -> str | None:
+        """The branch of the registered worktree containing `folder`, if any.
+
+        The longest registered path wins, so a worktree nested inside another
+        folder that is itself registered still resolves to its own branch.
+        """
+        with connect(project) as conn:
+            row = conn.execute(
+                """
+                SELECT branch FROM worktrees
+                WHERE path = ? OR starts_with(?, path || '/')
+                ORDER BY length(path) DESC
+                LIMIT 1
+                """,
+                [folder, folder],
+            ).fetchone()
+        return row[0] if row else None
 
     # ---------- retry detection ----------
     #

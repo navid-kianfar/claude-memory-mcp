@@ -2,7 +2,7 @@
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from memory_mcp.config import settings
 from memory_mcp.context import current_user
@@ -12,12 +12,21 @@ from memory_mcp.exceptions import (
 )
 from memory_mcp.models import (
     GLOBAL_PROJECT_SLUG, Memory, MemoryCategory, RULE_CATEGORIES,
-    StoreMemoryRequest, UpdateMemoryRequest, is_global_project,
+    STAGING_TASK_KEY, STAGING_TTL_DAYS, StoreMemoryRequest, UpdateMemoryRequest,
+    is_global_project,
 )
 from memory_mcp.repositories import MemoryRepository, ProjectRepository, ProvenanceRepository
 from memory_mcp.services.rules_service import RulesService
 from memory_mcp.utils.extraction import calculate_expiry, extract_entities, generate_summary
 from memory_mcp.utils.text import prepare_embedding_text
+
+
+def staging_expiry(metadata: dict | None) -> datetime | None:
+    """When a staging memory expires: never while it belongs to a task (the
+    task's close folds and removes it), a week from now when it has none."""
+    if (metadata or {}).get(STAGING_TASK_KEY):
+        return None
+    return datetime.now(timezone.utc) + timedelta(days=STAGING_TTL_DAYS)
 
 
 class MemoryService:
@@ -73,7 +82,10 @@ class MemoryService:
 
         summary = generate_summary(request.title, request.content)
         entities = extract_entities(f"{request.title} {request.content}")
-        expires_at = calculate_expiry(request.category.value, priority)
+        if request.category == MemoryCategory.STAGING:
+            expires_at = staging_expiry(request.metadata)
+        else:
+            expires_at = calculate_expiry(request.category.value, priority)
         embedding = embed_text(prepare_embedding_text(request.title, request.content))
         memory_id = str(uuid.uuid4())
 
@@ -115,7 +127,13 @@ class MemoryService:
 
     # ---------- Recall ----------
 
-    def recall(self, project: str, memory_id: str | None, title: str | None) -> Memory:
+    def recall(
+        self, project: str, memory_id: str | None, title: str | None,
+        include_staging: bool = False,
+    ) -> Memory:
+        """By id, any memory. By title, staging notes only when asked for: a
+        working note that happens to share a title must not answer for the
+        decision the caller meant."""
         if not memory_id and not title:
             raise ValueError("Provide either memory_id or title")
 
@@ -123,7 +141,9 @@ class MemoryService:
         if memory_id:
             memory = self._memory_repo.get_by_id(project, memory_id)
         else:
-            memory = self._memory_repo.get_by_title(project, title)
+            memory = self._memory_repo.get_by_title(
+                project, title, include_staging=include_staging,
+            )
 
         if memory is None:
             raise MemoryNotFoundError(f"Memory not found: id={memory_id}, title={title}")
@@ -150,6 +170,9 @@ class MemoryService:
             fields["tags"] = request.tags; changed_fields.append("tags")
         if request.metadata is not None:
             fields["metadata"] = json.dumps(request.metadata); changed_fields.append("metadata")
+            # Moving a staging note onto (or off) a task changes how long it lives.
+            if existing.category == MemoryCategory.STAGING:
+                fields["expires_at"] = staging_expiry(request.metadata)
         if request.status is not None:
             fields["status"] = request.status; changed_fields.append("status")
         if request.priority is not None:

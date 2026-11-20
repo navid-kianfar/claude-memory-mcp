@@ -132,6 +132,13 @@ def edited_paths(request) -> tuple[str, ...]:
     return tuple(dict.fromkeys(v.strip() for v in values if v and v.strip()))
 
 
+def new_paths(request) -> frozenset[str]:
+    """The paths the hook found not to exist yet (`new_file`). Only the hook can
+    tell: it runs on the machine the file is on, and the daemon may not."""
+    values = request.query_params.getlist("new_file")
+    return frozenset(v.strip() for v in values if v and v.strip())
+
+
 def identity_from_body(body: dict) -> HookIdentity:
     """Parse the identity a POST hook (claim, dispatch) forwarded."""
     return _identity(body or {}, lambda b, k: b.get(k) or "")
@@ -390,16 +397,21 @@ async def _hook_gate(request):
 
     It is also the edit ledger. Every Edit/Write already comes through here, so
     recording the path costs no extra round trip and needs no second hook.
+
+    And it carries the markdown nudge: a write that parks working state in a
+    `.md` file or CLAUDE.md gets `nudge`, a line pointing at memory_stage that
+    the script adds to the model's context. A nudge never changes `allow`.
     """
     if not _hook_authorized(request):
         return JSONResponse({"allow": True, "reason": "unauthorized - failing open"})
     identity = identity_from_query(request)
     cwd = identity.cwd
     paths = edited_paths(request)
+    created = new_paths(request)
 
     def _decide() -> dict:
         from memory_mcp.context import detect_project_from_cwd
-        from memory_mcp.db.registry import get_project_links
+        from memory_mcp.enforcement import markdown_nudge
 
         slug = detect_project_from_cwd(cwd)
         _seen(identity, slug)
@@ -421,44 +433,64 @@ async def _hook_gate(request):
         # track, and blocking it blocked every scratchpad write of every agent
         # this gate was installed to help. A multi-file patch is exempt only
         # when EVERY file it touches is outside.
-        if paths and all(_outside_project_root(slug, path) for path in paths):
+        inside = tuple(path for path in paths if not _outside_project_root(slug, path))
+        if paths and not inside:
             return {"allow": True, "reason": "outside the project root"}
-        if not get_project_links(slug):
-            return {"allow": True, "reason": "project is not bound to a board"}
-        # Sub-tasks included. Without them a started sub-task left the gate shut,
-        # and the way through was to start its PARENT - whose clock then held
-        # the sub-task's work, the misattribution the clock exists to avoid.
-        open_tasks = container.task_service.list_tasks(
-            slug, TaskFilter(state=TaskState.IN_PROGRESS, include_subtasks=True), limit=1,
-        ).tasks
-        if open_tasks:
-            return {
-                "allow": True,
-                "reason": f"working: {open_tasks[0].title}",
-                "task_id": open_tasks[0].id,
-            }
-        return {
-            "allow": False,
-            "slug": slug,
-            "reason": (
-                f"No task is in progress for '{slug}', and this project's board "
-                "is its work queue.\n\n"
-                "Put the work on the board BEFORE doing it, so it is tracked and "
-                "time is recorded:\n"
-                "  - several deliverables -> memory_task_plan(request=..., tasks=[...])\n"
-                "  - one deliverable      -> memory_task_add(...) then "
-                "memory_task_start(task_id)\n"
-                "  - already on the board -> memory_task_start(task_id)\n\n"
-                "Then make this edit again. Set MEMORY_MCP_NO_GATE=1 to switch "
-                "this off."
-            ),
-        }
+        return _with_nudge(_task_gate(slug), markdown_nudge(inside, created))
 
     try:
         answer = await to_thread.run_sync(_decide)
     except Exception as e:  # noqa: BLE001 - a gate that errors must not block work
         answer = {"allow": True, "reason": f"gate error, failing open: {e}"}
     return JSONResponse(answer)
+
+
+def _with_nudge(answer: dict, nudge: str | None) -> dict:
+    """Add the markdown nudge to a gate answer without changing its verdict.
+
+    On a deny the script prints only the reason, so the nudge rides there too.
+    """
+    if not nudge:
+        return answer
+    if answer.get("allow", True):
+        return {**answer, "nudge": nudge}
+    return {**answer, "nudge": nudge, "reason": f"{answer['reason']}\n\n{nudge}"}
+
+
+def _task_gate(slug: str) -> dict:
+    """The require-a-task verdict for a write inside a memory project."""
+    from memory_mcp.db.registry import get_project_links
+
+    if not get_project_links(slug):
+        return {"allow": True, "reason": "project is not bound to a board"}
+    # Sub-tasks included. Without them a started sub-task left the gate shut,
+    # and the way through was to start its PARENT - whose clock then held
+    # the sub-task's work, the misattribution the clock exists to avoid.
+    open_tasks = container.task_service.list_tasks(
+        slug, TaskFilter(state=TaskState.IN_PROGRESS, include_subtasks=True), limit=1,
+    ).tasks
+    if open_tasks:
+        return {
+            "allow": True,
+            "reason": f"working: {open_tasks[0].title}",
+            "task_id": open_tasks[0].id,
+        }
+    return {
+        "allow": False,
+        "slug": slug,
+        "reason": (
+            f"No task is in progress for '{slug}', and this project's board "
+            "is its work queue.\n\n"
+            "Put the work on the board BEFORE doing it, so it is tracked and "
+            "time is recorded:\n"
+            "  - several deliverables -> memory_task_plan(request=..., tasks=[...])\n"
+            "  - one deliverable      -> memory_task_add(...) then "
+            "memory_task_start(task_id)\n"
+            "  - already on the board -> memory_task_start(task_id)\n\n"
+            "Then make this edit again. Set MEMORY_MCP_NO_GATE=1 to switch "
+            "this off."
+        ),
+    }
 
 
 def _outside_project_root(slug: str, file_path: str) -> bool:

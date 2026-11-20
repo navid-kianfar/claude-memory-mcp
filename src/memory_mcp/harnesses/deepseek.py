@@ -330,6 +330,9 @@ class DeepSeekHarness:
         # role brief rides in the dispatch prompt instead.
         return HarnessCapabilities(
             hooks=True, agents=False, per_turn_line=True, edit_gate=True,
+            # The bridge runs require-task.sh on edit|write|apply_patch; the
+            # nudge is its Claude-format additionalContext.
+            markdown_nudge=True,
         )
 
     # ---------- MCP ----------

@@ -6,6 +6,15 @@ folder I/O and talks to the daemon over HTTP for the database work:
 
   export: GET the snapshot from the daemon, write <project>/.agent-memory/
   import: read <project>/.agent-memory/, POST it to the daemon to reconcile
+  review: list, show, apply or decline a pending memory merge review
+
+ONLY THE MAIN CHECKOUT TOUCHES THE SNAPSHOT. Every linked worktree writes into
+the same central store, which is the record. A worktree's own
+`.agent-memory/` is whatever its branch carried when it was cut - importing it
+fed stale rows back in - and its exports used to rewrite the MAIN checkout's
+snapshot, mid-merge or not, racing every other worktree for the same file.
+From a worktree both commands now only report its branch to the daemon, so
+task changes made there are marked with it until it is merged (task 463f7785).
 
 The snapshot is ``.agent-memory/memory.duckdb`` (see ``db/snapshot.py``) beside
 a small ``manifest.json``. It used to be one JSON file per category; a folder
@@ -23,7 +32,9 @@ nothing in this module ever touches the daemon's copy directly.
 
 import argparse
 import json
+import shlex
 import subprocess
+import sys
 import traceback
 import urllib.request
 from datetime import datetime, timezone
@@ -40,14 +51,23 @@ from memory_mcp.constants import (
     SNAPSHOT_SCHEMA_VERSION,
     SYNC_CATEGORIES,
 )
+from memory_mcp import merge_review
 from memory_mcp.db.snapshot import (
     SnapshotError,
     SnapshotVersionError,
     read_snapshot,
     snapshot_db_path,
+    snapshot_lock,
     write_snapshot,
 )
 from memory_mcp.repositories import ProjectRepository
+from memory_mcp.services.project_service import (
+    BRANCH_MERGED,
+    BRANCH_MISSING,
+    branch_merge_status,
+    current_branch,
+    linked_worktree_root,
+)
 
 _MANIFEST = MANIFEST_NAME
 
@@ -76,6 +96,9 @@ _SNAPSHOT_GITIGNORE = (
     ".*.tmp.wal\n"
     "*.duckdb.wal\n"
 )
+
+#: How many of a branch's marked tasks the session-start notice names.
+_MARKED_TASKS_SHOWN = 5
 
 
 def _daemon(path: str, method: str = "GET", payload: dict | None = None) -> dict:
@@ -403,38 +426,65 @@ def _migrate_before_claim(cwd: str) -> None:
         print(f"[Memory MCP] Renamed {LEGACY_SNAPSHOT_DIRNAME}/ to {SNAPSHOT_DIRNAME}/.")
 
 
+def _register_worktree(worktree: Path, slug: str) -> None:
+    """Tell the daemon which branch this linked worktree has checked out.
+
+    A detached HEAD has no name to follow into a merge, so it is not
+    registered, and changes made there are not marked. An older daemon without
+    the route costs nothing but the mark.
+    """
+    branch = current_branch(worktree)
+    if not branch:
+        return
+    try:
+        _daemon(
+            f"/api/projects/{slug}/worktrees", "POST",
+            {"path": str(worktree), "branch": branch},
+        )
+    except (OSError, ValueError):  # URLError/HTTPError are OSErrors; bad JSON
+        _log_failure("register-worktree", str(worktree))
+
+
 def _export(cwd: str) -> None:
+    worktree = linked_worktree_root(Path(cwd).resolve())
+    if worktree is not None:
+        slug = _claim(cwd)
+        if slug:
+            _register_worktree(worktree, slug)
+        return
     _migrate_before_claim(cwd)
     slug = _claim(cwd)
     if not slug:
         return
     project = ProjectRepository().get(slug)
-    payload = _daemon(f"/api/projects/{slug}/sync-export")
-    categories = payload.get("categories") or {}
-    provenance = payload.get("provenance") or []
-    tombstones = payload.get("tombstones") or []
-
     snap = _snapshot_dir(cwd, slug)
-    snap.mkdir(parents=True, exist_ok=True)
     db_path = snapshot_db_path(snap)
 
-    legacy, parse_failed = _read_legacy_json(snap)
-    tombstoned = {t["memory_id"] for t in tombstones if t.get("memory_id")}
-    if legacy:
-        categories = _merge_legacy_into(categories, legacy, tombstoned)
+    # The lock spans the read from the daemon as well as the write: two
+    # exports interleaving could otherwise land an older read over a newer one.
+    with snapshot_lock(snap):
+        payload = _daemon(f"/api/projects/{slug}/sync-export")
+        categories = payload.get("categories") or {}
+        provenance = payload.get("provenance") or []
+        tombstones = payload.get("tombstones") or []
 
-    counts = write_snapshot(
-        db_path,
-        project_id=project.project_uid if project else None,
-        slug=slug,
-        categories=categories,
-        provenance=provenance,
-        tombstones=tombstones,
-    )
-    _write_manifest(snap, project.project_uid if project else None, slug, categories,
-                    payload.get("links"))
-    _write_sidecars(snap)
-    _retire_legacy_json(snap, db_path, parse_failed)
+        legacy, parse_failed = _read_legacy_json(snap)
+        tombstoned = {t["memory_id"] for t in tombstones if t.get("memory_id")}
+        if legacy:
+            categories = _merge_legacy_into(categories, legacy, tombstoned)
+
+        counts = write_snapshot(
+            db_path,
+            project_id=project.project_uid if project else None,
+            slug=slug,
+            categories=categories,
+            provenance=provenance,
+            tombstones=tombstones,
+        )
+        _write_manifest(snap, project.project_uid if project else None, slug,
+                        categories, payload.get("links"))
+        _write_sidecars(snap)
+        _retire_legacy_json(snap, db_path, parse_failed)
 
     print(
         f"[Memory MCP] Exported {counts['memories']} memories "
@@ -445,11 +495,29 @@ def _export(cwd: str) -> None:
 
 
 def _import(cwd: str) -> None:
+    worktree = linked_worktree_root(Path(cwd).resolve())
+    if worktree is not None:
+        # Nothing is read from the worktree's snapshot: the central store is
+        # the record, and that file is as old as the branch.
+        slug = _claim(cwd)
+        if slug:
+            _register_worktree(worktree, slug)
+        return
     _migrate_before_claim(cwd)
     slug = _claim(cwd)
     if not slug:
         return
     snap = _snapshot_dir(cwd, slug)
+    try:
+        _import_snapshot(slug, snap)
+    finally:
+        # Both run whether or not there was a snapshot to import: a merge
+        # review and a branch mark are about this project, not about the file.
+        _announce_reviews(slug)
+        _reconcile_branches(slug, snap.parent)
+
+
+def _import_snapshot(slug: str, snap: Path) -> None:
     db_path = snapshot_db_path(snap)
     has_db = db_path.is_file()
     if not has_db and not (snap / _MANIFEST).is_file():
@@ -488,14 +556,28 @@ def _import(cwd: str) -> None:
     else:
         categories, parse_failed = _read_legacy_json(snap)
 
+    # Only what is POSTED is held back. The JSON migration below still writes
+    # every row it read, so its verify-before-delete check sees them all.
+    to_apply, tombs_to_apply, held = _hold_back_reviewed(slug, categories, tombstones)
+    if held:
+        print(
+            f"[Memory MCP] {held} memory change(s) from a merge are held back "
+            f"until the merge review is settled."
+        )
+
     reconcile = [c for c in SYNC_CATEGORIES if c not in parse_failed]
     result = _daemon(
         f"/api/projects/{slug}/sync-import", "POST",
         {
-            "categories": categories, "reconcile": reconcile,
-            "provenance": provenance, "tombstones": tombstones,
+            "categories": to_apply, "reconcile": reconcile,
+            "provenance": provenance, "tombstones": tombs_to_apply,
         },
     )
+    if result.get("kept_deleted"):
+        print(
+            f"[Memory MCP] {result['kept_deleted']} memories deleted here are in "
+            f"an older snapshot and were not brought back."
+        )
     added = result.get("added", 0)
     updated = result.get("updated", 0)
     removed = result.get("tombstoned", 0)
@@ -518,6 +600,205 @@ def _import(cwd: str) -> None:
             "[Memory MCP] Skipped unparseable snapshot files (resolve git "
             f"conflicts): {', '.join(parse_failed)}"
         )
+
+
+def _project_uid(slug: str) -> str | None:
+    project = ProjectRepository().get(slug)
+    return project.project_uid if project else None
+
+
+def _hold_back_reviewed(
+    slug: str, categories: dict, tombstones: list,
+) -> tuple[dict, list, int]:
+    """Drop the row and tombstone versions a merge review still holds.
+
+    The merge driver unioned them into the committed snapshot so nothing was
+    lost; whether they reach this project's memory is the reviewing session's
+    call, made with `sync review apply|reject`.
+    """
+    rows_held, tombs_held = merge_review.held_versions(_project_uid(slug), slug)
+    if not rows_held and not tombs_held:
+        return categories, tombstones, 0
+    held = 0
+    kept_categories: dict[str, list] = {}
+    for category, items in categories.items():
+        kept: list = []
+        for mem in items:
+            if isinstance(mem, dict):
+                key = (mem.get("id"), merge_review.version_key(mem.get("updated_at")))
+                if key in rows_held:
+                    held += 1
+                    continue
+            kept.append(mem)
+        kept_categories[category] = kept
+    kept_tombstones: list = []
+    for tomb in tombstones:
+        key = (tomb.get("memory_id"), merge_review.version_key(tomb.get("deleted_at")))
+        if key in tombs_held:
+            held += 1
+            continue
+        kept_tombstones.append(tomb)
+    return kept_categories, kept_tombstones, held
+
+
+def _cli_command() -> str:
+    """How to call this program again, for the commands a notice suggests.
+
+    The hooks run the installed binary by full path, and `memory-mcp` is not
+    always on PATH, so the path this process was started with is the safe one.
+    """
+    invoked = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
+    if invoked is not None and invoked.name.startswith("memory-mcp") and invoked.is_file():
+        return shlex.quote(str(invoked.resolve()))
+    return "memory-mcp"
+
+
+def _announce_reviews(slug: str) -> None:
+    """Name every pending merge review at session start, with its commands."""
+    merge_review.prune()
+    command = _cli_command()
+    for record in merge_review.pending(_project_uid(slug), slug):
+        print(merge_review.describe(record, command))
+
+
+def _reconcile_branches(slug: str, repo: Path) -> None:
+    """Unmark branches git now sees as merged; name the ones still unmerged.
+
+    Runs in the main checkout, where "merged" means "reachable from HEAD". A
+    branch that no longer exists keeps its mark: it was squash-merged and
+    deleted, or abandoned, and only a person can say which.
+    """
+    try:
+        marks = _daemon(f"/api/projects/{slug}/branch-marks")
+    except (OSError, ValueError):
+        return
+    groups = [
+        g for g in (marks.get("branches") or [])
+        if isinstance(g, dict) and isinstance(g.get("branch"), str) and g["branch"]
+    ]
+    if not groups:
+        return
+    status = branch_merge_status(repo, tuple(g["branch"] for g in groups))
+    merged = tuple(name for name, state in status.items() if state == BRANCH_MERGED)
+    if merged:
+        try:
+            _daemon(
+                f"/api/projects/{slug}/branch-marks/merged", "POST",
+                {"branches": list(merged)},
+            )
+        except (OSError, ValueError):
+            merged = ()
+    remaining = [g for g in groups if g["branch"] not in merged]
+    if not remaining:
+        return
+    print(
+        "[Memory MCP] These tasks had their state set on a worktree branch that "
+        "is not merged here yet, so on this checkout they are not done:"
+    )
+    for group in remaining:
+        tasks = group.get("tasks") or []
+        shown = "; ".join(
+            f"{t.get('state')}: {t.get('title')} ({str(t.get('id'))[:8]})"
+            for t in tasks[:_MARKED_TASKS_SHOWN]
+        )
+        more = len(tasks) - _MARKED_TASKS_SHOWN
+        extra = f"; and {more} more" if more > 0 else ""
+        gone = (
+            " The branch no longer exists. It was either squash-merged or "
+            "abandoned, so please check before relying on it."
+            if status.get(group["branch"]) == BRANCH_MISSING else ""
+        )
+        print(f"  - {group['branch']}: {shown}{extra}.{gone}")
+    if marks.get("truncated"):
+        print("  (More marked tasks exist than are listed.)")
+
+
+# ---------- `sync review` ----------
+
+
+def _review(cwd: str, action: str, review_id: str | None, skip: list[str]) -> int:
+    """List, show, apply or decline a memory merge review. Returns an exit code.
+
+    Apply posts the held rows to the daemon's sync-import, so the same guards
+    as every import hold: a row only replaces an older one, a tombstone never
+    removes a newer edit, and a central hard delete is not undone by an older
+    row.
+    """
+    slug = _claim(cwd)
+    if not slug:
+        print("[Memory MCP] This folder is not a memory project.", file=sys.stderr)
+        return 1
+    uid = _project_uid(slug)
+    if action == "list":
+        records = merge_review.for_project(uid, slug)
+        if not records:
+            print("[Memory MCP] No memory merge reviews for this project.")
+        for record in records:
+            tally = merge_review.counts(record)
+            print(
+                f"{record.get('id')}  {record.get('status'):<8}  "
+                f"+{tally['added']} ~{tally['changed']} -{tally['removed']} "
+                f"kept-ours {tally['kept_ours']}"
+            )
+        return 0
+
+    if not review_id:
+        print(f"[Memory MCP] `sync review {action}` needs a review id.", file=sys.stderr)
+        return 1
+    try:
+        record = merge_review.load(review_id)
+    except merge_review.ReviewError as e:
+        print(f"[Memory MCP] {e}", file=sys.stderr)
+        return 1
+    if not merge_review.belongs_to(record, uid, slug):
+        # Applying another project's rows here is the one thing that cannot
+        # be undone afterwards.
+        print(
+            f"[Memory MCP] Review {review_id} belongs to a different project; "
+            f"nothing was done.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if action == "show":
+        print(merge_review.render(record), end="")
+        return 0
+    try:
+        if action == "reject":
+            merge_review.resolve(record, merge_review.STATUS_DECLINED)
+            print(
+                f"[Memory MCP] Declined review {review_id}. Its changes stay out "
+                f"of this project's memory."
+            )
+            return 0
+        return _apply_review(slug, record, frozenset(skip))
+    except merge_review.ReviewError as e:
+        print(f"[Memory MCP] {e}", file=sys.stderr)
+        return 1
+
+
+def _apply_review(slug: str, record: dict, skip: frozenset[str]) -> int:
+    if record.get("status") != merge_review.STATUS_PENDING:
+        raise merge_review.ReviewError(
+            f"Review {record.get('id')} is already {record.get('status')}."
+        )
+    categories, tombstones = merge_review.apply_payload(record, skip)
+    result = _daemon(
+        f"/api/projects/{slug}/sync-import", "POST",
+        {
+            "categories": categories, "reconcile": list(categories),
+            "provenance": [], "tombstones": tombstones,
+        },
+    )
+    merge_review.resolve(record, merge_review.STATUS_APPLIED, tuple(sorted(skip)))
+    print(
+        f"[Memory MCP] Applied review {record.get('id')}: "
+        f"{result.get('added', 0)} added, {result.get('updated', 0)} updated, "
+        f"{result.get('tombstoned', 0)} removed"
+        + (f", {len(skip)} skipped" if skip else "")
+        + ". A row the store already holds in a newer version was left as it is."
+    )
+    return 0
 
 
 def _propose_links(slug: str, manifest: dict) -> None:
@@ -565,12 +846,13 @@ def _write_snapshot_from_import(snap: Path, db_path: Path, slug: str,
     _, manifest = _find_manifest(str(snap.parent))
     project = ProjectRepository().get(slug)
     project_id = (project.project_uid if project else None) or manifest.get("project_id")
-    write_snapshot(
-        db_path, project_id=project_id, slug=slug, categories=categories,
-        provenance=provenance, tombstones=tombstones,
-    )
-    _write_manifest(snap, project_id, slug, categories)
-    _write_sidecars(snap)
+    with snapshot_lock(snap):
+        write_snapshot(
+            db_path, project_id=project_id, slug=slug, categories=categories,
+            provenance=provenance, tombstones=tombstones,
+        )
+        _write_manifest(snap, project_id, slug, categories)
+        _write_sidecars(snap)
 
 
 def _log_failure(action: str, cwd: str) -> None:
@@ -593,9 +875,26 @@ def _log_failure(action: str, cwd: str) -> None:
 
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(prog="memory-mcp sync")
-    parser.add_argument("action", choices=["export", "import"])
+    parser.add_argument("action", choices=["export", "import", "review"])
+    parser.add_argument(
+        "review_action", nargs="?", default="list",
+        choices=["list", "show", "apply", "reject"],
+        help="review only: what to do (default: list)",
+    )
+    parser.add_argument("review_id", nargs="?", default=None, help="review only: its id")
+    parser.add_argument(
+        "--skip", action="append", default=[], metavar="MEMORY_ID",
+        help="review apply only: leave this memory out (repeatable)",
+    )
     parser.add_argument("--cwd", default=".", help="project directory")
     args = parser.parse_args(argv)
+    if args.action == "review":
+        # A command a person or a session runs and reads, not a hook: its
+        # failures are printed and reach the exit code.
+        code = _review(args.cwd, args.review_action, args.review_id, args.skip)
+        if code:
+            raise SystemExit(code)
+        return
     try:
         if args.action == "export":
             _export(args.cwd)

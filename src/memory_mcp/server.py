@@ -20,7 +20,8 @@ from memory_mcp.services.adaptation import adaptation_brief
 from memory_mcp.exceptions import MemoryMCPError, MemoryNotFoundError
 from memory_mcp.utils.decomposition import decomposition_hint, format_hint
 from memory_mcp.models import (
-    CreateTaskRequest, MemoryCategory, StoreMemoryRequest, UpdateMemoryRequest,
+    CreateTaskRequest, MemoryCategory, STAGING_DURABLE_KEY, STAGING_TASK_KEY,
+    StoreMemoryRequest, UpdateMemoryRequest,
     SearchRequest, MemoryFilter, Pagination, RULE_CATEGORIES, TaskFilter,
     TaskSource, TaskState, UpdateTaskRequest, rule_category,
 )
@@ -55,6 +56,17 @@ DURING the conversation:
     "active_rules" reminder - keep honoring it.
   - Use memory_search to recall prior context before answering questions about
     past decisions.
+  - WORKING STATE goes to staging, never to files. Progress, plans,
+    intermediate findings and what is left belong in
+    memory_stage(title, content, task_id=<the task you are on>, project=...),
+    not in a new progress/plan/notes .md file and never in CLAUDE.md. A note
+    tied to a task lives until memory_task_done, which folds its durable notes
+    into the task as one comment and removes them; stage durable=False for
+    scratch that should simply vanish. With no task a note expires after 7
+    days. memory_staging_list(task_id) reads them back, memory_update edits
+    one. Staging is left out of memory_search and memory_list unless you pass
+    include_staging=True. Anything that outlives the task still goes to
+    memory_store as a decision or architecture memory.
 
 TASKS are a separate thing from memories: a list of requirements the user has
 parked. memory_session_start returns them as `queued_tasks`.
@@ -1077,7 +1089,11 @@ def memory_store(
     source: str = "assistant",
     related_ids: list[str] | None = None,
 ) -> dict:
-    """Store a new memory with auto-embedding, summary, entity extraction, and TTL."""
+    """Store a new memory with auto-embedding, summary, entity extraction, and TTL.
+
+    category='staging' is working state; prefer memory_stage, which names the
+    task. Here the task comes from metadata.task_id.
+    """
     def _run():
         slug = _resolve(project)
         rb = _remote(slug)
@@ -1085,6 +1101,13 @@ def memory_store(
             return rb.store(slug, category, title, content,
                             tags=tags or [], priority=priority,
                             metadata=metadata, source=source)
+        if MemoryCategory(category) == MemoryCategory.STAGING:
+            staged = _stage(
+                slug, title, content, (metadata or {}).get(STAGING_TASK_KEY),
+                (metadata or {}).get(STAGING_DURABLE_KEY, True) is not False,
+                tags or [], source,
+            )
+            return {"status": "ok", "memory": staged}
         req = StoreMemoryRequest(
             project=slug,
             category=MemoryCategory(category),
@@ -1115,8 +1138,13 @@ def memory_search(
     limit: int = 10,
     min_similarity: float = 0.3,
     token_budget: int | None = None,
+    include_staging: bool = False,
 ) -> dict:
-    """Semantic search with composite relevance scoring."""
+    """Semantic search with composite relevance scoring.
+
+    Staging notes (working state) are left out unless include_staging=True or
+    category='staging'.
+    """
     def _run():
         slug = _resolve(project)
         rb = _remote(slug)
@@ -1132,6 +1160,7 @@ def memory_search(
             limit=limit,
             min_similarity=min_similarity,
             token_budget=token_budget,
+            include_staging=include_staging,
         )
         response = container.search_service.search(req)
         result = response.model_dump(mode="json")
@@ -1147,8 +1176,10 @@ def memory_recall(
     project: str | None = None,
     memory_id: str | None = None,
     title: str | None = None,
+    include_staging: bool = False,
 ) -> dict:
-    """Recall a specific memory by ID or exact title."""
+    """Recall a specific memory by ID or exact title. By title, staging notes
+    answer only with include_staging=True; by ID, any memory does."""
     def _run():
         slug = _resolve(project)
         rb = _remote(slug)
@@ -1156,7 +1187,9 @@ def memory_recall(
             if not memory_id:
                 raise ValueError("Recall by memory_id is required for remote projects")
             return rb.get_memory(slug, memory_id)
-        memory = container.memory_service.recall(slug, memory_id, title)
+        memory = container.memory_service.recall(
+            slug, memory_id, title, include_staging=include_staging,
+        )
         return {"memory": memory.model_dump(mode="json")}
     return _safe(_run)
 
@@ -1224,15 +1257,20 @@ def memory_list(
     sort_order: str = "desc",
     limit: int = 50,
     offset: int = 0,
+    include_staging: bool = False,
 ) -> dict:
-    """List memories with filtering, sorting, and pagination."""
+    """List memories with filtering, sorting, and pagination. Staging notes
+    are left out unless include_staging=True or category='staging'."""
     def _run():
         slug = _resolve(project)
         rb = _remote(slug)
         if rb:
             return rb.list(slug, category=category, status=status,
                            limit=limit, offset=offset)
-        filters = MemoryFilter(status=status, category=category, tags=tags)
+        filters = MemoryFilter(
+            status=status, category=category, tags=tags,
+            include_staging=include_staging,
+        )
         pagination = Pagination(
             limit=limit, offset=offset, sort_by=sort_by, sort_order=sort_order,
         )
@@ -1240,6 +1278,72 @@ def memory_list(
         return {
             "memories": [m.model_dump(mode="json") for m in memories],
             "total": total, "limit": limit, "offset": offset,
+        }
+    return _safe(_run)
+
+
+# ---------- Staging (working state) ----------
+
+
+def _stage(
+    slug: str, title: str, content: str, task_id: str | None, durable: bool,
+    tags: list[str], source: str,
+) -> dict:
+    memory = container.staging_service.stage(
+        slug, title, content, task_id=task_id, durable=durable,
+        tags=tags, source=source,
+    )
+    return memory.model_dump(mode="json", exclude={"embedding"})
+
+
+@mcp.tool()
+def memory_stage(
+    title: str,
+    content: str,
+    project: str | None = None,
+    task_id: str | None = None,
+    durable: bool = True,
+    tags: list[str] | None = None,
+) -> dict:
+    """Keep working state - progress, a plan, findings, what is left - in memory
+    instead of a .md file or CLAUDE.md.
+
+    With task_id (the task you are working), the note lives until that task is
+    done: memory_task_done folds every durable note into the task as ONE
+    comment and removes the notes. durable=False marks scratch that is removed
+    without being folded. Without task_id the note expires after 7 days.
+
+    Staging is left out of memory_search and memory_list by default; read it
+    back with memory_staging_list, edit it with memory_update. A decision that
+    outlives the task belongs in memory_store as well.
+    """
+    def _run():
+        slug = _resolve(project)
+        if _remote(slug):
+            raise ValueError(
+                "Staging is local working state and is not available on a "
+                "remote (org) project yet; comment on the task instead."
+            )
+        memory = _stage(slug, title, content, task_id, durable, tags or [], "assistant")
+        return {"status": "ok", "memory": memory}
+    return _safe(_run)
+
+
+@mcp.tool()
+def memory_staging_list(
+    project: str | None = None,
+    task_id: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """Staging notes: one task's (oldest first), or every live note (newest
+    first) when task_id is omitted. At most 200."""
+    def _run():
+        slug = _resolve(project)
+        notes = container.staging_service.notes(slug, task_id=task_id, limit=limit)
+        return {
+            "notes": [n.model_dump(mode="json", exclude={"embedding"}) for n in notes],
+            "total": len(notes),
+            "task_id": task_id,
         }
     return _safe(_run)
 
@@ -1920,10 +2024,16 @@ def memory_task_list(
 
 @mcp.tool()
 def memory_task_get(task_id: str, project: str | None = None) -> dict:
-    """One task with its comments, time entries, and minutes spent so far."""
+    """One task with its comments, time entries, and minutes spent so far,
+    plus its open staging notes (`staging`), which fold into it when it is done."""
     def _run():
         slug = _resolve(project)
-        return container.task_service.detail(slug, task_id).model_dump(mode="json")
+        answer = container.task_service.detail(slug, task_id).model_dump(mode="json")
+        notes = container.staging_service.notes(slug, task_id=task_id)
+        answer["staging"] = [
+            n.model_dump(mode="json", exclude={"embedding"}) for n in notes
+        ]
+        return answer
     return _safe(_run)
 
 
@@ -2008,6 +2118,8 @@ def memory_task_update(
             "task": task.model_dump(mode="json"),
             "changed": changed,
         }
+        if "state" in changed:
+            _stamp_branch(slug, task.id, session, answer)
         if routing is not None:
             answer["routing"] = routing
         # Finishing a task through update is the other way to finish one, so it
@@ -2065,6 +2177,22 @@ def memory_task_comment(
     return _safe(_run)
 
 
+def _stamp_branch(slug: str, task_id: str, session_id: str | None, answer: dict) -> None:
+    """Mark a task with the unmerged worktree branch its new state came from.
+
+    Every worktree writes into this one store, so without the mark a task done
+    on a branch nobody has merged reads as plainly done on main (user
+    decision, 2026-11-20: visible, marked with its branch). A state set from
+    the main checkout clears the mark. The answer's task is patched in place
+    so the caller sees the mark it just caused.
+    """
+    branch = container.sync_service.stamp_task_branch(slug, task_id, session_id)
+    task = answer.get("task")
+    target = task if isinstance(task, dict) else answer
+    if target.get("id") == task_id:
+        target["branch"] = branch
+
+
 @mcp.tool()
 def memory_task_start(
     task_id: str, session_id: str | None = None, project: str | None = None,
@@ -2090,6 +2218,7 @@ def memory_task_start(
         slug = _resolve(project)
         session = _require_session(session_id)
         answer = container.task_service.start(slug, task_id, session).model_dump(mode="json")
+        _stamp_branch(slug, task_id, session, answer)
         return _with_mirror(answer, slug)
     return _safe(_run)
 
@@ -2133,6 +2262,7 @@ def memory_task_done(
         session = _require_session(session_id)
         detail = container.task_service.done(slug, task_id, note, session)
         dumped = detail.model_dump(mode="json")
+        _stamp_branch(slug, task_id, session, dumped)
         answer = _lead_with_clock_warning(dumped, detail.task.title, detail.time_note)
         return _with_mirror(answer, slug)
     return _safe(_run)
@@ -2353,8 +2483,21 @@ def memory_session_start(
     """
     def _run():
         slug = _resolve_session_project(project, cwd)
-        ctx = container.session_service.start(slug, agent=agent)
+        ctx = container.session_service.start(slug, agent=agent, cwd=cwd)
         answer = ctx.model_dump(mode="json")
+        marks = container.sync_service.branch_marks(slug)
+        if marks["branches"]:
+            # Done on a branch nobody has merged is not done here (user
+            # decision, 2026-11-20). Said once, beside the marked tasks.
+            answer["unmerged_branch_tasks"] = {
+                "note": (
+                    "These tasks had their state set in a worktree whose branch "
+                    "is not merged into the main checkout yet. Treat a 'done' "
+                    "here as done on that branch only. The mark clears when the "
+                    "branch is merged."
+                ),
+                **marks,
+            }
         if agent is None:
             _lead_briefing(answer, slug, cwd)
         return answer

@@ -25,6 +25,12 @@ MEMORY_COLUMN_COUNT = 22
 # the sync snapshot. COALESCE covers rows written before the column existed.
 NOT_PENDING = "NOT COALESCE(pending, FALSE)"
 
+# Staging notes are short-lived working state. Every read that serves recall -
+# search, listing, the digest corpus - leaves them out unless the caller asks.
+# The category value is a constant, not caller input, so it is inlined.
+STAGING_CATEGORY = "staging"
+NOT_STAGING = f"category <> '{STAGING_CATEGORY}'"
+
 
 def _row_to_memory(row, include_embedding: bool = False) -> Memory:
     """Convert a DB row tuple into a Memory domain model."""
@@ -121,10 +127,15 @@ class MemoryRepository:
             ).fetchone()
         return _row_to_memory(row) if row else None
 
-    def get_by_title(self, project: str, title: str, status: str = "active") -> Memory | None:
+    def get_by_title(
+        self, project: str, title: str, status: str = "active",
+        include_staging: bool = False,
+    ) -> Memory | None:
+        staging_clause = "" if include_staging else f" AND {NOT_STAGING}"
         with connect(project) as conn:
             row = conn.execute(
-                f"SELECT {MEMORY_COLUMNS} FROM memories WHERE title = ? AND status = ?",
+                f"SELECT {MEMORY_COLUMNS} FROM memories "
+                f"WHERE title = ? AND status = ?{staging_clause}",
                 [title, status],
             ).fetchone()
         return _row_to_memory(row) if row else None
@@ -230,6 +241,8 @@ class MemoryRepository:
         if filters.category:
             conditions.append("category = ?")
             params.append(filters.category)
+        elif not filters.include_staging:
+            conditions.append(NOT_STAGING)
 
         if filters.tags:
             tag_conditions = ["list_contains(tags, ?)"] * len(filters.tags)
@@ -321,6 +334,9 @@ class MemoryRepository:
         """
         where = ["status = 'active'", NOT_PENDING]
         params: list = []
+        # Working notes are not knowledge to consolidate; they leave with their task.
+        if not categories:
+            where.append(NOT_STAGING)
         if categories:
             where.append(f"category IN ({','.join('?' * len(categories))})")
             params.extend(categories)
@@ -348,12 +364,13 @@ class MemoryRepository:
         """
         with connect(project) as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT a.id, b.id,
                        array_cosine_distance(a.embedding, b.embedding) AS distance
                 FROM memories a JOIN memories b ON a.id < b.id
                 WHERE a.status = 'active' AND b.status = 'active'
                   AND NOT COALESCE(a.pending, FALSE) AND NOT COALESCE(b.pending, FALSE)
+                  AND a.category <> '{STAGING_CATEGORY}' AND b.category <> '{STAGING_CATEGORY}'
                   AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
                   AND array_cosine_distance(a.embedding, b.embedding) <= ?
                 ORDER BY distance
@@ -364,16 +381,22 @@ class MemoryRepository:
         return [(r[0], r[1], float(r[2])) for r in rows]
 
     def vector_search(
-        self, project: str, query_embedding: list[float], status: str, limit: int
+        self, project: str, query_embedding: list[float], status: str, limit: int,
+        include_staging: bool = False,
     ) -> list[tuple[Memory, float]]:
-        """Return list of (memory, cosine_distance) pairs, ordered by distance asc."""
+        """Return list of (memory, cosine_distance) pairs, ordered by distance asc.
+
+        Staging notes are filtered here rather than after scoring, so they never
+        take an oversampled slot a real memory would have filled.
+        """
+        staging_clause = "" if include_staging else f"AND {NOT_STAGING}"
         with connect(project) as conn:
             rows = conn.execute(
                 f"""
                 SELECT {MEMORY_COLUMNS},
                        array_cosine_distance(embedding, ?::FLOAT[384]) AS distance
                 FROM memories
-                WHERE status = ? AND {NOT_PENDING}
+                WHERE status = ? AND {NOT_PENDING} {staging_clause}
                   AND (expires_at IS NULL OR expires_at > current_timestamp)
                 ORDER BY array_cosine_distance(embedding, ?::FLOAT[384])
                 LIMIT ?
@@ -431,6 +454,70 @@ class MemoryRepository:
     def hard_delete(self, project: str, memory_id: str) -> None:
         with connect(project) as conn:
             conn.execute("DELETE FROM memories WHERE id = ?", [memory_id])
+
+    # ---------- Staging ----------
+
+    def staging_for_task(self, project: str, task_id: str, limit: int) -> list[Memory]:
+        """A task's live staging notes, oldest first, at most `limit`."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {MEMORY_COLUMNS} FROM memories
+                WHERE category = '{STAGING_CATEGORY}' AND status = 'active'
+                  AND json_extract_string(metadata, '$.task_id') = ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                [task_id, limit],
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
+    def staging_live(self, project: str, limit: int) -> list[Memory]:
+        """Every unexpired staging note, newest first, at most `limit`."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {MEMORY_COLUMNS} FROM memories
+                WHERE category = '{STAGING_CATEGORY}' AND status = 'active'
+                  AND (expires_at IS NULL OR expires_at > current_timestamp)
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                [limit],
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
+    def delete_staging_for_task(self, project: str, task_id: str) -> int:
+        """Remove every staging row of a task in one statement; returns the count.
+
+        Set-based on purpose: nothing hangs off a memory delete (no ORM hooks,
+        no tombstone - staging never reaches the snapshot), so there is no
+        tracked path to keep.
+        """
+        with connect(project) as conn:
+            row = conn.execute(
+                f"""
+                DELETE FROM memories
+                WHERE category = '{STAGING_CATEGORY}'
+                  AND json_extract_string(metadata, '$.task_id') = ?
+                RETURNING id
+                """,
+                [task_id],
+            ).fetchall()
+        return len(row)
+
+    def purge_expired_staging(self, project: str) -> int:
+        """Remove staging rows past their expiry in one statement."""
+        with connect(project) as conn:
+            rows = conn.execute(
+                f"""
+                DELETE FROM memories
+                WHERE category = '{STAGING_CATEGORY}'
+                  AND expires_at IS NOT NULL AND expires_at <= current_timestamp
+                RETURNING id
+                """
+            ).fetchall()
+        return len(rows)
 
     # ---------- Counts ----------
 

@@ -89,6 +89,11 @@ class ZCodeHarness:
     def capabilities(self) -> HarnessCapabilities:
         return HarnessCapabilities(
             hooks=True, agents=True, per_turn_line=True, edit_gate=True,
+            # Rides require-task.sh's PreToolUse envelope. ZCode accepts the
+            # same envelope for SessionStart and UserPromptSubmit; for
+            # PreToolUse it is unverified, and a rejected one is dropped
+            # silently, never a block.
+            markdown_nudge=True,
         )
 
     # ---------- MCP ----------

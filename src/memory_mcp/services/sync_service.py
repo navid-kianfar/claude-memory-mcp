@@ -13,13 +13,19 @@ unlike the launchd daemon, it can reach project folders on the Desktop - and by
 """
 
 import json
+import threading
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 
+import duckdb
+
 from memory_mcp.constants import SNAPSHOT_DIRNAME, SYNC_CATEGORIES
+from memory_mcp.db.connection import transaction
 from memory_mcp.embeddings import embed_text
-from memory_mcp.models import MemoryCategory
 from memory_mcp.repositories import (
-    MemoryRepository, ProjectRepository, ProvenanceRepository,
+    MemoryRepository, ProjectRepository, ProvenanceRepository, SessionRepository,
+    TaskRepository,
 )
 from memory_mcp.utils.text import prepare_embedding_text
 
@@ -34,6 +40,55 @@ _SYNC_FIELDS = (
     "tags", "metadata", "related_ids", "entities",
     "approval_status", "created_by", "approved_by", "approved_at",
 )
+
+# One import per project at a time. The daemon serves HTTP on a thread pool, and
+# every worktree's SessionStart hook posts an import: two of them planning
+# against the same rows would both insert the same new id. The lock is
+# per-process, which is enough - only the daemon ever writes the central store.
+_IMPORT_LOCKS: dict[str, threading.Lock] = {}
+_IMPORT_LOCKS_GUARD = threading.Lock()
+
+# A write-write conflict with another writer (a memory_store landing on the same
+# row mid-import) aborts the whole transaction, never half of it. One retry
+# re-plans against what that writer committed; a second conflict is reported.
+_CONFLICT_RETRIES = 1
+
+# Upper bound on the branch-mark listing a session-start hook asks for.
+BRANCH_MARK_LIMIT = 200
+# A git ref name is far shorter in practice; this only bounds hostile input.
+_BRANCH_NAME_MAX = 255
+_PATH_MAX = 4096
+
+
+def _import_lock(project: str) -> threading.Lock:
+    with _IMPORT_LOCKS_GUARD:
+        return _IMPORT_LOCKS.setdefault(project, threading.Lock())
+
+
+@dataclass(frozen=True)
+class _ImportPlan:
+    """What an import will do, decided before the write transaction opens.
+
+    Embeddings are computed here, outside the transaction, so it is held only
+    for the writes themselves.
+    """
+
+    inserts: tuple[tuple[dict, list[float]], ...]
+    updates: tuple[tuple[dict, list[float] | None], ...]
+    kept_local: int
+    kept_deleted: int
+
+
+def _clean_text(value: object, limit: int, what: str) -> str:
+    """A request string at the edge: required, bounded, single-line."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{what} is required")
+    text = value.strip()
+    if len(text) > limit:
+        raise ValueError(f"{what} is longer than {limit} characters")
+    if any(ord(ch) < 32 for ch in text):
+        raise ValueError(f"{what} contains control characters")
+    return text
 
 
 def _mem_to_dict(memory) -> dict:
@@ -86,10 +141,14 @@ class SyncService:
         memory_repo: MemoryRepository,
         project_repo: ProjectRepository,
         provenance_repo: ProvenanceRepository | None = None,
+        task_repo: TaskRepository | None = None,
+        session_repo: SessionRepository | None = None,
     ):
         self._memory_repo = memory_repo
         self._project_repo = project_repo
         self._provenance_repo = provenance_repo or ProvenanceRepository()
+        self._task_repo = task_repo or TaskRepository()
+        self._session_repo = session_repo or SessionRepository()
 
     # ---------- export ----------
 
@@ -135,42 +194,115 @@ class SyncService:
         copy is strictly newer, so a stale snapshot also cannot revert a local
         edit.
 
-        An explicit TOMBSTONE is the one exception, and it is a different thing
-        from absence: it is the record of somebody running a hard delete, it
-        names the memory and says when, and without it a hard delete never
-        reaches the other clones - the next machine to export simply puts the
-        memory back. See `_apply_tombstones` for the guard that keeps a newer
-        local edit alive.
+        A STALE SNAPSHOT CANNOT RESURRECT EITHER. A memory this store hard
+        deleted is absent here, and absent used to mean "insert it". It is now
+        inserted only when the snapshot's row is strictly newer than the
+        deletion: that is somebody re-adding it on purpose, and a newer re-add
+        wins. An older row is the snapshot not having heard of the delete yet.
+
+        An explicit TOMBSTONE is the one way a snapshot deletes, and it is a
+        different thing from absence: it is the record of somebody running a
+        hard delete, it names the memory and says when, and without it a hard
+        delete never reaches the other clones. See `_apply_tombstones` for the
+        guard that keeps a newer local edit alive.
+
+        Serialised per project and applied in ONE transaction: several
+        worktrees' SessionStart hooks post imports at once, and two of them
+        planning against the same rows used to insert the same id twice. A
+        failure now leaves the store exactly as it was.
 
         Only categories in `reconcile` are considered - a category whose
         snapshot file failed to parse is skipped entirely.
         """
-        added = updated = kept_local = 0
+        with _import_lock(project):
+            for attempt in range(_CONFLICT_RETRIES + 1):
+                try:
+                    return self._apply_locked(
+                        project, categories, reconcile,
+                        provenance or [], tombstones or [],
+                    )
+                except duckdb.TransactionException:
+                    if attempt == _CONFLICT_RETRIES:
+                        raise
+        raise AssertionError("unreachable")  # the loop returns or raises
+
+    def _apply_locked(
+        self,
+        project: str,
+        categories: dict,
+        reconcile: list[str],
+        provenance: list[dict],
+        tombstones: list[dict],
+    ) -> dict:
+        plan = self._plan(project, categories, reconcile)
+        added = updated = 0
+        with transaction(project):
+            for md, embedding in plan.inserts:
+                # Re-checked inside the transaction: another writer may have
+                # created the row since the plan was made.
+                if self._memory_repo.get_by_id(project, md["id"]) is not None:
+                    continue
+                self._insert(project, md, embedding)
+                added += 1
+            for md, embedding in plan.updates:
+                current = self._memory_repo.get_by_id(project, md["id"])
+                if current is None or not self._differs(md, current):
+                    continue
+                if not self._snapshot_newer(md, current):
+                    continue
+                self._update(project, md, current, embedding)
+                updated += 1
+            result = {
+                "added": added,
+                "updated": updated,
+                "kept_local_only": plan.kept_local,
+                "kept_deleted": plan.kept_deleted,
+            }
+            result.update(self._apply_tombstones(project, tombstones))
+            result["provenance_added"] = self._apply_provenance(project, provenance)
+        return result
+
+    def _plan(self, project: str, categories: dict, reconcile: list[str]) -> _ImportPlan:
+        """Decide every insert and update, and compute their embeddings."""
+        deleted_here = {
+            t["memory_id"]: _parse_dt(t.get("deleted_at"))
+            for t in self._provenance_repo.tombstones(project)
+            if t.get("memory_id")
+        }
+        inserts: list[tuple[dict, list[float]]] = []
+        updates: list[tuple[dict, list[float] | None]] = []
+        kept_local = kept_deleted = 0
         for category in reconcile:
             if category not in SYNC_CATEGORIES:
                 continue
             wanted = {
                 m["id"]: m for m in categories.get(category, []) if m.get("id")
             }
-            current = {
-                m.id: m
-                for m in self._memory_repo.all_for_categories(project, [category])
-            }
+            stored = self._memory_repo.all_for_categories(project, [category])
+            current = {m.id: m for m in stored}
             for mid, md in wanted.items():
-                if mid not in current:
-                    self._insert(project, md)
-                    added += 1
-                elif self._differs(md, current[mid]) and self._snapshot_newer(
-                    md, current[mid]
-                ):
-                    self._update(project, md, current[mid])
-                    updated += 1
+                existing = current.get(mid)
+                if existing is None:
+                    if mid in deleted_here and not _is_newer(
+                        _parse_dt(md.get("updated_at")), deleted_here[mid]
+                    ):
+                        kept_deleted += 1
+                        continue
+                    text = prepare_embedding_text(md["title"], md["content"])
+                    inserts.append((md, embed_text(text)))
+                    continue
+                if not (self._differs(md, existing) and self._snapshot_newer(md, existing)):
+                    continue
+                embedding = None
+                if md["title"] != existing.title or md["content"] != existing.content:
+                    text = prepare_embedding_text(md["title"], md["content"])
+                    embedding = embed_text(text)
+                updates.append((md, embedding))
             kept_local += sum(1 for mid in current if mid not in wanted)
-
-        result = {"added": added, "updated": updated, "kept_local_only": kept_local}
-        result.update(self._apply_tombstones(project, tombstones or []))
-        result["provenance_added"] = self._apply_provenance(project, provenance or [])
-        return result
+        return _ImportPlan(
+            inserts=tuple(inserts), updates=tuple(updates),
+            kept_local=kept_local, kept_deleted=kept_deleted,
+        )
 
     def _apply_tombstones(self, project: str, tombstones: list[dict]) -> dict:
         """Apply hard deletes recorded on another machine.
@@ -254,8 +386,7 @@ class SyncService:
         except Exception:  # noqa: BLE001
             return False
 
-    def _insert(self, project: str, md: dict) -> None:
-        embedding = embed_text(prepare_embedding_text(md["title"], md["content"]))
+    def _insert(self, project: str, md: dict, embedding: list[float]) -> None:
         self._memory_repo.insert(
             project=project,
             memory_id=md["id"],
@@ -276,7 +407,9 @@ class SyncService:
             approval_status=md.get("approval_status") or "approved",
         )
 
-    def _update(self, project: str, md: dict, current) -> None:
+    def _update(
+        self, project: str, md: dict, current, embedding: list[float] | None,
+    ) -> None:
         fields: dict = {
             "title": md["title"],
             "content": md["content"],
@@ -292,8 +425,87 @@ class SyncService:
             "approved_by": md.get("approved_by"),
             "approved_at": _parse_dt(md.get("approved_at")),
         }
-        if md["title"] != current.title or md["content"] != current.content:
-            fields["embedding"] = embed_text(
-                prepare_embedding_text(md["title"], md["content"])
-            )
+        title_or_content_changed = (
+            md["title"] != current.title or md["content"] != current.content
+        )
+        if title_or_content_changed:
+            if embedding is None:
+                text = prepare_embedding_text(md["title"], md["content"])
+                embedding = embed_text(text)
+            fields["embedding"] = embedding
         self._memory_repo.update(project, md["id"], fields)
+
+    # ---------- worktree branch marks ----------
+    #
+    # Every linked worktree writes into this one store. Without a record of
+    # where a change came from, a task finished on an unmerged branch reads as
+    # plainly done on main (the user's decision of 2026-11-20: visible, but
+    # marked with its branch). The daemon cannot run git in a TCC-protected
+    # folder, so the CLI inside each worktree reports its branch
+    # (`register_worktree`) and, from the main checkout, which marked branches
+    # git now sees as merged (`clear_merged_branches`).
+
+    def register_worktree(self, project: str, path: str, branch: str) -> dict:
+        """Record the branch a linked worktree folder has checked out."""
+        clean_path = _clean_text(path, _PATH_MAX, "path")
+        clean_branch = _clean_text(branch, _BRANCH_NAME_MAX, "branch")
+        self._task_repo.register_worktree(project, clean_path, clean_branch)
+        return {"path": clean_path, "branch": clean_branch}
+
+    def branch_for_session(self, project: str, session_id: str | None) -> tuple[bool, str | None]:
+        """(known, branch) for the folder a memory session started in.
+
+        `known` is False when the session recorded no folder - an older build,
+        or a write from the UI - and the caller must then leave a mark alone
+        rather than clear it on a guess. A known folder outside every
+        registered worktree is the main checkout: (True, None).
+        """
+        if not session_id:
+            return False, None
+        meta = self._session_repo.metadata(project, session_id) or {}
+        cwd = meta.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            return False, None
+        return True, self._task_repo.worktree_branch(project, cwd.rstrip("/"))
+
+    def stamp_task_branch(
+        self, project: str, task_id: str, session_id: str | None,
+    ) -> str | None:
+        """Mark a task with the branch of the session that just set its state.
+
+        Call after any state change made on behalf of a memory session. From a
+        registered worktree the task is marked with its branch; from the main
+        checkout the mark is cleared, because main has now decided the state
+        itself. A session with no recorded folder changes nothing. Returns the
+        task's mark after the call.
+        """
+        known, branch = self.branch_for_session(project, session_id)
+        if known:
+            self._task_repo.set_branch(project, task_id, branch)
+            return branch
+        task = self._task_repo.get(project, task_id)
+        return task.branch if task else None
+
+    def branch_marks(self, project: str, limit: int = BRANCH_MARK_LIMIT) -> dict:
+        """Tasks whose state was set on a still-unmerged branch, by branch."""
+        tasks = self._task_repo.branch_marked(project, limit + 1)
+        truncated = len(tasks) > limit
+        by_branch: dict[str, list[dict]] = {}
+        for task in tasks[:limit]:
+            entry = {"id": task.id, "title": task.title, "state": task.state.value}
+            by_branch.setdefault(task.branch or "", []).append(entry)
+        branches = tuple(
+            {"branch": name, "tasks": entries} for name, entries in by_branch.items()
+        )
+        return {"branches": list(branches), "truncated": truncated}
+
+    def clear_merged_branches(self, project: str, branches: Sequence[str]) -> dict:
+        """Drop the marks of branches git reports as merged into main."""
+        if not isinstance(branches, (list, tuple)):
+            raise ValueError("branches must be a list")
+        if len(branches) > BRANCH_MARK_LIMIT:
+            raise ValueError(f"at most {BRANCH_MARK_LIMIT} branches at a time")
+        clean = tuple(
+            _clean_text(name, _BRANCH_NAME_MAX, "branch") for name in branches
+        )
+        return {"cleared": self._task_repo.clear_branches(project, clean)}

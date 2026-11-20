@@ -1066,6 +1066,12 @@ class TestTheRoutes:
 
         assert response.status_code == 400
 
+    def test_a_non_numeric_limit_is_a_plain_400(self, client, project):
+        response = client.get(f"/api/projects/{project}/attachments/inbox?limit=abc")
+
+        assert response.status_code == 400
+        assert "whole numbers" in response.json()["error"]
+
     def test_an_unknown_project_is_a_404(self, client):
         response = client.get("/api/projects/no-such-project/attachments/inbox")
 

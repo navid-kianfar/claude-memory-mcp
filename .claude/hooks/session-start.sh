@@ -1,7 +1,8 @@
 #!/bin/bash
 # SessionStart hook:
-#  1. Import the project's .claude-memory/ snapshot into the central store
-#     (picks up rules/decisions a git pull brought in).
+#  1. Import the project's .agent-memory/ snapshot into the central store
+#     (picks up rules/decisions a git pull brought in). In a linked worktree
+#     this only reports the worktree's branch; the snapshot is main's alone.
 #  2. Nudge Claude to call memory_session_start so rules/context are loaded.
 # Silent when the working directory is not a registered memory project.
 INPUT=$(cat)
@@ -68,11 +69,15 @@ if curl -s -o /dev/null --max-time 3 "${AUTH[@]}" "${BASE}/api/health" 2>/dev/nu
   # auto-register: claiming re-binds a moved or renamed folder to its existing
   # project, and auto-register would otherwise register a duplicate first.
   # Local only: a remote server (MEMORY_MCP_URL set) has no local DB to sync
-  # into. Both calls are silenced: nothing but the envelope below may reach
-  # stdout - a stray line in it fails ZCode's strict output validation and
-  # costs the whole injection.
-  [ -z "$MEMORY_MCP_URL" ] && [ -x "$MEMORY_MCP_BIN" ] && \
-    "$MEMORY_MCP_BIN" sync import --cwd "$CWD" >/dev/null 2>&1
+  # into. Nothing but the envelope below may reach stdout - a stray line in it
+  # fails ZCode's strict output validation and costs the whole injection - so
+  # the import's notes are CAPTURED and go into the context instead: a merge
+  # review waiting for this session, and tasks whose state was set on a
+  # branch not merged here yet, must reach the model (task 463f7785).
+  SYNC_NOTES=""
+  if [ -z "$MEMORY_MCP_URL" ] && [ -x "$MEMORY_MCP_BIN" ]; then
+    SYNC_NOTES=$("$MEMORY_MCP_BIN" sync import --cwd "$CWD" 2>/dev/null)
+  fi
 
   # Register this folder as a project (if it is a git repo and still not
   # known), so it appears in the management UI even before it has any rules.
@@ -81,6 +86,13 @@ if curl -s -o /dev/null --max-time 3 "${AUTH[@]}" "${BASE}/api/health" 2>/dev/nu
 
   CONTEXT=$(curl -s -G --max-time 2 "${AUTH[@]}" "${IDENT[@]}" "${BASE}/api/hook/rules" \
     --data-urlencode "cwd=${CWD}" --data-urlencode "mode=intro" 2>/dev/null)
+  if [ -n "$SYNC_NOTES" ]; then
+    if [ -n "$CONTEXT" ]; then
+      CONTEXT="${SYNC_NOTES}"$'\n\n'"${CONTEXT}"
+    else
+      CONTEXT="$SYNC_NOTES"
+    fi
+  fi
 else
   CONTEXT="[Memory MCP] The memory daemon is not answering at ${BASE}, so its tools are unavailable and nothing this session learns will be stored. Tell the user before recording rules or decisions; restart it with: launchctl kickstart -k gui/\$(id -u)/com.claude-memory-mcp.daemon"
 fi

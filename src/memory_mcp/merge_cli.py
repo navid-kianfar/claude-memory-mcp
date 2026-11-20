@@ -23,15 +23,28 @@ The resolution policy lives in `db.snapshot.merge_snapshots`; this module is the
 git-facing shell around it. The one thing worth repeating here: a row missing
 from one side is NOT a deletion, it is a row that side has not pulled yet. Only
 an explicit tombstone deletes.
+
+THE UNION IS NOT THE DECISION (user decision, 2026-11-20). What the merge would
+change on our side is saved as a merge review before %A is replaced, and
+`sync import` holds those changes back until the session that merged settles
+it with `memory-mcp sync review`. The driver's own output says so, because the
+session that ran `git merge` is the one reading it. A review that cannot be
+saved fails the merge: an unreviewed union is exactly what this replaced.
 """
 
 import argparse
+import shlex
+import subprocess
 import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memory_mcp.db.snapshot import SnapshotError, merge_snapshots
+from memory_mcp import merge_review
+from memory_mcp.db.snapshot import SnapshotError, merge_snapshots, review_is_empty
+
+#: A label lookup that takes longer than this is skipped; labels are cosmetic.
+_LABEL_TIMEOUT_SECONDS = 3
 
 PROG = "memory-mcp merge-snapshot"
 
@@ -56,6 +69,27 @@ def _log_failure(argv, error: Exception) -> None:
         pass
 
 
+def _git_label(*args: str) -> str | None:
+    """Best effort: a branch name for the review's heading, or None."""
+    try:
+        result = subprocess.run(
+            ["git", *args], capture_output=True, text=True,
+            timeout=_LABEL_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    label = result.stdout.strip() if result.returncode == 0 else ""
+    return label or None
+
+
+def _command() -> str:
+    """The command the review notice tells the session to run."""
+    invoked = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
+    if invoked is not None and invoked.name.startswith("memory-mcp") and invoked.is_file():
+        return shlex.quote(str(invoked.resolve()))
+    return "memory-mcp"
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
@@ -70,8 +104,22 @@ def main(argv=None) -> int:
 
     ours = Path(args.ours)
     name = args.pathname or ours.name
+    saved: list[dict] = []
+
+    def _save_review(review: dict) -> None:
+        if review_is_empty(review):
+            return
+        record = merge_review.new_record(
+            review,
+            pathname=args.pathname,
+            ours_label=_git_label("rev-parse", "--abbrev-ref", "HEAD"),
+            theirs_label=_git_label("name-rev", "--name-only", "MERGE_HEAD"),
+        )
+        merge_review.save(record)
+        saved.append(record)
+
     try:
-        summary = merge_snapshots(args.base, ours, args.theirs, ours)
+        summary = merge_snapshots(args.base, ours, args.theirs, ours, on_review=_save_review)
     except SnapshotError as e:
         # A conflict git leaves to a human is the correct outcome here: it is
         # visible and recoverable, which is more than "pick a side" ever is.
@@ -96,6 +144,8 @@ def main(argv=None) -> int:
         f"[Memory MCP] Merged {name}: {summary['memories']} memories, "
         f"{summary['provenance']} provenance rows{detail}."
     )
+    for record in saved:
+        print(merge_review.describe(record, _command()))
     return 0
 
 

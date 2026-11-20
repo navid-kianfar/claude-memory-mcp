@@ -2,7 +2,7 @@
 
 import duckdb
 
-CURRENT_SCHEMA_VERSION = 20
+CURRENT_SCHEMA_VERSION = 21
 
 
 def install_vss(conn: duckdb.DuckDBPyConnection) -> None:
@@ -58,7 +58,11 @@ _TASK_DDL = (
         -- Which linked asoode board this task belongs to. NULL means "the
         -- project's default link" - a monorepo maps one memory project to many
         -- boards, and a task has to be able to say which app it is for.
-        link_id           INTEGER
+        link_id           INTEGER,
+        -- (v21) The git branch of the linked worktree whose session last set
+        -- this task's state, while that branch is unmerged. NULL means the
+        -- state was set on the main checkout, or the branch has been merged.
+        branch            VARCHAR
     )
     """,
     """
@@ -186,6 +190,21 @@ _TASK_DDL = (
         request_hash VARCHAR NOT NULL,
         task_ids     VARCHAR[] NOT NULL,
         created_at   TIMESTAMP DEFAULT current_timestamp
+    )
+    """,
+    # (v21) Which branch each linked worktree of this project has checked out,
+    # as last reported by the CLI running inside it. The daemon cannot run git
+    # in a TCC-protected folder, so the Claude-side process tells it. A task
+    # state change from a session in one of these folders is marked with the
+    # branch - see SyncService.stamp_task_branch.
+    #
+    # No PRIMARY KEY and no index, the task_plans reasoning: a handful of rows,
+    # replaced by delete + insert, and a scan answers every read.
+    """
+    CREATE TABLE IF NOT EXISTS worktrees (
+        path    VARCHAR NOT NULL,
+        branch  VARCHAR NOT NULL,
+        seen_at TIMESTAMP DEFAULT current_timestamp
     )
     """,
 )
@@ -945,6 +964,36 @@ def migrate_v19_to_v20(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (20)")
 
 
+def migrate_v20_to_v21(conn: duckdb.DuckDBPyConnection) -> None:
+    """Migrate v20 -> v21: task state set on an unmerged worktree branch.
+
+    Every worktree writes into this one store, so a task finished on a branch
+    that is not merged yet read as plainly done on main. `tasks.branch` records
+    the branch; the `worktrees` registry is how the daemon learns which branch
+    a worktree folder is on. One is a nullable column and the other a new
+    table, so no existing row changes and an unmigrated reader is unaffected.
+
+    Added here AND to the fresh-create DDL, so the two shapes cannot drift. The
+    ADD COLUMN on `tasks` is the path v7 (link_id) and v12 (role) took.
+
+    Stamped only once both are really there - the v13/v14 rules.
+    """
+    conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS branch VARCHAR")
+    create_task_tables(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info('tasks')").fetchall()}
+    if "branch" not in columns:
+        raise RuntimeError("schema v21: could not add tasks.branch - not stamping")
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    if "worktrees" not in tables:
+        raise RuntimeError("schema v21: could not create worktrees - not stamping")
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (21)")
+
+
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> int:
     """Return the schema version of this DB. A missing table means a legacy v1 DB."""
     try:
@@ -1027,6 +1076,9 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> int:
     if version < 20:
         migrate_v19_to_v20(conn)
         version = 20
+    if version < 21:
+        migrate_v20_to_v21(conn)
+        version = 21
     return version
 
 

@@ -65,7 +65,9 @@ AGENTS_POINTER = (
     "session (the tool list comes from the `memory` MCP server), and\n"
     "`memory_session_end(session_id, summary, project=<slug>)` at the end -\n"
     "`project` is required there. The rules it returns are binding. Store\n"
-    "decisions with `memory_store`.\n"
+    "decisions with `memory_store`. Keep working state - progress, plans,\n"
+    "findings - in `memory_stage(title, content, task_id=<task>)`, never in a\n"
+    "new progress/plan/notes .md file or in CLAUDE.md.\n"
     + AGENTS_POINTER_END
 )
 
@@ -99,6 +101,8 @@ class CodexHarness:
     def capabilities(self) -> HarnessCapabilities:
         return HarnessCapabilities(
             hooks=True, agents=False, per_turn_line=False, edit_gate=False,
+            # No tool hook to carry it; the AGENTS.md pointer says it instead.
+            markdown_nudge=False,
         )
 
     # ---------- MCP ----------

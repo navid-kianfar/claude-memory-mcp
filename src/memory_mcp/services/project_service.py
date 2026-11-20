@@ -1,6 +1,8 @@
 """Project service - initialize and describe projects."""
 
 import os
+import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 from memory_mcp.config import settings
@@ -28,6 +30,113 @@ def is_linked_worktree(folder: Path) -> bool:
         return (folder / ".git").is_file()
     except OSError:
         return False
+
+
+#: How long one git call may take before the caller treats the answer as unknown.
+#: These run inside a SessionStart hook, which has a budget of its own.
+_GIT_TIMEOUT_SECONDS = 5
+
+#: What `branch_merge_status` answers for each branch.
+BRANCH_MERGED = "merged"
+BRANCH_UNMERGED = "unmerged"
+BRANCH_MISSING = "missing"
+BRANCH_UNKNOWN = "unknown"
+
+
+def _git(folder: Path, *args: str) -> subprocess.CompletedProcess | None:
+    """Run git in `folder`; None when git is absent, hangs, or cannot start.
+
+    Arguments go as a list, never through a shell, so a branch name is data.
+    """
+    try:
+        return subprocess.run(
+            ["git", "-C", str(folder), *args],
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def current_branch(folder: Path) -> str | None:
+    """The branch checked out in `folder`, or None on a detached HEAD.
+
+    Run on the Claude side (the CLI), never in the daemon: the daemon cannot
+    read a repository under a TCC-protected folder. A detached HEAD has no
+    name to track a merge by, so it answers None rather than a commit id that
+    would read as "merged" the moment it sits under main.
+    """
+    result = _git(folder, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if result is None or result.returncode != 0:
+        return None
+    name = result.stdout.strip()
+    return name or None
+
+
+def linked_worktree_root(folder: Path) -> Path | None:
+    """The top of the linked worktree containing `folder`, or None for a main
+    checkout (or no repository at all).
+
+    Asked of git first, because a subfolder of a worktree has no `.git` file of
+    its own: a linked worktree is the checkout whose git dir differs from the
+    common dir. `--path-format` needs git 2.31; without an answer the cheap
+    witnesses of `is_linked_worktree` decide, on the folder itself.
+    """
+    result = _git(
+        folder, "rev-parse", "--path-format=absolute",
+        "--show-toplevel", "--git-dir", "--git-common-dir",
+    )
+    if result is not None and result.returncode == 0:
+        lines = result.stdout.strip().splitlines()
+        if len(lines) == 3:
+            top, git_dir, common_dir = (Path(line) for line in lines)
+            return top if git_dir.resolve() != common_dir.resolve() else None
+    return folder if is_linked_worktree(folder) else None
+
+
+def branch_merge_status(repo: Path, branches: Sequence[str]) -> dict[str, str]:
+    """For each branch: merged into `repo`'s HEAD, unmerged, missing, or unknown.
+
+    `missing` means the local branch no longer exists. That is either a
+    squash-merged branch that was deleted, or abandoned work, and git cannot
+    tell which - so the caller keeps the mark and says so rather than guessing.
+
+    A branch with no commit of its own is NOT merged, although git calls it an
+    ancestor of HEAD: a worktree cut from main and not yet committed to sits
+    exactly there, and its finished tasks live only in its uncommitted files.
+    "Its own" is measured from the branch's creation, the oldest entry of its
+    reflog; with no reflog to read the answer is `unknown`, which keeps the
+    mark. The `refs/heads/` prefix keeps a stored name from ever reading as an
+    option.
+    """
+    status: dict[str, str] = {}
+    for branch in branches:
+        ref = f"refs/heads/{branch}"
+        exists = _git(repo, "rev-parse", "--verify", "--quiet", ref)
+        if exists is None:
+            status[branch] = BRANCH_UNKNOWN
+            continue
+        if exists.returncode != 0:
+            status[branch] = BRANCH_MISSING
+            continue
+        tip = exists.stdout.strip()
+        reflog = _git(repo, "reflog", "show", "--format=%H", ref, "--")
+        history = reflog.stdout.split() if reflog is not None and reflog.returncode == 0 else []
+        if not history:
+            status[branch] = BRANCH_UNKNOWN
+            continue
+        if history[-1] == tip:
+            status[branch] = BRANCH_UNMERGED
+            continue
+        ancestor = _git(repo, "merge-base", "--is-ancestor", ref, "HEAD")
+        if ancestor is None:
+            status[branch] = BRANCH_UNKNOWN
+        elif ancestor.returncode == 0:
+            status[branch] = BRANCH_MERGED
+        elif ancestor.returncode == 1:
+            status[branch] = BRANCH_UNMERGED
+        else:
+            status[branch] = BRANCH_UNKNOWN
+    return status
 
 
 def migrate_snapshot_dir(folder: Path) -> str | None:

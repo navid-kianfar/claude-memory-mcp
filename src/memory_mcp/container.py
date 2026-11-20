@@ -20,6 +20,7 @@ from memory_mcp.services import (
     ExportImportService, ModelService, UpdateService, ClaudeMdService,
     TaskService, TemplateService, SyncService, TaskBridge, TaskPlanner,
 )
+from memory_mcp.services.staging_service import StagingService
 from memory_mcp.services.sync_pause import SyncPauseService
 
 
@@ -75,9 +76,15 @@ class Container:
             self.memory_repo, self.digest_repo, self.provenance_repo,
             self.project_repo, self.rules_service, self.memory_service,
         )
+        # Working notes for in-flight tasks; a task's close folds them in.
+        self.staging_service = StagingService(
+            self.memory_service, self.memory_repo, self.task_repo,
+            self.provenance_repo,
+        )
         self.task_service = TaskService(
             self.task_repo, self.provenance_repo, self.project_repo,
             self.session_repo,
+            staging_fold=self.staging_service.fold,
             # Late-bound: the bridge is constructed below and needs task_service,
             # so the resolver is a lambda rather than the object itself.
             link_resolver=lambda project, target: self.task_bridge.resolve_link(

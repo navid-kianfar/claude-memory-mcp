@@ -206,7 +206,8 @@ class ClaudeHarness:
 
     def capabilities(self) -> HarnessCapabilities:
         return HarnessCapabilities(
-            hooks=True, agents=True, per_turn_line=True, edit_gate=True
+            hooks=True, agents=True, per_turn_line=True, edit_gate=True,
+            markdown_nudge=True,
         )
 
     def configure_mcp(

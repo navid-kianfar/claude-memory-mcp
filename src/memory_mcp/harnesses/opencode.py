@@ -149,6 +149,9 @@ class OpenCodeHarness:
     def capabilities(self) -> HarnessCapabilities:
         return HarnessCapabilities(
             hooks=True, agents=False, per_turn_line=False, edit_gate=False,
+            # tool.execute.before can only refuse, not add context, and the
+            # nudge must never refuse. The guidance rides the MCP instructions.
+            markdown_nudge=False,
         )
 
     # ---------- MCP ----------
@@ -263,8 +266,9 @@ class OpenCodeHarness:
             "(session.created -> import+claim, session.idle -> export+update)"
         )
         report.warn(
-            "no per-turn rules line and no edit gate exist in OpenCode; "
-            "rules ride the MCP instructions and memory_session_start"
+            "no per-turn rules line, no edit gate and no markdown nudge exist "
+            "in OpenCode; rules and the staging guidance ride the MCP "
+            "instructions and memory_session_start"
         )
         return report
 

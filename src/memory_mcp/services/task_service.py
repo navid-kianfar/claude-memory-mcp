@@ -246,8 +246,14 @@ class TaskService:
         path_resolver=None,
         board_mover=None,
         role_roster: Callable[[], frozenset[str] | None] | None = None,
+        staging_fold: Callable[[str, str, Callable[[str], object]], object] | None = None,
     ):
         self._task_repo = task_repo
+        # `(project, task_id, add_comment)`: folds the task's staging notes into
+        # one comment and removes them (StagingService.fold). Injected so the
+        # task store never imports the memory side; absent, a close does what
+        # it always did.
+        self._staging_fold = staging_fold
         # The roles a task may be routed to, read at write time so an agent
         # installed mid-session is accepted at once. Injected for tests; the
         # default is enforcement.known_roles. None from it means "no team".
@@ -813,6 +819,10 @@ class TaskService:
                 self._record_route(request.project, request.task_id, routing)
             return before, [], routing
 
+        # update(state='done') is the other way to finish a task, so it folds
+        # the staging notes exactly as done() does - before the state is written.
+        if request.state == TaskState.DONE and before.state != TaskState.DONE:
+            self._fold_staging(request.project, request.task_id)
         task = self._task_repo.update(request.project, request.task_id, fields)
         if routing is not None:
             self._record_route(request.project, request.task_id, routing)
@@ -1513,6 +1523,21 @@ class TaskService:
                 note = (entry.details or {}).get("time_recovered")
         return note
 
+    def _fold_staging(self, project: str, task_id: str) -> None:
+        """Fold the task's working notes into it before it closes.
+
+        Runs BEFORE the state is written: a fold that fails leaves the task
+        open with its notes intact, instead of done with its notes stranded.
+        """
+        if self._staging_fold is None:
+            return
+        self._staging_fold(
+            project, task_id,
+            lambda body: self.comment(
+                project, task_id, body, kind=TaskCommentKind.NOTE.value,
+            ),
+        )
+
     def _stop_running(self, project: str, task_id: str) -> list[TaskTimeEntry]:
         """Close EVERY open entry, so a task can never be left clocking.
 
@@ -1530,6 +1555,8 @@ class TaskService:
         """Close a task. `session_id` is the memory session closing it - what an
         estimate for a never-started task is split by."""
         task = self._require(project, task_id)
+        if task.state != TaskState.DONE:
+            self._fold_staging(project, task_id)
         closed = self._stop_running(project, task_id)
         # Closing a task that was never clocked used to succeed in silence, and
         # the card went to Done reading zero minutes. Recover or estimate the

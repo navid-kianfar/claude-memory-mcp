@@ -57,6 +57,12 @@ You have no transcript; you have a brief. Before anything else:
   half-day is the work most easily lost. When you stop before the task is done, for any reason,
   set `state="paused"` with a `**Stopped at**` comment: the next agent resumes from the task
   alone.
+- **Working state goes to staging, never to a file.** Your plan, progress, intermediate findings
+  and what is left go to `memory_stage(title, content, task_id=<your task>, project=...)`, not to
+  a new progress, plan or notes `.md` file, and never to `CLAUDE.md`. `memory_task_done` folds
+  the durable notes into the task as one comment and removes them; stage `durable=False` for
+  scratch that should simply go. `memory_staging_list(task_id)` reads them back. Checkpoints
+  that the next agent must see still go on the task as comments.
 - Evidence goes on the task: `memory_task_attach(task_id, path)` — the screenshot, the log, the
   diff. A result that exists only in your output is invisible to everyone else.
 - **Stop the clock when you stop working, every time.** `memory_task_done(task_id, note=...)` when

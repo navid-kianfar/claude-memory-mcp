@@ -66,6 +66,12 @@ if d.get("tool_name") == "apply_patch" and isinstance(patch, str):
 args = []
 for path in paths or [""]:
     args += ["--data-urlencode", "file_path=" + path]
+# Which of them do not exist yet. Only this script can tell - it runs where the
+# file is - and the markdown nudge fires on a NEW progress/plan/notes file.
+for path in paths:
+    probe = path if os.path.isabs(path) or not cwd else os.path.join(cwd, path)
+    if not os.path.exists(probe):
+        args += ["--data-urlencode", "new_file=" + path]
 print("FILE_ARGS=(" + " ".join(shlex.quote(a) for a in args) + ")")
 ' 2>/dev/null)"
 [ -z "$CWD" ] && exit 0
@@ -114,8 +120,29 @@ if d.get('allow', True):
 print(d.get('reason') or 'No task is in progress for this project.')
 " 2>/dev/null)
 
-# Nothing printed means the decision was allow (or we could not read it).
-[ -z "$REASON" ] && exit 0
+# An allow may carry a NUDGE: the write parks working state in a .md file or
+# CLAUDE.md, and the daemon points at memory_stage instead. Context only - it
+# never blocks. The envelope is the one every harness here accepts (Claude
+# Code: PreToolUse additionalContext since CLI 2.1.9; ZCode validates exactly
+# these keys and drops anything else; the dsh bridge speaks Claude's format),
+# so nothing but these two keys may be added. A deny already carries the nudge
+# inside its reason, so this runs on allow only.
+if [ -z "$REASON" ]; then
+  printf '%s' "$ANSWER" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+nudge = d.get("nudge") if isinstance(d, dict) else None
+if isinstance(nudge, str) and nudge.strip():
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "additionalContext": nudge.strip(),
+    }}))
+' 2>/dev/null
+  exit 0
+fi
 
 # Exit 2 is the blocking status: the tool call does not run and stderr is fed
 # back to the model, which is why the reason has to name the tool to call next.

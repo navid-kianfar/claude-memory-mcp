@@ -726,6 +726,35 @@ def _sync_import(params, body, query):
     return {"status": "ok", **result}
 
 
+def _register_worktree(params, body, query):
+    """The CLI inside a linked worktree reports which branch it has checked out.
+
+    The daemon cannot run git in a TCC-protected folder, so this is how it
+    learns where a session's task changes come from (task 463f7785).
+    """
+    slug = params["slug"]
+    container.project_service.get(slug)
+    result = container.sync_service.register_worktree(
+        slug, body.get("path"), body.get("branch"),
+    )
+    return {"status": "ok", **result}
+
+
+def _branch_marks(params, body, query):
+    """Tasks whose state was set on a still-unmerged worktree branch."""
+    slug = params["slug"]
+    container.project_service.get(slug)
+    return container.sync_service.branch_marks(slug)
+
+
+def _branches_merged(params, body, query):
+    """The main checkout's CLI reports branches git sees as merged; unmark them."""
+    slug = params["slug"]
+    container.project_service.get(slug)
+    result = container.sync_service.clear_merged_branches(slug, body.get("branches"))
+    return {"status": "ok", **result}
+
+
 
 def _repair(params, body, query):
     """Probe this project's database for stale key indexes and rebuild them.
@@ -892,8 +921,13 @@ def _attachment_inbox(params, body, query):
     """
     slug = params["slug"]
     container.project_service.get(slug)
-    limit = int(query.get("limit") or 50)
-    offset = int(query.get("offset") or 0)
+    from memory_mcp.exceptions import ValidationError
+
+    try:
+        limit = int(query.get("limit") or 50)
+        offset = int(query.get("offset") or 0)
+    except ValueError:
+        raise ValidationError("'limit' and 'offset' must be whole numbers.") from None
     return container.attachment_inbox_service.inbox(slug, limit=limit, offset=offset)
 
 
@@ -1606,6 +1640,12 @@ def build_routes() -> list:
         Route("/api/projects/{slug}/import-claude-md", _api(_import_claude_md), methods=["POST"]),
         Route("/api/projects/{slug}/sync-export", _api(_sync_export), methods=["GET"]),
         Route("/api/projects/{slug}/sync-import", _api(_sync_import), methods=["POST"]),
+        Route("/api/projects/{slug}/worktrees", _api(_register_worktree), methods=["POST"]),
+        Route("/api/projects/{slug}/branch-marks", _api(_branch_marks), methods=["GET"]),
+        Route(
+            "/api/projects/{slug}/branch-marks/merged",
+            _api(_branches_merged), methods=["POST"],
+        ),
         Route("/api/projects/{slug}/repair", _api(_repair, admin=True), methods=["POST"]),
         Route("/api/projects/{slug}/link-folder", _api(_link_folder), methods=["POST"]),
         Route("/api/projects/{slug}/bind", _api(_bind_backend), methods=["POST"]),

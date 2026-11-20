@@ -80,6 +80,18 @@ def fake_daemon(container, monkeypatch):
                 tombstones=payload.get("tombstones"),
             )
             return {"status": "ok", **result}
+        if path.endswith("/branch-marks/merged"):
+            slug = path.split("/")[3]
+            return {"status": "ok", **container.sync_service.clear_merged_branches(
+                slug, payload["branches"],
+            )}
+        if path.endswith("/branch-marks"):
+            return container.sync_service.branch_marks(path.split("/")[3])
+        if path.endswith("/worktrees"):
+            slug = path.split("/")[3]
+            return {"status": "ok", **container.sync_service.register_worktree(
+                slug, payload["path"], payload["branch"],
+            )}
         raise AssertionError(f"unexpected daemon call: {method} {path}")
 
     monkeypatch.setattr(sync_cli, "_daemon", _daemon)
@@ -649,6 +661,9 @@ class TestSchemaVersionRefusal:
         def _no_import(path, method="GET", payload=None):
             if path == "/api/hook/claim":
                 return {"action": "existing", "slug": slug}
+            if path.endswith("/branch-marks"):
+                # A read about tasks, not an import - it runs regardless.
+                return {"branches": []}
             raise AssertionError(f"nothing should have been imported: {path}")
 
         monkeypatch.setattr(sync_cli, "_daemon", _no_import)

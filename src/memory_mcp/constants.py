@@ -60,8 +60,11 @@ MERGE_DRIVER_NAME = "agent-memory-snapshot"
 LEGACY_MERGE_DRIVER_NAME = "claude-memory-snapshot"
 GITATTRIBUTES_NAME = ".gitattributes"
 
-# Categories carried by the snapshot; `session` is device-local and excluded.
-SYNC_CATEGORIES = [c.value for c in MemoryCategory if c.value != "session"]
+# Categories carried by the snapshot. `session` is device-local; `staging` is
+# working state that leaves with its task, and committing it would churn the
+# binary snapshot on every note.
+_UNSYNCED_CATEGORIES = frozenset({MemoryCategory.SESSION, MemoryCategory.STAGING})
+SYNC_CATEGORIES = [c.value for c in MemoryCategory if c not in _UNSYNCED_CATEGORIES]
 
 # asoode's hosted service - the right answer for ~90% of installs, so these are
 # defaults rather than required configuration. An on-premise site overrides them

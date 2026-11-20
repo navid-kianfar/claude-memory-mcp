@@ -49,6 +49,11 @@ class HarnessCapabilities:
     #: A PreToolUse-equivalent exists whose exit status can refuse a tool call
     #: (the require-task gate). True only where the harness documents it.
     edit_gate: bool = False
+    #: The gate's PreToolUse answer can add context beside an Edit/Write, so a
+    #: write that parks working state in a .md file or CLAUDE.md gets a nudge
+    #: toward memory_stage. Where False, the staging guidance rides the MCP
+    #: instructions and memory_session_start only.
+    markdown_nudge: bool = False
 
 
 @dataclass

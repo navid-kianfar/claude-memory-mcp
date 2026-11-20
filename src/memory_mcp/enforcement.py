@@ -1539,6 +1539,16 @@ _WRITING_STYLE_LINE = (
     "(\"Hello everyone\", not \"Hello friends\"), or none."
 )
 
+#: Product-level, same reach (2026-11-20, user decision on task 5e632888):
+#: sessions kept progress and plans in .md files and CLAUDE.md, invisible to
+#: the board and outliving the work. Staging memories are their home.
+_STAGING_LINE = (
+    "WORKING STATE GOES TO STAGING: progress, plans, findings and what is left "
+    "go to memory_stage(title, content, task_id=<your task>), never to a new "
+    "progress/plan/notes .md file or CLAUDE.md. memory_task_done folds them "
+    "into the task; a note with no task expires after 7 days."
+)
+
 
 def format_rules_block(
     slug: str,
@@ -1564,13 +1574,15 @@ def format_rules_block(
         # line and the task-text and writing-style lines - all product-level.
         return "\n".join(
             x for x in (
-                _TASK_TEXT_LINE, _WRITING_STYLE_LINE, asoode, team, update_line(),
+                _TASK_TEXT_LINE, _WRITING_STYLE_LINE, _STAGING_LINE, asoode, team,
+                update_line(),
             ) if x
         )
     lines = [
         f"[Memory MCP] Binding rules for project '{slug}' — follow every one of these:",
         _TASK_TEXT_LINE,
         _WRITING_STYLE_LINE,
+        _STAGING_LINE,
     ]
     if mandatory:
         lines.append("MANDATORY (must always do):")
@@ -1736,3 +1748,89 @@ def rules_digest(slug: str) -> dict | None:
         "mandatory": [m.title for m in rules.mandatory_rules],
         "forbidden": [m.title for m in rules.forbidden_rules],
     }
+
+
+# ---------- the .md nudge (PreToolUse, context only) ----------
+#
+# User decision (2026-11-20, task 5e632888): a write that looks like working
+# state being parked in a markdown file gets a NUDGE toward memory_stage - text
+# beside the tool call, never a deny and never an ask. The gate hook carries
+# it, so every harness with a PreToolUse surface gets it with no new script.
+#
+# What triggers it: any edit to CLAUDE.md (or CLAUDE.local.md), and a NEW .md
+# file whose name reads as progress, a plan or notes. Never under docs/, and
+# never README/CHANGELOG-type files, which are documentation by convention.
+
+#: Instruction files whose every edit is nudged: project knowledge lives in the
+#: memory MCP (forbidden rule "Never write project knowledge into CLAUDE.md").
+_INSTRUCTION_FILE_NAMES = frozenset({"claude.md", "claude.local.md"})
+#: Documentation by convention, never nudged even when new.
+_DOC_FILE_STEMS = frozenset({
+    "readme", "changelog", "changes", "history", "news", "contributing",
+    "license", "licence", "notice", "authors", "code_of_conduct", "security",
+    "support", "governance", "upgrading", "migration",
+})
+#: A directory segment that marks documentation.
+_DOCS_SEGMENT = "docs"
+#: Name words that read as working state. Matched as whole words of the file
+#: stem, so `planner.md` or `annotations.md` do not trigger.
+_WORKING_STATE_WORDS = frozenset({
+    "progress", "plan", "plans", "planning", "notes", "note", "todo", "todos",
+    "status", "scratch", "scratchpad", "findings", "handoff", "handover",
+    "worklog", "wip", "journal", "checklist", "nextsteps", "summary",
+})
+_MARKDOWN_SUFFIX = ".md"
+_STEM_WORD_RE = re.compile(r"[a-z]+")
+
+
+def _stem_words(stem: str) -> frozenset[str]:
+    """The words of a file stem: split on case changes and non-letters."""
+    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", stem).lower()
+    return frozenset(_STEM_WORD_RE.findall(spaced))
+
+
+def _is_under_docs(path: PurePosixPath) -> bool:
+    return any(part.lower() == _DOCS_SEGMENT for part in path.parent.parts)
+
+
+def markdown_nudge_reason(file_path: str, is_new: bool) -> str | None:
+    """Why this write should go to staging instead, or None when it is fine."""
+    if not file_path:
+        return None
+    path = PurePosixPath(file_path.replace("\\", "/"))
+    name = path.name.lower()
+    if name in _INSTRUCTION_FILE_NAMES:
+        return f"{path.name} is an instruction file"
+    if path.suffix.lower() != _MARKDOWN_SUFFIX or not is_new:
+        return None
+    if _is_under_docs(path) or path.stem.lower() in _DOC_FILE_STEMS:
+        return None
+    if not _stem_words(path.stem) & _WORKING_STATE_WORDS:
+        return None
+    return f"{path.name} reads as a new progress, plan or notes file"
+
+
+def markdown_nudge(
+    paths: "tuple[str, ...] | list[str]", new_paths: "frozenset[str] | set[str]",
+) -> str | None:
+    """The context line for a write that parks working state in markdown.
+
+    `new_paths` are the paths the hook found not to exist yet. Returns None
+    when no path qualifies, so the gate's answer stays as it was.
+    """
+    hits = tuple(
+        (path, reason) for path in paths
+        if (reason := markdown_nudge_reason(path, path in new_paths))
+    )
+    if not hits:
+        return None
+    path, reason = hits[0]
+    return (
+        f"[Memory MCP] {reason} ({path}). Working state - progress, plans, "
+        "findings, what is left - belongs in memory_stage(title, content, "
+        "task_id=<the task you are on>, project=...), not in a markdown file "
+        "or CLAUDE.md. A staged note folds into its task at memory_task_done; "
+        "one without a task expires after 7 days. Decisions that outlive the "
+        "task go to memory_store. If this file really is documentation the "
+        "user asked for, carry on."
+    )

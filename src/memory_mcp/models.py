@@ -24,6 +24,11 @@ class MemoryCategory(str, Enum):
     DEVELOPER_DOCS = "developer_docs"
     FEEDBACK = "feedback"
     REFERENCE = "reference"
+    # Short-lived working state - progress, plan, findings - for work in
+    # flight. Tied to a task through metadata.task_id and folded into that
+    # task when it is done; without a task it expires after a week. Kept out
+    # of search, listing and the git snapshot unless asked for.
+    STAGING = "staging"
 
 
 class TaskState(str, Enum):
@@ -75,6 +80,13 @@ class TaskCommentKind(str, Enum):
 
 
 RULE_CATEGORIES = {MemoryCategory.MANDATORY_RULES, MemoryCategory.FORBIDDEN_RULES}
+
+# How long a staging memory with no task lives. One tied to a task lives until
+# the task is done instead (user decision, 2026-11-20).
+STAGING_TTL_DAYS = 7
+# The metadata keys a staging memory carries.
+STAGING_TASK_KEY = "task_id"
+STAGING_DURABLE_KEY = "durable"
 
 # Reserved project holding org-wide rules (server mode). Its approved rules are
 # injected into every project's rule block. The "__" prefix guarantees it can
@@ -230,6 +242,10 @@ class Task(BaseModel):
     updated_at: datetime | None = None
     done_at: datetime | None = None
     archived_at: datetime | None = None
+    # The unmerged worktree branch this task's state was last set on. None means
+    # the main checkout set it, or the branch has since been merged: only then
+    # is a `done` here plainly done. See SyncService.stamp_task_branch.
+    branch: str | None = None
 
 
 class TaskComment(BaseModel):
@@ -383,6 +399,9 @@ class SearchRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=100)
     min_similarity: float = Field(default=0.3, ge=0.0, le=1.0)
     token_budget: int | None = Field(default=None, ge=1)
+    # Staging notes are working state, not knowledge: left out unless asked
+    # for here, or unless `category` names staging.
+    include_staging: bool = False
 
 
 class MemoryFilter(BaseModel):
@@ -391,6 +410,8 @@ class MemoryFilter(BaseModel):
     tags: list[str] | None = None
     # False (default) hides un-adapted imports, True shows only those, None both.
     pending: bool | None = False
+    # Staging notes are hidden unless asked for, or unless `category` is staging.
+    include_staging: bool = False
 
 
 class Pagination(BaseModel):

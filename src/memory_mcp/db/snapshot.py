@@ -33,13 +33,24 @@ would dominate the file size.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import time
+import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 import duckdb
 
+try:  # POSIX only. Without it the export lock is a no-op, as it was before.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
+from memory_mcp.config import settings
 from memory_mcp.constants import (
     SNAPSHOT_BLOCK_SIZE,
     SNAPSHOT_DB_NAME,
@@ -53,8 +64,21 @@ __all__ = [
     "write_snapshot",
     "read_snapshot",
     "merge_snapshots",
+    "snapshot_lock",
+    "review_is_empty",
     "SNAPSHOT_DB_NAME",
 ]
+
+#: Where the snapshot write locks live: under the data dir, one file per
+#: snapshot folder, so the repository never sees a lock file. A lock file
+#: cannot be deleted after use (another process may be waiting on its inode),
+#: so it must live somewhere it can stay.
+_LOCK_DIRNAME = "locks"
+
+#: How long a writer waits for another process's export before giving up. An
+#: export takes well under a second; this only bounds a stuck holder.
+_LOCK_WAIT_SECONDS = 15.0
+_LOCK_POLL_SECONDS = 0.05
 
 
 class SnapshotError(RuntimeError):
@@ -77,6 +101,15 @@ _MEMORY_COLUMNS = (
     "status", "priority", "source", "related_ids", "entities",
     "expires_at", "created_at", "updated_at",
     "created_by", "approval_status", "approved_by", "approved_at",
+)
+
+# The columns a merge review compares. A row whose only difference is a
+# timestamp or its `source` is the same memory as far as anyone reading it is
+# concerned; these are the fields SyncService.apply_snapshot also compares.
+_COMPARED_COLUMNS = (
+    "category", "title", "content", "summary", "status", "priority", "tags",
+    "metadata", "related_ids", "entities", "approval_status", "created_by",
+    "approved_by", "approved_at",
 )
 
 # Fields stored as JSON text rather than a DuckDB LIST/STRUCT (see module docs).
@@ -253,6 +286,56 @@ def _sql_path(path: Path | str) -> str:
     return str(path).replace("'", "''")
 
 
+def _private_tmp(target: Path, suffix: str) -> Path:
+    """A build path beside `target` that no other process will pick.
+
+    It used to be one fixed name per target, and `_fresh_db` unlinks whatever
+    sits at its path first - so two exports at once (several worktrees ending a
+    turn together) deleted each other's half-built database mid-write. The pid
+    and a random token make every writer's file its own; the `.tmp` ending
+    keeps it matched by the snapshot folder's .gitignore.
+    """
+    token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    return target.parent / f".{target.name}.{token}{suffix}"
+
+
+@contextmanager
+def snapshot_lock(snapshot_dir: Path | str) -> Iterator[None]:
+    """Hold the snapshot folder's write lock across processes.
+
+    Separate tmp files stop two writers corrupting each other; this stops them
+    interleaving, so an export that read the store first cannot replace a
+    snapshot written from a newer read. Waits up to _LOCK_WAIT_SECONDS, then
+    raises SnapshotError rather than hang a hook.
+    """
+    folder = Path(snapshot_dir).resolve()
+    if fcntl is None:  # pragma: no cover - Windows
+        yield
+        return
+    lock_dir = settings.data_dir / _LOCK_DIRNAME
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(str(folder).encode()).hexdigest()[:24]
+    lock_path = lock_dir / f"snapshot-{digest}.lock"
+    with lock_path.open("a") as handle:
+        deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise SnapshotError(
+                        f"another process has been writing the snapshot in "
+                        f"{folder} for over {int(_LOCK_WAIT_SECONDS)}s; nothing "
+                        f"was written"
+                    ) from None
+                time.sleep(_LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def _discard(path: Path) -> None:
     """Remove a half-built database and the write-ahead log beside it."""
     path.unlink(missing_ok=True)
@@ -293,7 +376,7 @@ def write_snapshot(
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.tmp"
+    tmp = _private_tmp(path, ".tmp")
 
     memories: list[dict] = []
     for category, items in (categories or {}).items():
@@ -355,9 +438,8 @@ def write_snapshot(
         conn.execute("CHECKPOINT s")
     except Exception:
         # Take the half-built file with us. Leaving it behind is not just
-        # untidy: `.memory.duckdb.tmp` beside a good snapshot is a database
-        # nothing owns, and the next export would have to decide whether it is
-        # a crash or a concurrent writer.
+        # untidy: a `.memory.duckdb.<pid>-<token>.tmp` beside a good snapshot
+        # is a database nothing owns.
         conn.close()
         _discard(tmp)
         raise
@@ -490,8 +572,18 @@ def merge_snapshots(
     ours: Path | str,
     theirs: Path | str,
     output: Path | str,
+    on_review: Callable[[dict], None] | None = None,
 ) -> dict:
     """Reconcile two snapshot databases with SQL. Returns a summary.
+
+    THE MERGE IS NOT THE DECISION. `output` gets the lossless union below,
+    because git needs a result and "take one side" loses memories. What the
+    union would change on OUR side is also returned as `summary["review"]`
+    (see `_review`), and `on_review` is called with it BEFORE `output` is
+    replaced: a caller that cannot store the review raises, and the merge then
+    fails as a conflict instead of landing unreviewed. The merging session
+    decides from that review what main's memory takes (user decision,
+    2026-11-20); the import holds those changes back until it has.
 
     THE POLICY, and why each half of it is what it is:
 
@@ -515,7 +607,7 @@ def merge_snapshots(
     human instead of guessing.
     """
     ours, theirs, output = Path(ours), Path(theirs), Path(output)
-    tmp = output.parent / f".{output.name}.merge.tmp"
+    tmp = _private_tmp(output, ".merge.tmp")
 
     conn = _fresh_db(tmp)
     try:
@@ -609,7 +701,11 @@ def merge_snapshots(
             ),
             "merged_at": datetime.now().isoformat(timespec="seconds"),
         })
+        review = _review(conn)
+        review["project_id"] = pid_o or pid_t
+        review["slug"] = meta_o.get("slug") or meta_t.get("slug")
         summary = {
+            "review": review,
             "memories": int(
                 conn.execute("SELECT count(*) FROM s.memories").fetchone()[0]
             ),
@@ -631,9 +727,102 @@ def merge_snapshots(
     else:
         conn.close()
 
+    if on_review is not None:
+        try:
+            on_review(review)
+        except Exception:
+            _discard(tmp)
+            raise
     os.replace(tmp, output)
     Path(str(tmp) + ".wal").unlink(missing_ok=True)
     return summary
+
+
+def _qualified(alias: str) -> str:
+    return ",".join(f"{alias}.{col}" for col in _MEMORY_COLUMNS)
+
+
+def _differs_sql() -> str:
+    return " OR ".join(f"o.{col} IS DISTINCT FROM t.{col}" for col in _COMPARED_COLUMNS)
+
+
+# Theirs wins the union exactly when the window in merge_snapshots ranks it
+# first: newer updated_at, or a timestamp where ours has none. A tie is ours.
+_THEIRS_WINS_SQL = (
+    "(t.updated_at > o.updated_at "
+    "OR (o.updated_at IS NULL AND t.updated_at IS NOT NULL))"
+)
+
+
+def _review(conn: duckdb.DuckDBPyConnection) -> dict:
+    """What the merge in `s` changes on OUR side, read from `o`, `t` and `s`.
+
+    - `added`: rows only theirs has, which survived into the union - including
+      a re-add strictly newer than our tombstone.
+    - `changed`: rows both have that differ, where theirs is newer and won.
+    - `removed`: theirs' tombstones we did not have, still standing in the
+      union, each with our row when we had one.
+    - `kept_ours`: rows both have that differ, where ours won. Nothing changes
+      on our side, but theirs' edit is not in the union, and the person
+      merging should know that rather than find out later.
+
+    Rows are the dicts `read_snapshot` returns, so they can be posted to the
+    daemon's sync-import unchanged once the session applies them.
+    """
+    width = len(_MEMORY_COLUMNS)
+    added = conn.execute(f"""
+        SELECT {_qualified('t')} FROM t.memories t
+        WHERE NOT EXISTS (SELECT 1 FROM o.memories o WHERE o.id = t.id)
+          AND EXISTS (SELECT 1 FROM s.memories m WHERE m.id = t.id)
+        ORDER BY t.id
+    """).fetchall()
+    pairs = conn.execute(f"""
+        SELECT {_qualified('o')}, {_qualified('t')}, {_THEIRS_WINS_SQL} AS theirs_won
+        FROM o.memories o JOIN t.memories t ON o.id = t.id
+        WHERE {_differs_sql()}
+        ORDER BY o.id
+    """).fetchall()
+    removed = conn.execute(f"""
+        SELECT t.memory_id, t.category, t.title, t.deleted_at, t.actor, {_qualified('o')}
+        FROM t.tombstones t
+        LEFT JOIN o.memories o ON o.id = t.memory_id
+        WHERE NOT EXISTS (
+                SELECT 1 FROM o.tombstones ot
+                WHERE ot.memory_id = t.memory_id
+                  AND ot.deleted_at IS NOT DISTINCT FROM t.deleted_at
+              )
+          AND EXISTS (SELECT 1 FROM s.tombstones st WHERE st.memory_id = t.memory_id)
+        ORDER BY t.memory_id
+    """).fetchall()
+
+    changed: list[dict] = []
+    kept_ours: list[dict] = []
+    for row in pairs:
+        entry = {
+            "ours": _memory_dict(row[:width]),
+            "theirs": _memory_dict(row[width:2 * width]),
+        }
+        (changed if row[2 * width] else kept_ours).append(entry)
+    return {
+        "added": [_memory_dict(row) for row in added],
+        "changed": changed,
+        "removed": [
+            {
+                "tombstone": {
+                    "memory_id": row[0], "category": row[1], "title": row[2],
+                    "deleted_at": _from_dt(row[3]), "actor": row[4],
+                },
+                "ours": _memory_dict(row[5:]) if row[5] is not None else None,
+            }
+            for row in removed
+        ],
+        "kept_ours": kept_ours,
+    }
+
+
+def review_is_empty(review: dict) -> bool:
+    """True when a merge changed nothing on our side and dropped no edit."""
+    return not any(review.get(key) for key in ("added", "changed", "removed", "kept_ours"))
 
 
 def _rowcount(result) -> int:
